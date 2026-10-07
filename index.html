@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>回放电台 · 24 小时直播回放</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+/* 切换板块是整页重载（数据源换了，时间轴必须整个重建）。重载会有一小段
+   「骨架态」——页面框架在、内容是空的，和切换前的画面一对比就是一次突变。
+   所以在文档**最早的时机**铺上目标板块的底色把它盖住：旧页面先过渡到这个色，
+   重载期间同色延续，新内容就绪后再淡入。用户看到的是「颜色过渡 + 停留」，不是闪一下。
+   这一小段必须内联：等 style.css / app.js 到位就太晚了。 */
+window.__BOOT_T0 = Date.now();
+/* 主题必须在最早时机定好：浅色用户若等到 app.js 再切，
+   会先看到一帧深色页面再跳过去（开屏闪一下）。这里读一次本地选择直接写在 html 上。
+   默认深色（黑红），只有显式存过 light 才走浅色。 */
+(function () {
+  try {
+    if (localStorage.getItem('xl_theme') === 'light') {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+  } catch (e) { /* 隐私模式读不到 localStorage，就按深色走 */ }
+})();
+(function () {
+  /* 加载动画的硬兜底：万一 app.js 报错、或清单一直不来，也不能让页面永久蒙着。
+     正常路径由 app.js 的 hideBootVeil() 在数据渲染完后撤掉。 */
+  setTimeout(function () {
+    var b = document.getElementById('boot-veil');
+    if (!b || b.classList.contains('gone')) return;
+    b.classList.add('gone');
+    setTimeout(function () { if (b.parentNode) b.parentNode.removeChild(b); }, 420);
+  }, 8000);
+  try {
+    var v = sessionStorage.getItem('xl_veil');
+    if (!v) return;
+    var d = JSON.parse(v) || {};
+    // 过期的标记一律作废：这只该在一次「切板块」里生效。万一上回没走到收尾
+    // （脚本报错之类）留了残留，也不能让下一次打开页面还蒙着遮罩。
+    if (!d.at || Date.now() - d.at > 10000) {
+      sessionStorage.removeItem('xl_veil');
+      return;
+    }
+    document.documentElement.classList.add('switching');
+    if (d.bg) document.documentElement.style.setProperty('--bg', d.bg);
+    /* 硬兜底：正常路径由 app.js 在内容就绪后撤掉遮罩。
+       万一某条路径没走到那儿（脚本报错、数据一直不来），
+       也不能让整个页面永久藏着 —— 到点无条件放出来。 */
+    setTimeout(function () {
+      document.documentElement.classList.remove('switching');
+    }, 6000);
+  } catch (e) { /* 隐私模式下拿不到 sessionStorage，就当没这回事 */ }
+})();
+</script>
+<style>
+  /* 盖住重载空窗：html 铺底色，内容先不显示（用 opacity 以便淡入而不是硬切）。
+     排除 #boot-veil —— 父级 opacity 会把它一起带走，那样切板块时只剩一块纯色。 */
+  html.switching { background: var(--bg, #08080a); }
+  html.switching body > *:not(#boot-veil) { opacity: 0; }
+  body > *:not(#boot-veil) { transition: opacity .18s ease-out; }
+
+  /* 首屏加载动画。必须内联：等 style.css / app.js 到位就太晚了，
+     那时用户已经先看到了空列表，再出现动画等于没有动画。 */
+  #boot-veil {
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 22px;
+    background: var(--bg, #08080a);
+    color: var(--text, #e9e9ee); user-select: none;
+    font: 400 14px/1.7 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    transition: opacity .4s ease-out, visibility .4s;
+  }
+  #boot-veil.gone { opacity: 0; visibility: hidden; pointer-events: none; }
+
+  /* 中间那颗「直播中」的红点 + 两圈错开的扩散波 */
+  .bv-pulse { position: relative; width: 78px; height: 78px; display: grid; place-items: center; }
+  .bv-dot {
+    width: 15px; height: 15px; border-radius: 50%;
+    background: var(--red, #ff3b4e);
+    box-shadow: 0 0 24px color-mix(in srgb, var(--red, #ff3b4e) 55%, transparent);
+    animation: bvBeat 1.5s ease-in-out infinite;
+  }
+  .bv-ring {
+    position: absolute; inset: 0; border-radius: 50%; opacity: 0;
+    border: 1.5px solid var(--red, #ff3b4e);
+    animation: bvRing 2.6s ease-out infinite;
+  }
+  .bv-ring + .bv-ring { animation-delay: 1.3s; }
+  @keyframes bvBeat { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.3); } }
+  @keyframes bvRing { 0% { transform: scale(.34); opacity: .5; } 100% { transform: scale(1.1); opacity: 0; } }
+
+  /* 声波柱：节奏错开，看起来像在收声而不是整体呼吸 */
+  .bv-bars { display: flex; align-items: flex-end; gap: 6px; height: 24px; }
+  .bv-bars i {
+    width: 4px; height: 100%; border-radius: 2px; opacity: .8;
+    background: var(--red, #ff3b4e);
+    transform-origin: 50% 100%;
+    animation: bvBar 1.05s ease-in-out infinite;
+  }
+  .bv-bars i:nth-child(2) { animation-duration: .85s;  animation-delay: -.3s; }
+  .bv-bars i:nth-child(3) { animation-duration: 1.25s; animation-delay: -.6s; }
+  .bv-bars i:nth-child(4) { animation-duration: .95s;  animation-delay: -.15s; }
+  .bv-bars i:nth-child(5) { animation-duration: 1.15s; animation-delay: -.45s; }
+  @keyframes bvBar { 0%, 100% { transform: scaleY(.26); } 50% { transform: scaleY(1); } }
+
+  .bv-text { font-size: 13px; letter-spacing: .18em; opacity: .8; }
+  .bv-brand { margin-top: -10px; font-size: 11px; letter-spacing: .34em; opacity: .36; }
+
+  /* 底部一道来回扫的细线：只表示「还在忙」，不表示具体百分比（首屏没有可信的进度） */
+  .bv-bar {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 2px; overflow: hidden;
+    background: color-mix(in srgb, var(--red, #ff3b4e) 16%, transparent);
+  }
+  .bv-bar::after {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 34%;
+    background: var(--red, #ff3b4e);
+    animation: bvSlide 1.6s ease-in-out infinite;
+  }
+  @keyframes bvSlide { 0% { transform: translateX(-120%); } 100% { transform: translateX(320%); } }
+
+  @media (prefers-reduced-motion: reduce) { #boot-veil * { animation: none !important; } }
+</style>
+</head>
+<body>
+<div id="boot-veil" aria-hidden="true">
+  <div class="bv-pulse">
+    <span class="bv-ring"></span><span class="bv-ring"></span>
+    <span class="bv-dot"></span>
+  </div>
+  <div class="bv-bars"><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="bv-text">正在接通频道</div>
+  <div class="bv-brand">24H RADIO</div>
+  <div class="bv-bar"></div>
+</div>
+
+<!-- 首屏选择页：参考 CRDRAKO PANEL 的「设备卡」布局 ——
+     已添加的主播各自一张卡（点头像进频道），末尾一张加号卡展开添加表单。
+     每次新开页面都先停在这里选人；选完写进本会话标记，刷新不再重复出现。
+     后端此时若是空态，节目类接口一律回空 —— 页面在这里停下等用户操作。 -->
+<div id="onboard" hidden>
+  <div class="ob-head">
+    <div class="ob-brand">24H RADIO</div>
+    <h1 class="ob-title">回放电台</h1>
+    <p class="ob-sub" id="ob-sub">选择要进入的频道，或添加一位新主播。</p>
+  </div>
+
+  <div class="ob-grid" id="ob-grid"></div>
+
+  <div class="ob-card ob-card-form" id="ob-form" hidden>
+    <div class="ob-row">
+      <input id="ob-mid" type="text" inputmode="numeric" autocomplete="off" spellcheck="false"
+             placeholder="主播 UID" aria-label="主播 UID">
+      <button class="btn primary" id="ob-probe" type="button">检测</button>
+    </div>
+    <p class="ob-hint">UID 是个人主页网址里那串数字：<b>space.bilibili.com/1512246445</b></p>
+
+    <div class="ob-result" id="ob-result"></div>
+
+    <div class="ob-src" id="ob-src" hidden>
+      <label class="ob-label" for="ob-series">回放来源</label>
+      <select id="ob-series"></select>
+      <p class="ob-note" id="ob-src-note" hidden></p>
+    </div>
+
+    <button class="btn primary ob-go" id="ob-save" type="button" hidden>就听 TA 的 →</button>
+  </div>
+
+  <p class="ob-foot">
+    <a href="#" id="ob-continue" hidden></a>
+    <span id="ob-foot-note">加更多人、改配色或删掉，随时去<b>设置 → 主播管理</b>。</span>
+  </p>
+</div>
+
+<div class="glow"></div>
+
+<header class="topbar">
+  <div class="tb-left">
+    <span class="tb-brand" id="tb-brand">回放电台</span>
+    <span class="tb-sep">/</span>
+    <span class="tb-cur" id="tb-cur">回放电台</span>
+  </div>
+  <nav class="tb-tabs">
+    <!-- 激活标签的那颗红色胶囊：不属于任何标签，而是在标签之间滑过去 -->
+    <i class="tb-pill" id="tb-pill" aria-hidden="true"></i>
+    <a class="tab" data-view="live" href="#/live">24 小时频道</a>
+    <a class="tab" data-view="broadcast" href="#/broadcast">直播间</a>
+    <a class="tab" data-view="schedule" href="#/schedule">节目单</a>
+    <a class="tab" data-view="categories" href="#/categories">分类</a>
+    <a class="tab" data-view="multi" href="#/multi">监控室</a>
+    <a class="tab" data-view="dynamic" href="#/dynamic">动态</a>
+    <a class="tab" data-view="weibo" href="#/weibo">微博</a>
+    <a class="tab" data-view="about" href="#/about">关于</a>
+    <a class="tab" data-view="settings" href="#/settings">设置</a>
+  </nav>
+  <div class="tb-right">
+    <!-- 四色灯：点亮谁就看谁，可以同时点亮多位（混合播放几人的内容）。
+         主站默认点亮，不允许全部熄灭。 -->
+    <div class="station-lamps" id="station-lamps" role="group"
+         title="点亮谁就看谁的内容，可同时点亮多位（混合播放）"></div>
+    <a class="ghost-btn" id="tb-space" href="#" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16v12H4z"/><path d="M8 3l4 3 4-3"/></svg>
+      <span class="gbtxt" id="gbtxt">主播B站空间</span>
+    </a>
+    <button class="ghost-btn" id="theme-toggle" type="button"
+            title="切换深色 / 浅色" aria-label="切换深色 / 浅色">
+      <svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+      <svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.4v2M12 19.6v2M2.4 12h2M19.6 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg>
+    </button>
+    <label class="ghost-btn lang-wrap">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>
+      <select id="lang" title="界面语言">
+        <option value="zh-Hans">简体中文</option>
+        <option value="zh-Hant">繁體中文</option>
+      </select>
+    </label>
+  </div>
+</header>
+
+<main class="wrap">
+  <aside class="strip strip-left" id="strip-left">
+    <div class="strip-h">本场分段<span id="strip-left-sub"></span></div>
+    <div class="strip-body" id="strip-left-body"></div>
+  </aside>
+
+  <div class="views">
+
+    <section class="view active" id="view-live">
+      <div class="eyebrow">—— 24 小时频道</div>
+      <h1 class="title" id="live-title">回放电台</h1>
+      <p class="sub" id="live-sub">这里收录了 TA 全部的直播回放。随时打开都在直播中，自动排期、自动去重，不重复。</p>
+
+      <div class="actions">
+        <button class="btn primary" data-action="unmute">进入直播</button>
+        <button class="btn ghost" id="btn-random">随机一场</button>
+        <button class="btn ghost" data-action="resync">回到直播</button>
+      </div>
+
+      <!-- 分段数据状态 + 手动更新入口。放在列表上方而不是页脚：
+           分段覆盖率与「上次更新」是判断数据新不新的依据，得一眼看到。 -->
+      <div class="data-bar">
+        <div class="data-row">
+          <div class="data-info">
+            <div class="data-main" id="seg-cov">分段数据载入中…</div>
+            <div class="data-sub" id="seg-when"></div>
+          </div>
+          <button class="btn primary data-btn" id="btn-seg-refresh" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M21 4v5.5h-5.5"/></svg>
+            <span id="seg-btn-text">更新数据</span>
+          </button>
+        </div>
+        <!-- 识别进度：只在真的在跑的时候出现，数据全部来自分析循环的实时上报 -->
+        <div class="data-progress" id="seg-prog" hidden>
+          <div class="dp-track"><div class="dp-fill" id="seg-prog-fill"></div></div>
+          <div class="dp-text" id="seg-prog-text"></div>
+        </div>
+      </div>
+
+      <div class="filters">
+        <div class="chips" id="chips"></div>
+        <label class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input id="q" placeholder="搜索标题 / 日期">
+        </label>
+      </div>
+
+      <div class="net-alert" id="net-alert" hidden></div>
+      <div class="net-alert" id="station-empty" hidden></div>
+      <div class="mixed-note" id="mixed-note" hidden></div>
+
+      <div class="list-head">
+        <div>
+          <span class="stat" id="stat">—</span>
+          <span class="sorts">
+            <button class="sort active" data-sort="date">最新</button>
+            <button class="sort" data-sort="score">高能</button>
+          </span>
+        </div>
+        <div class="pager">
+          <button id="prev" aria-label="上一页">‹</button>
+          <span id="page-info">1 / 1</span>
+          <button id="next" aria-label="下一页">›</button>
+        </div>
+      </div>
+
+      <table class="list">
+        <thead>
+          <tr>
+            <th class="col-title">节目</th>
+            <th class="col-cat">类型</th>
+            <th class="col-dur">时长</th>
+            <th class="col-dm">弹幕</th>
+            <th class="col-act">播放</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="5" class="empty">正在载入节目单…</td></tr>
+        </tbody>
+      </table>
+
+      <div class="stat" id="meta-line" style="margin-top:18px"></div>
+    </section>
+
+    <section class="view" id="view-multi">
+      <div class="eyebrow">—— 监控室</div>
+      <h1 class="title">同时看多路直播</h1>
+      <p class="sub">每格一位主播，点格子右上角可以放大；声音一次只开一路（点 🔊 独奏），
+        免得几路混在一起。未开播的格子会显示封面与状态。</p>
+      <div class="multi-bar">
+        <button class="btn small ghost" id="multi-refresh" type="button">刷新开播状态</button>
+        <label class="multi-qn">画质
+          <select id="multi-qn">
+            <option value="min" selected>省流量（最低档）</option>
+            <option value="80">720P</option>
+            <option value="250">超清</option>
+            <option value="10000">原画</option>
+          </select>
+        </label>
+        <span class="multi-note" id="multi-note"></span>
+      </div>
+      <div class="multi-grid" id="multi-grid"></div>
+    </section>
+
+    <section class="view" id="view-broadcast">
+      <div class="eyebrow">—— 直播间</div>
+      <div class="live-card live-status-card">
+        <div class="live-card-h">直播状态</div>
+        <div class="live-info" id="live-info">正在获取开播状态…</div>
+      </div>
+
+      <div class="live-card live-chat-card">
+        <div class="live-card-h">实时弹幕<span class="live-wheel-note" id="live-chat-state"></span></div>
+        <div class="live-chat" id="live-chat">
+          <div class="chat-line chat-sys">连接弹幕服务器…</div>
+        </div>
+      </div>
+
+      <div class="live-card" id="live-send-card">
+        <div class="live-card-h">发弹幕
+          <button class="btn small ghost live-wheel-btn" id="wheel-toggle" type="button">独轮车</button>
+        </div>
+        <p class="live-note" id="live-cred-state">正在检查登录状态…</p>
+        <div class="live-cred" id="live-cred-box" hidden>
+          <input id="live-jct" type="password" autocomplete="off"
+                 placeholder="粘贴 bili_jct（扫码登录会自动带上）">
+          <button class="btn small primary" id="live-jct-save">保存</button>
+        </div>
+        <div class="live-send">
+          <input id="live-msg" maxlength="30" placeholder="发条弹幕吧（最多 30 字）">
+          <button class="btn small primary" id="live-send">发送</button>
+          <button class="btn small ghost" id="live-msg-save" type="button"
+                  title="把输入框里的内容存为常用">＋</button>
+        </div>
+        <!-- 常用弹幕：点一下直接发出去，不用再打字。编辑模式下点标签即删除。 -->
+        <div class="quick-row" id="quick-row" hidden>
+          <span class="quick-label" id="quick-label">常用</span>
+          <div class="quick-chips" id="quick-chips"></div>
+          <button class="quick-edit" id="quick-edit" type="button" hidden>编辑</button>
+        </div>
+        <div class="live-result" id="live-result"></div>
+      </div>
+
+      <div class="live-wheel-pop" id="wheel-pop" hidden>
+        <div class="live-card">
+          <div class="live-card-h">独轮车
+            <button class="btn small ghost live-wheel-btn" id="wheel-close" type="button">收起</button>
+          </div>
+          <p class="live-note">循环发送同一条弹幕。刷屏有被 B 站限流或封禁弹幕权限的风险，
+            请节制；连续 3 次发送失败会自动停止。</p>
+          <p class="live-note wheel-motto" id="wheel-motto"></p>
+          <div class="live-send">
+            <input id="wheel-msg" maxlength="30" placeholder="要循环发送的弹幕">
+          </div>
+          <div class="live-wheel-opts">
+            <label>间隔 <input id="wheel-interval" type="number" min="1" max="60" step="0.5" value="3"> 秒</label>
+            <label>条数 <input id="wheel-count" type="number" min="1" max="200" value="20"> 条</label>
+          </div>
+          <div class="qp-btns">
+            <button class="btn small primary" id="wheel-start">开始</button>
+            <button class="btn small ghost" id="wheel-stop" hidden>停止</button>
+          </div>
+          <div class="live-result" id="wheel-state"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-schedule">
+      <div class="eyebrow">—— 节目单</div>
+      <h1 class="title sm">接下来播什么</h1>
+      <p class="sub">频道按固定时间轴循环。同一场在 111.7 小时内只出现一次，所以任意 24 小时内不会有重复。</p>
+
+      <div class="actions">
+        <button class="chip" data-horizon="86400">24 小时</button>
+        <button class="chip" data-horizon="259200">72 小时</button>
+        <button class="chip" data-horizon="0">整个循环</button>
+      </div>
+
+      <div class="list-head"><span class="stat" id="sch-stat">—</span></div>
+
+      <table class="list">
+        <thead>
+          <tr>
+            <th class="col-time">开始</th>
+            <th class="col-title">节目</th>
+            <th class="col-cat">类型</th>
+            <th class="col-dur">时长</th>
+            <th class="col-act">播放</th>
+          </tr>
+        </thead>
+        <tbody id="sch-rows"></tbody>
+      </table>
+    </section>
+
+    <section class="view" id="view-dynamic">
+      <div class="eyebrow">—— 动态</div>
+      <h1 class="title sm" id="dyn-title">动态</h1>
+      <p class="sub" id="dyn-sub">这里显示当前板块主播在 B 站发布的最新动态。</p>
+
+      <div class="wb-note" id="dyn-note" hidden></div>
+
+      <div class="wb-list" id="dyn-list"></div>
+
+      <div class="wb-foot" id="dyn-foot" hidden></div>
+    </section>
+
+    <section class="view" id="view-weibo">
+      <div class="eyebrow">—— 微博</div>
+      <h1 class="title sm" id="wb-title">微博</h1>
+      <p class="sub" id="wb-sub">这里显示当前板块主播的微博。</p>
+
+      <div class="wb-note" id="wb-note" hidden></div>
+
+      <div class="wb-profile" id="wb-profile" hidden></div>
+
+      <div class="wb-list" id="wb-list"></div>
+
+      <details class="wb-paste" id="wb-paste">
+        <summary>也可以手动粘贴微博 Cookie</summary>
+        <p class="wb-tip">
+          在浏览器里登录微博后，按 F12 → Network → 随便点一个请求 → 找到
+          <b>Cookie</b> 那一行，整行复制粘贴到这里即可。Cookie 只存在你本机。
+        </p>
+        <textarea id="wb-cookie" rows="3" placeholder="SUB=…; SUBP=…; SSOLoginState=…"></textarea>
+        <div class="qp-btns">
+          <button class="btn small primary" id="wb-cookie-save" type="button">保存并使用</button>
+          <button class="btn small ghost" id="wb-cookie-clear" type="button">清除</button>
+        </div>
+        <div class="live-result" id="wb-cookie-state"></div>
+      </details>
+
+      <div class="wb-foot" id="wb-foot" hidden></div>
+    </section>
+
+    <section class="view" id="view-categories">
+      <div class="eyebrow">—— 分类</div>
+      <h1 class="title sm">按类型浏览</h1>
+      <p class="sub">分类同时决定排期池：在「24 小时频道」里取消某一类后，时间轴只会在剩下的类型里循环。</p>
+
+      <div class="cat-cards" id="cat-cards"></div>
+
+      <div class="list-head"><span class="stat" id="cat-stat">—</span></div>
+
+      <table class="list">
+        <thead>
+          <tr>
+            <th class="col-title">节目</th>
+            <th class="col-cat">类型</th>
+            <th class="col-dur">时长</th>
+            <th class="col-dm">弹幕</th>
+            <th class="col-act">播放</th>
+          </tr>
+        </thead>
+        <tbody id="cat-rows"></tbody>
+      </table>
+    </section>
+
+    <section class="view" id="view-about">
+      <div class="eyebrow">—— 关于</div>
+      <h1 class="title sm">关于这个频道</h1>
+      <div class="about-grid" id="about-body"></div>
+    </section>
+
+    <section class="view" id="view-settings">
+      <div class="eyebrow">—— 设置</div>
+      <h1 class="title sm">设置</h1>
+      <p class="sub">快捷键<b>默认全部留空</b>，需要你自己按一遍来绑定。绑定后在任何页面都生效；
+        只存在本机浏览器里，不上传。</p>
+
+      <div class="live-card">
+        <div class="live-card-h">外观</div>
+        <label class="seg-auto">
+          <input type="checkbox" id="theme-light"> 浅色模式（不勾就是默认的黑红配色）
+        </label>
+        <p class="live-note">浅色下主色会压深一档，主播各自的板块色也按亮度压深，
+          免得小字在白底上发飘。选择只记在本机浏览器里。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">快捷键
+          <button class="btn small ghost live-wheel-btn" id="keys-reset" type="button">全部清除</button>
+        </div>
+        <div class="key-list" id="keys-list"></div>
+        <p class="live-note" id="keys-tip">点右侧按键格，然后按下你想用的组合键（Esc 取消）。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">自动分段
+          <button class="btn small ghost live-wheel-btn" id="seg-run" type="button">给最新一期分段</button>
+        </div>
+        <label class="seg-auto">
+          <input type="checkbox" id="seg-auto"> 出现新回放时自动分段
+        </label>
+        <p class="live-note">分段＝把回放里「在唱」的片段切出来，靠下载音频 + ffmpeg 分析得到，
+          每场几分钟到十几分钟。开启后只对新出现的回放生效，不会回头补历史缺口。</p>
+        <div class="live-result" id="seg-note"></div>
+        <div class="live-result" id="seg-state"></div>
+      </div>
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">回放清单（自动获取）
+          <button class="btn small ghost live-wheel-btn" id="series-refresh" type="button">重新获取</button>
+        </div>
+        <p class="live-note">回放清单按<b>主播主页 → 合集和系列 → 系列·直播回放</b>自动获取，
+          只需要 UID —— 换成别的主播也一样。拿不到时点「重新获取」，或等它自己重试；
+          也可以在这里<b>手动指定</b>某位主播用哪个系列（见下面「主播管理」）。</p>
+        <div class="live-result" id="series-state"></div>
+      </div>
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">主播管理</div>
+        <p class="live-note">填 B 站<b>空间号</b>（个人主页网址
+          <code>space.bilibili.com/&lt;数字&gt;</code> 里那串数字），点「检测」自动查出
+          主播名、直播间号与可选的回放系列。加进来的人会出现在顶栏那排色灯里 ——
+          <b>不用再手工改 data/stations.json</b>。</p>
+        <div class="live-send">
+          <input id="st-mid" inputmode="numeric" autocomplete="off" placeholder="主播 UID">
+          <button class="btn small primary" id="st-probe" type="button">检测</button>
+        </div>
+        <label class="seg-auto" id="st-source-box" hidden>回放来源
+          <select id="st-source"></select>
+        </label>
+        <p class="live-note" id="st-source-note" hidden></p>
+        <label class="seg-auto" id="st-color-box" hidden>板块颜色
+          <span class="st-color-wrap">
+            <input type="color" id="st-accent" value="#8a8a95" aria-label="板块颜色">
+            <button class="btn small ghost" id="st-accent-auto" type="button">按头像取色</button>
+          </span>
+        </label>
+        <p class="live-note" id="st-accent-note" hidden></p>
+        <div class="qp-btns">
+          <button class="btn small primary" id="st-save" type="button" hidden>保存</button>
+        </div>
+        <div class="live-result" id="st-state"></div>
+        <div class="key-list" id="st-list"></div>
+      </div>
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">从浏览器一键启动</div>
+        <p class="live-note">把下面那条链接<b>拖到书签栏</b>，以后点书签就能进电台 ——
+          <b>程序没在运行时会自动把它启动起来</b>（所以这块的注册项别取消）。</p>
+        <label class="seg-auto">
+          <input type="checkbox" id="proto-direct">
+          直连模式（点击零提示，<b>但不能启动程序</b>：程序没跑时点它会打不开）
+        </label>
+        <p class="live-note" id="proto-hint"></p>
+        <p class="proto-row">
+          <a class="proto-link" id="proto-link" href="#" draggable="true">▶ 打开回放电台</a>
+        </p>
+        <div class="qp-btns" id="proto-regbtns">
+          <button class="btn small primary" id="proto-reg" type="button">注册 / 修复</button>
+          <button class="btn small ghost" id="proto-unreg" type="button">取消注册</button>
+        </div>
+        <div class="live-result" id="proto-state"></div>
+
+        <p class="live-note" style="margin-top:16px">想要「一点就进、<b>全程没有任何提示</b>」：
+          <b>创建桌面快捷方式</b>最直接 —— 双击它就会启动程序并打开网页（程序已经在跑时
+          就直接把页面打开）。它不经过浏览器，所以不存在任何确认框。</p>
+        <div class="qp-btns">
+          <button class="btn small primary" id="shortcut-create" type="button">创建桌面快捷方式</button>
+        </div>
+        <div class="live-result" id="shortcut-state"></div>
+      </div>
+    </section>
+
+  </div>
+
+  <aside class="col-right">
+    <div class="player-box" id="player-box">
+      <video id="player" playsinline preload="metadata"></video>
+
+      <div class="pv-top">
+        <div class="pv-title" id="pv-title">—</div>
+        <div class="pv-topbtns">
+          <button class="pv-btn" id="btn-chapters">分段</button>
+          <button class="pv-btn" id="btn-mark">标注</button>
+          <button class="pv-btn" id="btn-quality">画质</button>
+          <button class="pv-btn" id="btn-login"><span id="login-label">登录</span></button>
+        </div>
+      </div>
+
+      <div class="pv-ctrl" id="pv-ctrl">
+        <div class="pv-progress" id="ctrl-progress" title="点击跳转">
+          <div class="pv-buffer" id="ctrl-buffer"></div>
+          <div class="pv-filled" id="ctrl-filled"></div>
+          <div class="pv-dot" id="ctrl-dot"></div>
+        </div>
+        <div class="pv-bar">
+          <button class="pv-ic" id="ctrl-play" title="播放 / 暂停">
+            <svg class="i-play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4l13 8-13 8z"/></svg>
+            <svg class="i-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4h3.5v16H7zM13.5 4H17v16h-3.5z"/></svg>
+          </button>
+          <span class="pv-time"><span id="ctrl-cur">0:00</span><em>/</em><span id="ctrl-dur">0:00</span></span>
+          <div class="pv-volwrap">
+            <button class="pv-ic" id="ctrl-mute" title="静音">
+              <svg class="i-vol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 3.5v-13L8 9H4z"/><path d="M16 9.5a3.5 3.5 0 010 5M18.5 7a7 7 0 010 10"/></svg>
+              <svg class="i-mute" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 3.5v-13L8 9H4z"/><path d="M16 10l4 4M20 10l-4 4"/></svg>
+            </button>
+            <input type="range" id="ctrl-vol" class="pv-vol" min="0" max="1" step="0.05" value="1" title="音量">
+          </div>
+          <div class="pv-grow"></div>
+          <select class="pv-sel" id="quality" title="清晰度"><option value="80">清晰度…</option></select>
+          <button class="pv-ic pv-txt" id="btn-theater" title="网页全屏">宽屏</button>
+          <button class="pv-ic" id="ctrl-fs" title="全屏">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 011-1h4M15 4h4a1 1 0 011 1v4M20 15v4a1 1 0 01-1 1h-4M9 20H5a1 1 0 01-1-1v-4"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="login-panel" id="login-panel" hidden>
+        <div class="login-qr" id="login-qr"></div>
+        <div class="login-status" id="login-status">正在获取二维码…</div>
+        <div class="qp-btns">
+          <button class="btn small ghost" id="btn-logout" hidden>退出登录</button>
+          <button class="btn small ghost" id="btn-login-close">收起</button>
+        </div>
+      </div>
+
+      <div class="mute-hint" id="mute-hint">静音播放中 · 点「进入直播」开启声音</div>
+      <div class="offline-banner" id="offline-banner" hidden></div>
+    </div>
+
+    <div class="quality-panel" id="quality-panel" hidden>
+      <div class="qp-h">画质与 1080P</div>
+      <p>回放台用的是<b>自己的播放器</b>，清晰度由播放器右上角的<b>清晰度下拉框</b>直接切换，
+        不会跳去 B 站页面。视频流由本机服务代取，所以能在页面内直接播放。</p>
+      <p><b>未登录最高 480P</b>（接口虽列出 1080P 档位，但未登录时只实际下发 360P/480P）。
+        要 1080P 需要登录：点播放器右上角「<b>登录</b>」，
+        用 B 站 App 扫码即可，<b>整个过程都在本页完成</b>，不会离开回放台。</p>
+      <p>登录信息只保存在本机 <code>tools/sessdata.txt</code>，只发给 B 站自己的接口，
+        不经任何第三方。<b>本站不收集、不上传你的账号信息。</b></p>
+      <div class="qp-btns">
+        <button class="btn small primary" id="btn-login-2">扫码登录 B 站</button>
+        <button class="btn small ghost" id="btn-reload-player">重新加载当前片段</button>
+        <button class="btn small ghost" id="btn-qp-close">收起</button>
+      </div>
+    </div>
+
+    <div class="mark-panel" id="mark-panel" hidden>
+      <div class="qp-h">标注片段</div>
+      <p>分段由 <code>tools/auto_segments.py</code> 自动检测。这里<b>直接改</b>不准的地方：
+        列表就是当前分P 的每一段 —— <b>起 / 止</b> 把边界设成当前播放位置，
+        <b>拆</b> 在当前位置切成两段，<b>并</b> 与下一段合并，<b>删</b> 去掉多余段。
+        要新增一段：播到开头按 <code>M</code>，到结尾再按 <code>M</code>。
+        改完点「保存到服务端」即可写入 <code>segments.js</code>（不用再手工搬运 JSON）。</p>
+      <div class="mp-cur" id="mark-cur">—</div>
+      <ol class="mp-list" id="mark-list"><li class="mp-empty">还没有分段</li></ol>
+      <div class="qp-btns">
+        <button class="btn small ghost" id="btn-mark-undo">撤销上一个点</button>
+        <button class="btn small ghost" id="btn-mark-clear">清空本分P</button>
+        <button class="btn small primary" id="btn-mark-save">已保存</button>
+      </div>
+      <div class="mp-hint" id="mark-hint"></div>
+      <textarea class="mp-json" id="mark-json" readonly rows="4" spellcheck="false"></textarea>
+    </div>
+
+    <div class="chapters-panel" id="chapters-panel" hidden>
+      <div class="qp-h">本场分段<span id="chapters-sub"></span></div>
+      <div class="chap-list" id="chap-list"></div>
+    </div>
+
+    <div class="np">
+      <div class="np-top">
+        <span class="badge" id="np-live">直播中</span>
+        <span class="np-cat" id="np-cat">—</span>
+      </div>
+      <div class="np-title" id="np-title">正在载入…</div>
+      <div class="np-meta" id="np-meta">—</div>
+      <div class="bar"><i id="np-bar"></i></div>
+      <div class="np-times"><span id="np-pos">--:--</span><span id="np-dur">--:--</span></div>
+      <div class="np-btns">
+        <button class="btn small primary" data-action="unmute">进入直播</button>
+        <button class="btn small ghost" data-action="resync">回到直播</button>
+        <button class="btn small ghost" id="btn-mutedef">默认静音：开</button>
+        <button class="btn small ghost" id="btn-skip">跳过空白：关</button>
+      </div>
+    </div>
+
+    <div class="next">
+      <div class="next-h">接下来</div>
+      <ol id="next-list"><li>—</li></ol>
+    </div>
+
+    <div class="credits">
+      非官方粉丝站，内容版权归 UP 主
+      <a id="cr-name" href="#" target="_blank" rel="noopener">尚未添加主播</a>
+      所有，视频流由本站播放器经 B 站接口代理播放（页内不含弹幕轨道）。<br>
+      数据来源：<a id="cr-src" href="#" target="_blank" rel="noopener">直播回放系列</a>
+      <br><button id="btn-quit" type="button" style="margin-top:10px;background:none;border:0;padding:0;color:inherit;opacity:.5;font:inherit;text-decoration:underline;cursor:pointer">停止本地服务</button>
+    </div>
+  </aside>
+
+  <aside class="strip strip-right" id="strip-right">
+    <div class="strip-h">接下来</div>
+    <div class="strip-body" id="strip-right-body"></div>
+  </aside>
+</main>
+
+<!-- 主播状态：右下角悬浮按钮，点击展开面板。
+     默认收起，避免遮挡视频；有新内容时按钮显示红点提示。 -->
+<div class="status-dock" id="status-dock">
+  <button class="status-fab" id="status-fab" type="button"
+          aria-expanded="false" aria-controls="status-panel" title="主播状态">
+    <span class="status-fab-dot" id="status-fab-dot" hidden></span>
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path d="M12 3a4 4 0 0 1 4 4v4.2l1.6 2.4a1 1 0 0 1-.83 1.55H7.23a1 1 0 0 1-.83-1.55L8 11.2V7a4 4 0 0 1 4-4Z"
+            fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+      <path d="M10 18.2a2.2 2.2 0 0 0 4 0" fill="none" stroke="currentColor"
+            stroke-width="1.7" stroke-linecap="round"/>
+    </svg>
+    <span class="status-fab-text" id="status-fab-text">主播状态</span>
+  </button>
+
+  <div class="status-panel" id="status-panel" hidden>
+    <div class="status-panel-h">
+      <span id="status-panel-title">主播状态</span>
+      <div class="status-panel-tools">
+        <button class="status-mini" id="status-refresh" type="button" title="刷新">刷新</button>
+        <button class="status-mini" id="status-close" type="button" title="收起">收起</button>
+      </div>
+    </div>
+
+    <div class="status-panel-body" id="status-body">
+      <div class="status-loading" id="status-loading">正在获取最新状态…</div>
+    </div>
+
+    <div class="status-panel-f" id="status-foot"></div>
+  </div>
+</div>
+
+<script src="data/segments.js"></script>
+<script src="data/sung.js"></script>
+<script src="data/setlists.js"></script>
+<script src="data/labels.js"></script>
+<script src="assets/qrcode.min.js"></script>
+<script src="assets/dash.all.min.js"></script>
+<script src="assets/mpegts.js"></script>
+<script src="assets/app.js"></script>
+<script>
+// 单文件分发后没有「停止.bat」了，停止入口放在页面上。
+// 服务只绑 127.0.0.1，这个请求只会打到本机服务。
+document.getElementById("btn-quit").addEventListener("click", function () {
+  if (!window.confirm("停止本机服务？\n\n停止后本页将无法继续播放，需要重新双击 EXE 才能再用。")) return;
+  var done = function () {
+    document.body.innerHTML =
+      '<div style="padding:80px 24px;text-align:center;font:16px/2 system-ui,sans-serif">' +
+      '服务已停止，可以关闭此页面了。</div>';
+  };
+  fetch("api/quit").then(done, done);   // 服务一关 fetch 本身就会断，成功失败都当已停止
+});
+</script>
+</body>
+</html>
