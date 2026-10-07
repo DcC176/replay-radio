@@ -115,3 +115,34 @@ v1.6.3 的平行版本：去掉了全部内置主播与品牌元素，首次打�
 - 不内置任何主播：主播注册表 `data/stations.json` 起步为空表，离线快照 `data/programs.js` / `programs.json` 不再随包分发，回放清单一律由本机服务实时抓取。
 - 应用标识全面改名：实例标识 `komichi-radio` → `replay-radio`，数据目录 `%LOCALAPPDATA%\KomichiRadio` → `%LOCALAPPDATA%\ReplayRadio`，自定义协议 `komichi://` → `replayradio://`，打包产物 `回放电台-vX.Y.Z.exe`。
 - 「小路状态」浮标改名「主播状态」；主站的品牌文案（站名、署名、空间链接）不再写死在 HTML 里，全部按当前主播现场生成。
+
+---
+
+## 通用说明
+
+**运行环境**：Windows 64 位。
+
+**怎么用**：下载对应版本的 EXE，双击运行即可，会自动打开浏览器。首次打开先填一位 B 站主播的 UID（空间号），检测通过即进入频道并开始播放。之后想再看，直接访问 `http://127.0.0.1:8765/`，或双击同一个 EXE。只需要这一个文件，不用额外拷贝任何东西。
+
+**怎么关**：在播放页面右下角点「停止本地服务」。
+
+**端口**：若 8765 被占用会自动顺延到 8766、8767…… 实际地址见 `%LOCALAPPDATA%\ReplayRadio\log.txt`。
+
+**升级**：直接替换 EXE 即可，已添加的主播与本机数据会被保留。
+
+**校验**：每个版本的 Release 说明都写明文件字节数；v1.0.4 起同时提供 SHA-256 校验值。
+
+**版权**：非官方粉丝站，内容版权归各位 UP 主所有。视频流由本机服务经 B 站接口代理播放。
+
+---
+
+## 第三方组件
+
+- 随包 FFmpeg 为 GPL v3 构建（configure 含 `--enable-gpl --enable-version3`），
+  以独立可执行文件经子进程调用，不与本程序代码链接；
+  许可全文与源码出处见仓库内 `ffmpeg.LICENSE.txt`。
+- 页面内嵌 mpegts.js 1.7.3（Apache-2.0），见仓库内 `assets/mpegts.LICENSE.txt`。
+- 页面内嵌 dash.js 5.2.1（BSD-3-Clause），见仓库内 `assets/dash.all.min.js.LICENSE.txt`。
+- 页面内嵌 qrcodejs（MIT），见仓库内 `assets/qrcode.LICENSE.txt`。
+- 页面内嵌 opencc-js 1.0.5（MIT，字典数据来自 OpenCC / Apache-2.0），
+  见仓库内 `assets/opencc-cn2t.LICENSE.txt`。
