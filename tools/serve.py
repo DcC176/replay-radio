@@ -50,20 +50,75 @@ FROZEN = bool(getattr(sys, "frozen", False))    # True = 由 PyInstaller 打成�
 WEB_ITEMS = ("index.html", "favicon.ico", "assets", "data")   # 打进 EXE 的网页文件
 
 
-def _read_segments_file(path):
-    """读 segments.js → {cid: [{"start":..,"end":..}, ...]}；没有/解析失败返回 {}。"""
+# data/ 顶层这几份是**用户本机攒出来的**：自动分段写的分段与「第几首」登记时刻，
+# 以及人工读画面整理出来的内容标签 / 整场歌单。包内那份只是发布时的空壳
+# （见 build_exe.py 的 DATA_RESET），升级时直接盖上去等于把用户本机成果抹掉 ——
+# 实测过：升级后「第几首」的登记时刻全没了。所以释放网页文件前先把原文留住。
+USER_DATA_JS = {"segments.js": "SEGMENTS", "sung.js": "SUNGKEYS",
+                "labels.js": "SEGLABELS", "setlists.js": "SETLISTS"}
+
+
+def _read_js_map(path, var):
+    """读 `window.<var> = {...};` → dict；文件不在 / 解析失败返回 {}。
+
+    先剥掉 /* … */ 注释再匹配：注释里可能就带了一份同样的赋值（踩过）。
+    """
     try:
         with open(path, encoding="utf-8") as f:
             txt = f.read()
     except OSError:
         return {}
-    m = re.search(r"window\.SEGMENTS\s*=\s*(\{.*\})\s*;", txt, re.S)
+    txt = re.sub(r"/\*.*?\*/", "", txt, flags=re.S)
+    m = re.search(r"window\.%s\s*=\s*(\{.*\})\s*;" % var, txt, re.S)
     if not m:
         return {}
     try:
         return json.loads(m.group(1))
     except Exception:
         return {}
+
+
+def _read_segments_file(path):
+    """读 segments.js → {cid: [{"start":..,"end":..}, ...]}；没有/解析失败返回 {}。"""
+    return _read_js_map(path, "SEGMENTS")
+
+
+def _slurp_user_js(dst):
+    """把 data/ 顶层那几份「用户攒出来的」js 原文读出来。
+
+    newline="" 保住原换行：写回去时要和原来逐字节一致（升级不该顺手改用户的文件）。
+    """
+    out = {}
+    for name in USER_DATA_JS:
+        try:
+            with open(os.path.join(dst, "data", name),
+                      encoding="utf-8", newline="") as f:
+                out[name] = f.read()
+        except OSError:
+            pass
+    return out
+
+
+def _restore_user_js(dst, old):
+    """释放完网页文件后把用户那份放回去。
+
+    只在**包内那份解析出来没有键**（发布时的空壳）时整份还原 —— 这样连文件格式都
+    保持原样，不用把用户的数据重排一遍。包内本身带内容时交给合并逻辑处理。
+    """
+    kept = []
+    for name, txt in (old or {}).items():
+        if not (txt or "").strip():
+            continue
+        path = os.path.join(dst, "data", name)
+        if _read_js_map(path, USER_DATA_JS[name]):
+            continue
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(txt)
+            kept.append(name)
+        except OSError:
+            pass
+    return kept
 
 
 def _merge_segments_file(path, old):
@@ -205,8 +260,10 @@ def unpack_web(appdir):
         if want and want == have and os.path.exists(os.path.join(dst, "index.html")):
             return dst
         os.makedirs(dst, exist_ok=True)
-        # 重新释放前先留住用户机上算出来的分段：内置的那份只是发布时的快照，
-        # 覆盖会把「新回放自动分段」的成果抹回旧快照（实测过）。
+        # 重新释放前先留住用户机上攒出来的数据：内置的那几份只是发布时的空壳/快照，
+        # 覆盖会把「新回放自动分段」的成果、人工标注、以及主播表全抹掉（实测过）。
+        # 四份 js（分段 / 登记时刻 / 内容标签 / 整场歌单）见 USER_DATA_JS。
+        old_js = _slurp_user_js(dst)
         old_seg = _read_segments_file(os.path.join(dst, "data", "segments.js"))
         old_st = _read_json_file(os.path.join(dst, "data", "stations.json"))
         old_sc = _read_json_file(os.path.join(dst, "data", "series_cache.json"))
@@ -217,11 +274,16 @@ def unpack_web(appdir):
                 shutil.copytree(s, d, dirs_exist_ok=True)   # 覆盖式，不先删目录
             elif os.path.exists(s):
                 shutil.copy2(s, d)
+        # 用户那份放回去（包内是空壳时整份还原，格式都不动）
+        kept = _restore_user_js(dst, old_js)
+        # 包内那份本身带内容（快照版）才需要逐键合并：把用户独有的分P 合回去
         if old_seg:
             _merge_segments_file(os.path.join(dst, "data", "segments.js"), old_seg)
         # 用户自定义的主播 / 已发现的回放系列同样不能被覆盖掉
         _merge_stations_file(os.path.join(dst, "data", "stations.json"), old_st)
         _merge_series_cache_file(os.path.join(dst, "data", "series_cache.json"), old_sc)
+        if kept:
+            print("[www] 保住了本机攒下的数据：%s" % "、".join(sorted(kept)))
         with open(os.path.join(dst, "www_version.txt"), "w", encoding="utf-8") as f:
             f.write(want)
         return dst
@@ -390,9 +452,10 @@ def _series_cache_write(d):
 
 
 def discover_series(mid):
-    """列出一个 UP 的「合集和系列」，挑出直播回放那个系列。
+    """列出一个 UP 的「合集和系列」，挑出直播回放那个来源。
 
-    返回 {series_id, name, total, kind, candidates}；一个系列都没有时抛异常。
+    返回 {series_id, name, total, kind, candidates}；一个都没有时抛异常。
+    kind 是 "series"（系列）或 "season"（合集）—— 取归档的接口不一样，必须带上。
     """
     mid = str(mid or "").strip()
     if not mid:
@@ -417,9 +480,10 @@ def discover_series(mid):
                           "total": int(meta.get("total") or it.get("total") or 0),
                           "kind": kind})
     if not cands:
-        raise RuntimeError("这位主播的「合集和系列」里还没有系列")
-    # 站上默认就叫「直播回放」；没有同名的就取条数最多的那个（最像回放合集）
-    replay = [c for c in cands if "回放" in c["name"]]
+        raise RuntimeError("这位主播的「合集和系列」里还没有内容")
+    # 站上默认就叫「直播回放」，也有叫「录播」的；都没有就取条数最多的那个（最像回放合集）。
+    # 系列与合集都算候选 —— 两种都能抓（见 fetch_series_archives）。
+    replay = [c for c in cands if ("回放" in c["name"]) or ("录播" in c["name"])]
     pick = max(replay or cands, key=lambda c: c["total"])
     return {"series_id": pick["id"], "name": pick["name"], "total": pick["total"],
             "kind": pick["kind"], "candidates": cands}
@@ -549,16 +613,14 @@ def probe_mid(mid):
     cands, err, suggested = [], "", ""
     try:
         found = discover_series(mid)
-        # 归档只支持「系列」（x/series/archives）；合集要走另一个接口，
-        # 而且 season_id 非法时那个接口会返回与本人无关的固定数据 —— 所以不给用户选。
-        cands = [{"id": c["id"], "name": c["name"], "total": c["total"]}
-                 for c in (found.get("candidates") or []) if c.get("kind") == "series"]
-        if found.get("kind") == "series":
-            suggested = found.get("series_id") or ""
-        elif cands:
-            suggested = max(cands, key=lambda c: c["total"])["id"]
+        # 系列与合集都能当来源（取归档的接口不同，由 fetch_series_archives 按 kind 分派），
+        # 两个都列出来给用户挑。合集名自带「合集·」前缀，一眼能区分。
+        cands = [{"id": c["id"], "name": c["name"], "total": c["total"],
+                  "kind": c["kind"]}
+                 for c in (found.get("candidates") or [])]
+        suggested = found.get("series_id") or ""
         if not cands:
-            err = "这位的「合集和系列」里还没有可用的系列（只有合集不行，需要是「系列」）"
+            err = "这位的「合集和系列」里还没有内容"
     except Exception as e:
         err = str(e)
     return {"mid": mid, "name": str(info.get("uname") or "").strip(),
@@ -674,6 +736,34 @@ def api_stations_delete(obj):
     return 200, {"ok": True, "id": sid, "stations": _stations_payload()}
 
 
+def api_stations_main(obj):
+    """把某位主播设为「主站」（默认板块）。全局唯一。
+
+    主站只决定「没特别指定时用谁」：顶栏品牌名、没有手动选过板块时的兜底那一位。
+    各板块的数据（分段、状态、清单）一律存在各自目录里，换主站不搬动也不串动
+    任何数据 —— 这是 v1.0.9 才做到的事。
+    """
+    sid = str(obj.get("id") or "").strip()
+    if not sid:
+        return 400, {"error": "缺少 id"}
+    doc = _stations_doc_read()
+    items = [s for s in doc["stations"] if isinstance(s, dict)]
+    hit = [s for s in items if str(s.get("id")) == sid]
+    if not hit:
+        return 400, {"error": "没有这位主播"}
+    # 用 identity 比对而不是再比一次 id：真出现重名 id 的脏数据时，
+    # 也只会留下一个 main，不会因为「两边都等于 sid」而全都点亮。
+    for s in items:
+        s["main"] = (s is hit[0])
+    doc["stations"] = items
+    doc["_version"] = STATIONS_VERSION
+    try:
+        _stations_doc_write(doc)
+    except OSError as e:
+        return 500, {"error": "写 data/stations.json 失败：%s" % e}
+    return 200, {"ok": True, "id": sid, "stations": _stations_payload()}
+
+
 def _series_warmup():
     """后台逐个主播发现回放系列（错开间隔，避免触发风控 412）。
 
@@ -688,7 +778,10 @@ def _series_warmup():
                 r = resolve_series(st, allow_network=True)
                 print("[series] %-8s → %s  %s" % (
                     st.get("short") or st.get("id"), r["series_id"] or "(未发现)",
-                    r.get("error") or ("%s / %s 场" % (r.get("name") or "", r.get("total") or 0))))
+                    r.get("error") or ("%s（%s）/ %s 场"
+                                       % (r.get("name") or "",
+                                          "合集" if r.get("kind") == "season" else "系列",
+                                          r.get("total") or 0))))
             except Exception as e:
                 print("[series] %s 失败：%s" % (st.get("id"), e))
             time.sleep(4.0)
@@ -765,31 +858,130 @@ def station_head(st=None):
                        "error": rs.get("error") or ""}}
 
 
+def station_dir_plain(sid):
+    """主播数据目录（纯粹按 id 拼路径，不做任何迁移/推断）。"""
+    return os.path.join(ROOT, "data", "stations", str(sid))
+
+
+# 旧版本把**主站**的数据写在 data/ 顶层（路径由「谁是主站」决定）：分段、状态、
+# 登记时刻、离线清单都在那儿。于是「更换主站」会让新主站读到上一位的分段，
+# 「删除主站」则让继任者继承一份不属于它的数据 —— 和 v1.0.5 修的清单缓存串位
+# 是同一类事故。现在所有主播一律 data/stations/<id>/，main 只剩「默认用谁」这层
+# 产品语义。下面这几个名字就是旧版本写在 data/ 顶层的那批文件。
+_LEGACY_TOP_FILES = ("segments.js", "segments.js.bak", "seg_state.json",
+                     "sung.js", "labels.js", "setlists.js",
+                     "programs.json", "programs.js")
+_MAIN_OWNER_FILE = os.path.join(ROOT, "data", ".main_data_owner")
+
+
+def adopt_legacy_main_data():
+    """把旧版本写在 data/ 顶层的主站数据**一次性**归位到主站自己的目录。
+
+    归属判定：旧版本的 data/ 顶层数据必然属于**当时的主站**，而 stations.json 的
+    main 标记在旧版本里也一直跟着那位走 —— 所以「首次运行新版时的那位主站」就是它。
+
+    归位后落一个标记文件，此后无论怎么增删 / 更换主站都不再推断：否则一位还没有
+    分段数据的新主播（目录里没有 segments.js）会被误塞进上一位的旧数据里。
+
+    凭据**只有**标记文件，不额外记进程内状态 —— 否则「第一次调用时还没有主播」
+    （新装后还没添加）会把「没搬」记成「搬过了」，等用户加好主播时已经晚了，
+    那位的旧分段就永远归不了位。同理，标记被删掉也会重新搬一次：等幂，且
+    逐文件都有「目标已存在就不动」的保护，重复执行不会覆盖已有数据。
+    （两个请求同时挤进来的极端情况也只是同源同内容复制两遍，无害。）
+
+    只复制、不删除源文件 —— 本机删除会被劫持到回收站且 fail-closed，而 data/ 顶层
+    那几份旧文件留着完全无害（新代码不再读它们）。
+    """
+    if os.path.exists(_MAIN_OWNER_FILE):
+        return                      # 已经归位过了
+    st = main_station()
+    if not st:
+        return                      # 还没有主播：这次什么都不做，也不留记录
+    sid = str(st.get("id"))
+    dst = station_dir_plain(sid)
+    moved = []
+    try:
+        os.makedirs(dst, exist_ok=True)
+        pairs = [(os.path.join(ROOT, "data", fn), os.path.join(dst, fn))
+                 for fn in _LEGACY_TOP_FILES]
+        # 分段状态在旧版本里放在程序目录（APPDIR）而不是 data/ 顶层
+        pairs.append((os.path.join(APPDIR, "seg_state.json"),
+                      os.path.join(dst, "seg_state.json")))
+        for s, d in pairs:
+            # 目标已存在就说明这位已有自己的数据（副站向来如此），一律不动它
+            if os.path.exists(s) and not os.path.exists(d) and os.path.getsize(s):
+                shutil.copy2(s, d)
+                moved.append(os.path.basename(d))
+        with open(_MAIN_OWNER_FILE, "w", encoding="utf-8") as f:
+            f.write(sid)
+        if moved:
+            print("[data] 主站 %s 的历史数据已归位到 data/stations/%s/：%s"
+                  % (sid, sid, "、".join(moved)))
+    except OSError as e:
+        # 归位失败不该挡住启动：最坏情况是新主站暂时没有旧分段数据
+        print("[data] 主站历史数据归位失败（不影响使用）：%s" % e)
+
+
 def station_dir(st=None):
-    """数据目录：主站沿用 data/（与历史数据完全兼容），副站放 data/stations/<id>/。"""
+    """数据目录：**一律按主播 id 落盘**（主站也不例外）。
+
+    以前主站沿用 data/ 顶层，是为了兼容页面里写死的 <script src="data/segments.js">。
+    代价是「谁是主站」决定了数据放哪儿 —— 换主站 / 删主站都会串数据。现在所有主播
+    对称，历史遗留数据由 adopt_legacy_main_data() 搬家。
+    """
     st = st or cur_station()
-    if st.get("main"):
-        return os.path.join(ROOT, "data")
-    return os.path.join(ROOT, "data", "stations", str(st.get("id")))
+    adopt_legacy_main_data()
+    return station_dir_plain(st.get("id"))
 
 
 def station_segments_js(key):
-    """按主播取 segments.js 内容；主站返回 None（继续走静态文件，行为不变）。
+    """按主播取 segments.js 内容；**没指定主播**时返回 None（落回静态文件）。
 
-    index.html 里那条 <script src="data/segments.js"> 是写死的，只能拿到主站那份。
-    副站的分段在各自目录（data/stations/<id>/segments.js），前端切换主播后
-    会用 ?station= 再取一次覆盖 window.SEGMENTS —— 不覆盖的话，频道会拿主站的
-    cid 去匹配副站的分P，一个都对不上，等于这位主播没有分段。
+    index.html 里那条 <script src="data/segments.js"> 是写死的，只能拿到包内那份
+    快照（新版是空的）。所以前端对**每一位**点亮的板块（含主站）都用 ?station=
+    各取一次覆盖 window.SEGMENTS —— 拿别人的 cid 去匹配自己的分P，一个都对不上，
+    等于这位主播没有分段。主站以前走静态文件，现在也一视同仁地按目录取。
+
+    指定了主播但查不到这位（比如「在看谁」的多选存在 localStorage 里、主播已经被
+    删掉）：返回**空表**，绝不落回顶层那份 —— 顶层那份要么是空壳，要么是旧版本
+    主站留下的旧数据，落回去就是把别人的分段端给一位已经不存在的主播，
+    正是「主播 ID 与播放内容不符」那类事故。
     """
+    key = str(key or "").strip()
+    if not key:
+        return None                    # 调用方没指定主播 → 落回静态文件
     st = find_station(key)
-    if not st or st.get("main"):
-        return None
+    if not st:
+        return "window.SEGMENTS = {};\n"
+    # newline="" 保留原换行：静态文件那条路径（SimpleHTTPRequestHandler）是按原始
+    # 字节发的，这里若做 CRLF→LF 归一，同一份分段从两条路径取到的字节就不一样。
     try:
-        with open(os.path.join(station_dir(st), "segments.js"), encoding="utf-8") as f:
+        with open(os.path.join(station_dir(st), "segments.js"),
+                  encoding="utf-8", newline="") as f:
             return f.read()
     except OSError:
         return ("/* %s 还没有分段数据（在设置页点「给最新一期分段」开始积累） */\n"
                 "window.SEGMENTS = {};\n" % st.get("id"))
+
+
+def station_sung_js(key):
+    """按主播取 sung.js（「第几首」的登记时刻）；**没指定主播**时返回 None（落回静态文件）。
+
+    与 segments.js 同源同目录。目录里没有、或压根查不到这位，都返回**空表** ——
+    绝不能落回 data/ 顶层那份，否则副站会读到别人的登记时刻，序号全错。
+    """
+    key = str(key or "").strip()
+    if not key:
+        return None                    # 调用方没指定主播 → 落回静态文件
+    st = find_station(key)
+    if not st:
+        return "window.SUNGKEYS = {};\n"
+    try:
+        with open(os.path.join(station_dir(st), "sung.js"),
+                  encoding="utf-8", newline="") as f:
+            return f.read()
+    except OSError:
+        return "window.SUNGKEYS = {};\n"
 
 
 def api_stations():
@@ -809,6 +1001,7 @@ APP_TAG = "replay-radio"   # /api/ping 的应答标识：启动时用它认出�
 # 其余一律回空应答（前端此时正停在引导页上，本来也不会去取节目单）。
 STATIONLESS_OK = (
     "/api/stations", "/api/stations/probe", "/api/stations/save", "/api/stations/delete",
+    "/api/stations/main",
     "/api/ping", "/api/status", "/api/img", "/api/quit",
     "/api/page/alive", "/api/page/bye",
     "/api/protocol/register", "/api/protocol/unregister",
@@ -2108,37 +2301,77 @@ def _collect_mod():
     return mod
 
 
-def fetch_series_archives():
-    """系列内全部投稿（分页拉全），返回 bilibili 原始 archives 列表
+# 回放来源有两种：「系列」和「合集」。两边取归档的接口完全不同 ——
+# 把 season_id 塞进 x/series/archives 会得到 total=0（实测），所以必须按 kind 分开。
+SERIES_ARCHIVES_API = "https://api.bilibili.com/x/series/archives"
+SEASON_ARCHIVES_API = ("https://api.bilibili.com/x/polymer/web-space/"
+                       "seasons_archives_list")
+ARCHIVES_PAGE_SIZE = 30
 
-    系列 ID 由 resolve_series 决定（自动发现 / stations.json 覆盖），不再写死。
+
+def _series_page(mid, sid, pn):
+    url = (SERIES_ARCHIVES_API + "?mid=%s&series_id=%s&only_normal=true&sort=desc"
+           "&pn=%d&ps=%d" % (mid, sid, pn, ARCHIVES_PAGE_SIZE))
+    return bili_get(url, "https://space.bilibili.com/%s/lists/%s?type=series" % (mid, sid))
+
+
+def _season_page(mid, sid, pn):
+    url = (SEASON_ARCHIVES_API + "?mid=%s&season_id=%s&sort_reverse=false"
+           "&page_num=%d&page_size=%d" % (mid, sid, pn, ARCHIVES_PAGE_SIZE))
+    return bili_get(url, "https://space.bilibili.com/%s/lists" % mid)
+
+
+def _fetch_archives(mid, sid, kind):
+    """按来源类型分页拉全。两个接口的条目字段几乎一致（合集只少一个用不到的 upMid），
+    所以下游组装逻辑可以共用一条路。"""
+    fetch = _series_page if kind == "series" else _season_page
+    label = "系列" if kind == "series" else "合集"
+    items = []
+    pn = 1
+    while True:
+        d = fetch(mid, sid, pn)
+        if d.get("code") != 0:
+            raise RuntimeError("%s接口 code=%s %s" % (label, d.get("code"), d.get("message")))
+        data = d.get("data") or {}
+        arcs = data.get("archives") or []
+        items.extend(arcs)
+        # 分页字段名不一样：系列是 num/size/total，合集是 page_num/page_size/total
+        total = int((data.get("page") or {}).get("total") or 0)
+        if not arcs or len(arcs) < ARCHIVES_PAGE_SIZE or (total and len(items) >= total):
+            break
+        pn += 1
+        time.sleep(0.4)          # 翻页间隔，避免风控
+    return items
+
+
+def fetch_series_archives():
+    """回放来源里的全部投稿（分页拉全），返回 bilibili 原始 archives 列表
+
+    来源 ID 与类型由 resolve_series 决定（自动发现 / stations.json 覆盖），不再写死。
+    kind 明确时只试那一种；不确定（比如用户在 stations.json 里手填了 id）时两种都试，
+    谁先返回内容就用谁 —— 手填 id 的人不必知道它到底是系列还是合集。
     """
     _st = cur_station()
     rs = resolve_series(_st, allow_network=True)
     sid = rs["series_id"]
     if not sid:
-        raise RuntimeError("还没定位到「%s」的回放系列%s"
+        raise RuntimeError("还没定位到「%s」的回放来源%s"
                            % (_st.get("name") or _st.get("id"),
                               ("：%s" % rs["error"]) if rs.get("error") else ""))
-    items = []
-    pn = 1
-    while True:
-        url = ("https://api.bilibili.com/x/series/archives?mid=%s&series_id=%s"
-               "&only_normal=true&sort=desc&pn=%d&ps=30" % (_st["mid"], sid, pn))
-        d = bili_get(url, "https://space.bilibili.com/%s/lists/%s?type=series"
-                          % (_st["mid"], sid))
-        if d.get("code") != 0:
-            raise RuntimeError("系列接口 code=%s %s" % (d.get("code"), d.get("message")))
-        data = d.get("data") or {}
-        arcs = data.get("archives") or []
-        items.extend(arcs)
-        page = data.get("page") or {}
-        total = page.get("total") or len(items)
-        if not arcs or len(items) >= total:
-            break
-        pn += 1
-        time.sleep(0.4)          # 翻页间隔，避免风控
-    return items
+    kind = str(rs.get("kind") or "")
+    order = [kind] if kind in ("series", "season") else ["series", "season"]
+    first_err = None
+    for k in order:
+        try:
+            items = _fetch_archives(str(_st["mid"]), sid, k)
+        except Exception as e:
+            first_err = first_err or e
+            continue
+        if items:
+            return items
+    if first_err:
+        raise first_err
+    raise RuntimeError("这个来源里没有任何投稿")
 
 
 def build_programs():
@@ -2267,12 +2500,11 @@ SEG_JOB["stations"] = {}
 def seg_state_file(st=None):
     """分段状态文件（auto / seen_upto / last），每位主播一份。
 
-    合成一份会让「水位线」互相串：主站已经划过的水位线会挡住副站的历史回放，
-    自动分段对副站等于失效。
+    合成一份会让「水位线」互相串：一位已经划过的水位线会挡住另一位的历史回放，
+    自动分段对后者等于失效。主站以前放在程序目录（APPDIR），换主站同样会串，
+    现在也收进各自的数据目录。
     """
     st = st or cur_station()
-    if st.get("main"):
-        return os.path.join(APPDIR, "seg_state.json")   # 主站沿用原文件，历史状态不丢
     return os.path.join(station_dir(st), "seg_state.json")
 
 
@@ -2334,22 +2566,18 @@ def _seg_module():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     # 数据目录必须跟着「当前主播」走：模块里 DATA 是写死的 ROOT/data，
-    # 不覆盖的话副站的分段会被写进主站的 segments.js（跨主播串数据）。
-    # 主站保持原有路径，行为逐字节不变。
+    # 不覆盖的话分段会被写进别人的 segments.js（跨主播串数据）。所有主播一致。
+    #
+    # 中间产物（.segcache 特征 / .segaudio 临时音频 / .segfeat）是按 cid 命名的，
+    # 不含主播语义，多主播共用一个目录也不会串 —— 所以主站继续用程序目录，
+    # 免得升级后这几万个特征文件还要重算一遍。
     st = cur_station()
     mod.ROOT = ROOT                                        # = %LOCALAPPDATA%\ReplayRadio\www
-    if st.get("main"):
-        mod.DATA = os.path.join(ROOT, "data")              # 页面就是从这儿读 segments.js
-        if FROZEN:
-            mod.CACHE = os.path.join(APPDIR, ".segcache")
-            mod.WORK = os.path.join(APPDIR, ".segaudio")
-            mod.FEAT = os.path.join(APPDIR, ".segfeat")
-    else:
-        base = station_dir(st)
-        mod.DATA = base
-        mod.CACHE = os.path.join(base, ".segcache")
-        mod.WORK = os.path.join(base, ".segaudio")
-        mod.FEAT = os.path.join(base, ".segfeat")
+    mod.DATA = station_dir(st)
+    base = APPDIR if (FROZEN and st.get("main")) else station_dir(st)
+    mod.CACHE = os.path.join(base, ".segcache")
+    mod.WORK = os.path.join(base, ".segaudio")
+    mod.FEAT = os.path.join(base, ".segfeat")
     return mod
 
 
@@ -2381,7 +2609,7 @@ def seg_refine_ready():
 
 
 def segments_file():
-    """本机在用的 segments.js 路径（主站沿用 data/，副站各自一个目录）。"""
+    """本机在用的 segments.js 路径（每位主播各自一个目录）。"""
     return os.path.join(station_dir(), "segments.js")
 
 
@@ -3051,16 +3279,39 @@ _PROGRAMS_BUILD_LOCK = threading.Lock()
 
 
 def programs_cache_file(st=None):
-    return os.path.join(station_dir(st), "programs_cache.json")
+    """清单缓存的落盘位置 —— **永远按主播各存一份**（主站也不例外）。
+
+    以前主站沿用 station_dir()（也就是 data/ 顶层那份 programs_cache.json），
+    而那个路径是「谁当主站就写谁」。于是第一位主播留下的清单会被后来换上来的
+    主播读到：界面上写着新主播的名字、播的却全是上一位的内容。
+    （实测：新加「芋泥咕咕茶」后播出来的是上一位的 65 条。）
+    改成按 id 落盘后，两位主播的缓存彻底不共享。
+    """
+    st = st or cur_station()
+    return os.path.join(ROOT, "data", "stations", str(st.get("id")), "programs_cache.json")
+
+
+def _programs_owner(d):
+    """缓存里记着这份清单属于谁（mid）。用来做归属校验。"""
+    meta = d.get("meta") or {}
+    st = meta.get("station") or {}
+    return str(st.get("mid") or meta.get("mid") or "")
 
 
 def _read_programs_disk(st):
     try:
         with open(programs_cache_file(st), encoding="utf-8") as f:
             d = json.load(f)
-        return d if isinstance(d, dict) and d.get("programs") else None
     except Exception:
         return None
+    if not (isinstance(d, dict) and d.get("programs")):
+        return None
+    # 归属校验：只认「本来就是这位主播」的那份。旧版主站缓存写在 data/ 顶层，
+    # 是跨主播共用的文件；万一还读到这类文件，宁可现抓一次，也不能拿别人的清单冒充。
+    owner = _programs_owner(d)
+    if owner and owner != str(st.get("mid") or ""):
+        return None
+    return d
 
 
 def _write_programs_disk(st, data):
@@ -3394,9 +3645,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_weibo_login_poll())
         if parsed.path == "/api/series":
             return self._json(*api_series_status())
-        if parsed.path == "/data/segments.js":
-            # 带 station 时按主播给；不带（或主站）落回静态文件
-            _txt = station_segments_js(q.get("station", [""])[0])
+        if parsed.path in ("/data/segments.js", "/data/sung.js"):
+            # 带 station 时按主播给；不带则落回静态文件（首屏引导等场景）。
+            # 两者同源同目录：分段和「第几首」的登记时刻必须来自同一位主播。
+            _txt = (station_segments_js if parsed.path.endswith("segments.js")
+                    else station_sung_js)(q.get("station", [""])[0])
             if _txt is not None:
                 _body = _txt.encode("utf-8")
                 self.send_response(200)
@@ -3459,6 +3712,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_stations_save(obj))
         if parsed.path == "/api/stations/delete":
             return self._json(*api_stations_delete(obj))
+        if parsed.path == "/api/stations/main":
+            return self._json(*api_stations_main(obj))
         if parsed.path == "/api/live/credential":
             return self._json(*api_live_credential(obj))
         if parsed.path == "/api/segments/auto":

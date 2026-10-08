@@ -73,5 +73,11 @@ data/stations/*/programs_cache.json
 .DS_Store
 Thumbs.db
 
+# 「data/ 顶层旧数据归位给哪位主播」的标记（tools/serve.py 的 adopt_legacy_main_data）。
+# 本机专属的运行时状态，而且**绝不能进分发包**：包里只要出现它，用户机 unpack 之后
+# 会以为早就搬过家，真主站的历史分段就永远归不了位。（build_exe.py 另有排除。）
+data/.main_data_owner
+data/.main_data_owner.*
+
 # 测试产生的注册表备份（内容 = 改动前的 stations.json）
 data/stations.json.bak_*

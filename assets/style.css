@@ -1972,12 +1972,45 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 点名字就地改显示名：给一点「可以点」的暗示（下划虚线 + 手型） */
+.st-name { cursor: pointer; border-bottom: 1px dashed transparent; }
+.st-name:hover { border-bottom-color: var(--muted-2); }
+/* 改名时那一行要让输入框伸出来，别被省略号裁掉 */
+.st-row-name-editing { overflow: visible; white-space: normal; }
+.st-rename-input {
+  width: 150px; max-width: 56vw; padding: 3px 8px;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel-2); color: var(--text);
+  font: inherit; font-size: 13px; outline: none;
+}
+.st-rename-input:focus { border-color: var(--red); }
+.st-rename-ok, .st-rename-no { padding: 2px 9px; margin-left: 6px; font-size: 12px; }
 .st-row-meta {
   margin-top: 2px;
   font-size: 11px;
   color: var(--muted-2);
   overflow-wrap: anywhere;      /* 长数字串得能断行，不能把容器撑破 */
 }
+
+/* 行尾动作按钮组：设为主站（☆）+ 删除（×）。
+   以前删除按钮直接挂在 .st-row 上、且主站行不渲染它（于是主站删不掉）；
+   现在包一层，两位主播都有的按钮永远对齐、不会被中间的名字挤动。 */
+.st-row-act { display: flex; flex: none; align-items: center; gap: 6px; }
+/* ☆ 只有非主站行才有：点一下把这位设为默认板块 */
+.st-act {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.st-act:hover { color: var(--red); border-color: var(--red); }
 
 /* 行首那个圆点本身就是颜色盘：点开就是系统取色器，改完即存。
    注意**不要**写 -webkit-appearance: none —— 那会让 Chrome 干脆不画 swatch，
@@ -1999,6 +2032,87 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
 .st-row input.st-dot::-webkit-color-swatch { border: none; border-radius: 50%; }
 .st-row input.st-dot::-moz-color-swatch { border: none; border-radius: 50%; }
 .st-row input.st-dot:hover { border-color: var(--muted); }
+
+/* 色点旁边那个 ▾：展开「按头像色块占比」算出来的候选色。
+   margin-left 负值是抵消 .st-row 的 gap —— 它俩是一组，靠太开不好读。 */
+.st-dot-more {
+  flex: none;
+  width: 14px;
+  height: 22px;
+  margin-left: -7px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted-2);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.st-dot-more:hover { color: var(--text); }
+
+/* 「按头像挑色」的候选色块：色块 + 它在头像里的占比，点一下即选中。
+
+   ⚠️ .st-palette 是 display:flex，HTML 的 hidden 就压不住它了 —— 必须自己兜
+   [hidden]（本文件已有三处同款坑：.seg-auto / .live-cred / .net-alert）。 */
+.st-palette {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin: 8px 0 10px;
+}
+.st-palette[hidden] { display: none; }
+
+.st-swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 3px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.st-swatch i {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--sw);
+}
+.st-swatch:hover { border-color: var(--line-2); color: var(--text); }
+.st-swatch.on {
+  border-color: var(--sw);
+  color: var(--text);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sw) 32%, transparent);
+}
+/* 「自定义」那一格：不放色圆点，用虚线方框提示「这里能自己调」 */
+.st-swatch-cus i {
+  width: 16px;
+  height: 16px;
+  border: 1px dashed var(--muted-2);
+  border-radius: 4px;
+  background: none;
+}
+
+/* 主播行下面那条候选带（点 ▾ 展开） */
+.st-row-palette {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 11px;
+  margin: 2px 0 6px;
+  border: 1px dashed var(--line-2);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+.st-pal-load { font-size: 11px; color: var(--muted-2); }
 
 .st-color-wrap { display: flex; align-items: center; gap: 10px; }
 /* flex: none 同上 —— 不写的话 `.live-card input { flex: 1 }` 会把它拉长 */
@@ -2070,8 +2184,25 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
 /* 必须显式 flex: none —— 上面 `.live-card input { flex: 1 }` 是给文本框用的，
    但会一并命中复选框，把它从 15px 撑到整行宽（实测 867px / 1049px），
    复选框被画到行中间、文字被推到最右。这里是同一个坑的第二次（第一次见
-   `.live-wheel-opts input`）。 */
-.seg-auto input { flex: none; accent-color: var(--red); width: 15px; height: 15px; }
+   `.live-wheel-opts input`）。
+
+   ⚠️ 选择器必须限定 [type="checkbox"]：主播管理里的「显示名」是**文本框**，
+   写成裸 `.seg-auto input` 会连它一起钉成 15×15 —— 同优先级、又比
+   `.live-card input` 靠后，于是文本框被压成一个点不进去的小圆点（v1.0.5 实际
+   表现）。凡是在 `.seg-auto` 里放非复选框控件，都要另外显式声明尺寸。 */
+.seg-auto input[type="checkbox"] {
+  flex: none; accent-color: var(--red); width: 15px; height: 15px;
+}
+
+/* 「显示名」文本框：显式还原成正常输入框，不依赖上面那条规则被改回裸选择器。
+   label 是 flex 行，flex:1 让它占满右侧余量；padding/border 沿用 `.live-card input`。 */
+#st-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  height: auto;
+  cursor: text;
+}
 #seg-state { white-space: pre-line; }
 
 /* 直播间只放直播：回放的节目名与「分段 / 标注 / 画质」按钮在这里没有意义
@@ -2716,6 +2847,22 @@ body.view-broadcast #btn-quality { display: none; }
 
 .ob-src { margin-top: 14px; }
 .ob-src[hidden] { display: none; }
+/* 显示名：探测出来的名字只是默认值，用户想叫什么就叫什么 */
+.ob-name-box { margin-top: 14px; }
+.ob-name-box[hidden] { display: none; }
+.ob-name-box input {
+  width: 100%; padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: 9px;
+  background: var(--panel-2); color: var(--text);
+  font: inherit; font-size: 13px; outline: none;
+}
+.ob-name-box input:focus { border-color: var(--red); }
+
+/* 首屏选择页的「板块颜色」候选区：色块沿用设置页那套 .st-swatch，
+   这里只管外层间距与 hidden 兜底（.st-palette 是 flex，会盖掉 hidden）。 */
+.ob-color-box { margin-top: 14px; }
+.ob-color-box[hidden] { display: none; }
+.ob-color-box .st-palette { margin: 8px 0 0; }
 .ob-label { display: block; margin-bottom: 6px; font-size: 12px; color: var(--muted); }
 .ob-src select {
   width: 100%; padding: 9px 11px;

@@ -20,6 +20,7 @@
     PyInstaller 的 --name 用 ASCII（ReplayRadio），打包完再改名成中文，
     避开中文名在 spec / build 中间产物上的编码坑。
 """
+import json
 import os
 import shutil
 import subprocess
@@ -30,7 +31,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "发布")
 BUILD = os.path.join(ROOT, "build")
 
-APP_VERSION = "1.0.4"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.0.10"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
@@ -81,6 +82,67 @@ def ensure_pyinstaller():
 DATA_EXCLUDE_DIRS = {"stations"}            # 各主播的清单缓存/分段结果/音频中间产物
 DATA_EXCLUDE_SUFFIX = (".bak", ".bak_test")
 
+# data/ 顶层那些**运行时会写**的文件：一律不许把开发机上的内容打进包。
+# 实测踩过：主站的清单缓存 data/programs_cache.json 里留着调试期的 65 条节目，
+# 被打进 EXE 后，用户新加的主播（第一位就是主站）会读到它 ——
+# 界面上写着新主播的名字、播的却全是上一个人的内容。
+# 所以打包时统一覆盖成空表，不再依赖「发布前记得手动清」。
+_EMPTY_PROGRAMS_JS = ("// 通用版不带离线快照：清单由本机服务按设置里的主播实时抓取。\n"
+                      'window.PROGRAMS = {"meta": {}, "programs": []};\n')
+DATA_RESET = {
+    "programs_cache.json": "{}\n",
+    "series_cache.json": "{}\n",
+    "programs.json": '{\n "meta": {},\n "programs": []\n}\n',
+    "programs.js": _EMPTY_PROGRAMS_JS,
+    # 这四个是 index.html 静态 <script src> 的容器，必须存在且语法有效，只是内容为空
+    "segments.js": "window.SEGMENTS = {};\n",
+    "sung.js": "window.SUNGKEYS = {};\n",
+    "setlists.js": "window.SETLISTS = {};\n",
+    "labels.js": "window.SEGLABELS = {};\n",
+}
+# .main_data_owner 是「data/ 顶层那批旧数据归位给哪位主站」的标记（见 serve.py 的
+# adopt_legacy_main_data）。它在包内存在的话，用户机 unpack 之后会以为早就搬过家，
+# 真主站的历史分段就永远归不了位 —— 所以它和 seg_state.json 一样**绝不能打包**。
+DATA_EXCLUDE_FILES = {"seg_state.json", ".main_data_owner"}   # 运行时状态，打包时直接不要
+# 归位标记的**变体**（本地测试会把它重命名成 .main_data_owner.stash 再挪回来）同样
+# 不能进包：包里只要出现「已经搬过家」的痕迹，真主站的历史分段就永远归不了位。
+DATA_EXCLUDE_PREFIX = (".main_data_owner",)
+
+# stations.json 也算「顶层运行时文件」，但它的空表形态不能写成 {} ——
+# 得保留 _note（给用户直接编辑文件时看的字段说明）与 _version（升级合并要用），
+# 只把 stations 数组清空。所以它不进 DATA_RESET 的字面量表，单独处理；
+# 但「先跳过复制、再整体重写」这一步和 DATA_RESET 完全一致。
+DATA_RESET_FILES = set(DATA_RESET) | {"stations.json"}
+
+
+def _write_empty_stations(stage):
+    """把暂存副本里的 stations.json 清成「一位主播都没有」，但留住说明与版本号。
+
+    为什么必须自动做：开发机上一定会为了测试添加主播，而 stations.json 是
+    **用户数据的入口**，一旦跟着包发出去，用户打开就看到别人的主播 ——
+    v1.0.2 的「主播 ID 与播放内容不符」就是这么来的（当时靠手工清空，
+    漏一次就出事）。所以和第 84 行那批运行时文件一样，改成打包时强制重置。
+    """
+    src = os.path.join(ROOT, "data", "stations.json")
+    note, ver = [], 2
+    try:
+        with open(src, encoding="utf-8") as f:
+            old = json.load(f)
+        if isinstance(old, dict):
+            if isinstance(old.get("_note"), list):
+                note = old["_note"]
+            if isinstance(old.get("_version"), int):
+                ver = old["_version"]
+    except Exception:
+        pass                      # 源文件缺失/损坏也不该让打包失败，用最小结构兜底
+    doc = {}
+    if note:
+        doc["_note"] = note
+    doc["stations"] = []
+    doc["_version"] = ver
+    with open(os.path.join(stage, "stations.json"), "w", encoding="utf-8") as f:
+        f.write(json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
+
 
 def _stage_data():
     """把 data/ 复制一份**不含运行时数据**的暂存副本，返回它的路径。
@@ -90,6 +152,7 @@ def _stage_data():
     而且不删旧副本也不影响正确性 —— 每次都用新的那个来打包。
 
     硬链接优先（省时间省空间，同盘即可），失败则退回普通复制。
+    运行时文件**不参与复制**，之后再写成空表 —— 硬链接的文件写下去会连带改到源文件。
     """
     stage = os.path.join(BUILD, "data-stage-%d" % int(time.time()))
     src_root = os.path.join(ROOT, "data")
@@ -106,6 +169,9 @@ def _stage_data():
         for fn in filenames:
             if fn.endswith(DATA_EXCLUDE_SUFFIX):
                 continue
+            if rel == "." and (fn in DATA_RESET_FILES or fn in DATA_EXCLUDE_FILES
+                               or fn.startswith(DATA_EXCLUDE_PREFIX)):
+                continue                # 顶层运行时文件：见下，统一写空表
             s = os.path.join(dirpath, fn)
             d = os.path.join(dst_dir, fn)
             try:
@@ -115,9 +181,15 @@ def _stage_data():
                 shutil.copy2(s, d)
                 copied += 1
 
-    print("data 暂存：%s（硬链接 %d、复制 %d；已剔除 %s）"
+    for fn, content in DATA_RESET.items():
+        with open(os.path.join(stage, fn), "w", encoding="utf-8") as f:
+            f.write(content)
+    _write_empty_stations(stage)
+
+    print("data 暂存：%s（硬链接 %d、复制 %d；已剔除 %s；已重置为空表 %s）"
           % (os.path.basename(stage), linked, copied,
-             "、".join(sorted(DATA_EXCLUDE_DIRS))))
+             "、".join(sorted(DATA_EXCLUDE_DIRS | DATA_EXCLUDE_FILES)),
+             "、".join(sorted(DATA_RESET_FILES))))
     return stage
 
 

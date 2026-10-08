@@ -210,41 +210,296 @@
     }).join('');
   }
 
-  /* 从头像里挑一个能当主题色的颜色。
+  /* ---------------- 头像取色：按色块占比给候选 ----------------
 
-     不能直接取平均 —— 那是灰的。做法：缩到 32×32 读像素，滤掉近黑/近白/灰，
-     再按「饱和度的平方」加权平均（越鲜艳的像素话语权越大）。
-     最后把 S/L 拉进主题色该有的区间 —— 头像原色往往偏暗发脏，
-     不归一化的话灯亮起来就是一块脏色，铺到深色底上更糊。 */
-  function accentFromImage(url) {
+     目标是把头像里**真实存在**的几个颜色按面积占比列出来让用户挑。
+
+     老做法是按色相分 24 个桶、桶内取平均，最后把饱和度硬拉到 0.55 以上。
+     两个毛病：
+       ① 一张银白发头像 92% 的像素是低饱和的，全被 `s < 0.22` 滤掉 ——
+          只剩两个候选，占比数字也失真（分母只剩 342 个像素）；
+       ② 强行提饱和度会把头像上柔和的灰紫算成艳紫，跟眼睛看到的不是同一个色。
+
+     现在的做法：
+       ① 缩到 64×64 读像素；
+       ② 在 OKLab 里算 —— 感知均匀空间，欧氏距离≈人眼觉得的差异，
+          平均出来的色也不会发灰（sRGB 里平均会）；
+       ③ 只滤掉「近黑」（描边/阴影）与「纯白」（背景），低饱和的银白保留；
+       ④ 聚类时给色度加权、给亮度降权：不然银白发的七八种明暗层次会把
+          簇位全占满（实测 10 个簇里 7 个是同一个淡紫灰的不同明度）；
+       ⑤ 低彩度的簇合并成一格「中性色」—— 对用户来说都是灰白，
+          各占一个候选位只会把彩色的挤掉；
+       ⑥ 饱和度原样保留，只把亮度收进 [0.45, 0.84]：太暗铺到深色底上看不见，
+          太亮会跟白色前景糊在一起。
+
+     ⚠️ 报出来的 ratio 分母是「非透明、且非纯黑白的像素」，不是整张图 ——
+     一张白底头像里最大的色块永远是白，拿它当分母没有意义。 */
+  var PALETTE_MAX = 8;                  // 最多给几个候选
+  var PALETTE_MIN = 0.008;              // 占比低于 0.8% 的不值得单独列
+  var PALETTE_K = 18;                   // 簇数上限（实际数量由 SEED_MIN 控制）
+  var MERGE_AT = 0.03;                  // 加权距离近于此的两个簇算同一个色
+  var SEED_MIN = 0.08;                  // 两个簇心至少隔这么远才算「不同的颜色」
+  var NEUTRAL_AT = 0.035;               // 彩度低于此算「中性灰白」，合并成一格
+  var COLOR_AT = 0.04;                  // 默认选中至少要这么鲜艳（保住「上色」这件事）
+  var DIST_WL = 0.45, DIST_WAB = 1.9;   // 聚类距离里亮度 / 色度的权重
+
+  /* sRGB → OKLab，系数取自 Björn Ottosson 的原始定义。 */
+  function srgbToLinear(c) {
+    c /= 255;
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+
+  function rgbToOklab(r, g, b) {
+    var R = srgbToLinear(r), G = srgbToLinear(g), B = srgbToLinear(b);
+    var l = Math.cbrt(0.4122214708 * R + 0.5363325363 * G + 0.0514459929 * B);
+    var m = Math.cbrt(0.2119034982 * R + 0.6806995451 * G + 0.1073969566 * B);
+    var s = Math.cbrt(0.0883024619 * R + 0.2817188376 * G + 0.6299787005 * B);
+    return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+  }
+
+  function oklabToRgb(L, a, b) {
+    var l = L + 0.3963377774 * a + 0.2158037573 * b;
+    var m = L - 0.1055613458 * a - 0.0638541728 * b;
+    var s = L - 0.0894841775 * a - 1.2914855480 * b;
+    l = l * l * l; m = m * m * m; s = s * s * s;
+    var R = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+    var G = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+    var B = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+    function enc(x) {
+      x = x <= 0.0031308 ? 12.92 * x
+                         : 1.055 * Math.pow(Math.max(x, 0), 1 / 2.4) - 0.055;
+      return Math.max(0, Math.min(255, Math.round(x * 255)));
+    }
+    return [enc(R), enc(G), enc(B)];
+  }
+
+  function rgbHex(rgb) {
+    return '#' + rgb.map(function (x) {
+      return (x < 16 ? '0' : '') + x.toString(16);
+    }).join('');
+  }
+
+  /* 唯一的「加工」：把亮度收进可用区间，色相与饱和度原样带走。
+     老版本在这里把 S 也拉到 0.55 以上，是「颜色不准」的主要来源。 */
+  function themeizeLab(lab) {
+    var L = Math.min(0.84, Math.max(0.45, lab[0]));
+    if (lab[0] <= 0) return rgbHex(oklabToRgb(lab[0], lab[1], lab[2]));
+    var k = L / lab[0];
+    return rgbHex(oklabToRgb(L, lab[1] * k, lab[2] * k));
+  }
+
+  function paletteOf(img) {
+    /* 采样分辨率。64 太粗：眼睛、眼镜那种只占十几个像素的色块会被重采样
+       混成周围的灰（实测蓝紫直接消失），96 才稳。放大到 128 收益已不明显，
+       耗时却翻倍。 */
+    var n = 96;
+    var cv = document.createElement('canvas');
+    cv.width = cv.height = n;
+    var cx = cv.getContext('2d');
+    /* 默认的 'low' 就是最近邻式的粗暴下采样，会把小面积色块直接抹掉；
+       'high' 才接近 PIL 的 LANCZOS —— 离线原型与页面结果对不上的根因就在这。 */
+    cx.imageSmoothingEnabled = true;
+    cx.imageSmoothingQuality = 'high';
+    cx.drawImage(img, 0, 0, n, n);
+    var d;
+    try { d = cx.getImageData(0, 0, n, n).data; } catch (e) { return []; }
+
+    /* ① 量化到 16×16×16 的 RGB 格：相邻像素颜色几乎一样，先去重能省下大把
+       距离计算。每格代表色取**格内均值**而不是格中心 —— 后者连纯色都有
+       ±8 的固定偏差。 */
+    var cells = {}, i, j, k;
+    for (i = 0; i < d.length; i += 4) {
+      if (d[i + 3] < 128) continue;                       // 透明像素不算数
+      k = ((d[i] >> 4) << 8) | ((d[i + 1] >> 4) << 4) | (d[i + 2] >> 4);
+      var cell = cells[k] || (cells[k] = [0, 0, 0, 0]);   // n, Σr, Σg, Σb
+      cell[0]++;
+      cell[1] += d[i]; cell[2] += d[i + 1]; cell[3] += d[i + 2];
+    }
+
+    var pts = [], passed = 0;
+    for (k in cells) {
+      var c0 = cells[k], cnt = c0[0];
+      var lab0 = rgbToOklab(c0[1] / cnt, c0[2] / cnt, c0[3] / cnt);
+      var ch0 = Math.sqrt(lab0[1] * lab0[1] + lab0[2] * lab0[2]);
+      if (lab0[0] < 0.08) continue;                  // 近黑：描边 / 阴影
+      if (lab0[0] > 0.96 && ch0 < 0.02) continue;    // 纯白：背景
+      pts.push({ lab: lab0, n: cnt });
+      passed += cnt;
+    }
+    if (!pts.length) return [];
+
+    /* ② 加权距离：给色度加权、给亮度降权，避免「白→灰」的明暗层次把簇占满。 */
+    function d2(A, B) {
+      var dl = (A[0] - B[0]) * DIST_WL;
+      var da = (A[1] - B[1]) * DIST_WAB;
+      var db = (A[2] - B[2]) * DIST_WAB;
+      return dl * dl + da * da + db * db;
+    }
+    function nearest(lab, list) {
+      var bi = 0, bd = Infinity;
+      for (var t = 0; t < list.length; t++) {
+        var dd = d2(lab, list[t]);
+        if (dd < bd) { bd = dd; bi = t; }
+      }
+      return bi;
+    }
+
+    /* ③ 初始化：贪心非极大抑制 —— 按面积从大到小过一遍，只留下「离已有中心
+       足够远」的格子当簇心。面积优先保证主色一定入选；距离门槛保证银白发的
+       十来种明度不会各占一个簇位（用最远点优先恰恰会那么干，实测 10 个簇里
+       7 个是同一个淡紫灰的不同明度）。全程不掷骰子：同一张头像每次算出来的
+       候选必须一模一样，否则用户来回点两次颜色就变了。 */
+    var sorted = pts.slice().sort(function (a, b) { return b.n - a.n; });
+    var centers = [];
+    for (i = 0; i < sorted.length && centers.length < PALETTE_K; i++) {
+      var far = true;
+      for (j = 0; j < centers.length; j++) {
+        if (Math.sqrt(d2(sorted[i].lab, centers[j])) < SEED_MIN) { far = false; break; }
+      }
+      if (far) centers.push(sorted[i].lab.slice());
+    }
+    if (!centers.length) return [];
+
+    /* ④ Lloyd 迭代 */
+    var assign = new Array(pts.length), iter, acc;
+    for (iter = 0; iter < 8; iter++) {
+      acc = [];
+      for (j = 0; j < centers.length; j++) acc.push([0, 0, 0, 0]);
+      for (i = 0; i < pts.length; i++) {
+        var bi = nearest(pts[i].lab, centers);
+        assign[i] = bi;
+        var w = pts[i].n;
+        acc[bi][0] += pts[i].lab[0] * w;
+        acc[bi][1] += pts[i].lab[1] * w;
+        acc[bi][2] += pts[i].lab[2] * w;
+        acc[bi][3] += w;
+      }
+      for (j = 0; j < centers.length; j++) {
+        if (acc[j][3]) {
+          centers[j] = [acc[j][0] / acc[j][3],
+                        acc[j][1] / acc[j][3],
+                        acc[j][2] / acc[j][3]];
+        }
+      }
+    }
+
+    /* ⑤ 汇总每个簇 */
+    var weight = [];
+    for (j = 0; j < centers.length; j++) weight.push(0);
+    for (i = 0; i < pts.length; i++) weight[assign[i]] += pts[i].n;
+    var clusters = [];
+    for (j = 0; j < centers.length; j++) {
+      if (!weight[j]) continue;
+      var lb = centers[j];
+      clusters.push({ lab: lb, w: weight[j],
+                      chroma: Math.sqrt(lb[1] * lb[1] + lb[2] * lb[2]) });
+    }
+
+    /* ⑤b 贴得太近的簇合并。K 比实际颜色数多时必然发生：一张单色图里
+       farthest-first 找不到足够远的点，Lloyd 迭代后就把一个颜色劈成两半
+       （实测纯绿图劈成 #20b060 97.9% + #20b05f 2.1%）。 */
+    clusters.sort(function (a, b) { return b.w - a.w; });
+    var uniq = [];
+    clusters.forEach(function (c) {
+      for (var t = 0; t < uniq.length; t++) {
+        if (Math.sqrt(d2(c.lab, uniq[t].lab)) < MERGE_AT) { uniq[t].w += c.w; return; }
+      }
+      uniq.push(c);
+    });
+    clusters = uniq;
+
+    /* 只读调试出口（与 window.__STATE 同理）：算法出问题时能直接看中间状态，
+       不用靠猜。测试脚本也读它。 */
+    if (window.__PALETTE) {
+      window.__PALETTE.last = {
+        passed: passed, cells: pts.length, seeds: centers.length,
+        clusters: clusters.map(function (c) {
+          return { L: c.lab[0], chroma: c.chroma, ratio: c.w / passed };
+        })
+      };
+    }
+
+    /* ⑥ 低彩度的簇合并成一格中性色（用户眼里它们都是「灰白」） */
+    var neutrals = [], colors = [];
+    clusters.forEach(function (c) {
+      (c.chroma < NEUTRAL_AT ? neutrals : colors).push(c);
+    });
+    if (neutrals.length > 1) {
+      var wsum = 0, a3 = [0, 0, 0];
+      neutrals.forEach(function (c) {
+        wsum += c.w;
+        a3[0] += c.lab[0] * c.w; a3[1] += c.lab[1] * c.w; a3[2] += c.lab[2] * c.w;
+      });
+      var ml = [a3[0] / wsum, a3[1] / wsum, a3[2] / wsum];
+      colors.push({ lab: ml, w: wsum,
+                    chroma: Math.sqrt(ml[1] * ml[1] + ml[2] * ml[2]) });
+    } else if (neutrals.length) {
+      colors.push(neutrals[0]);
+    }
+
+    colors.sort(function (a, b) { return b.w - a.w; });
+    var out = [];
+    for (i = 0; i < colors.length && out.length < PALETTE_MAX; i++) {
+      var ratio = colors[i].w / passed;
+      if (out.length && ratio < PALETTE_MIN) break;    // 已按占比降序，后面只会更小
+      out.push({ hex: themeizeLab(colors[i].lab),
+                 ratio: ratio, chroma: colors[i].chroma });
+    }
+    return out;
+  }
+
+  function paletteFromImage(url) {
     return new Promise(function (resolve) {
       var img = new Image();
       img.onload = function () {
-        try {
-          var n = 32;
-          var cv = document.createElement('canvas');
-          cv.width = cv.height = n;
-          var cx = cv.getContext('2d');
-          cx.drawImage(img, 0, 0, n, n);
-          var d = cx.getImageData(0, 0, n, n).data;
-          var r = 0, g = 0, b = 0, w = 0;
-          for (var i = 0; i < d.length; i += 4) {
-            if (d[i + 3] < 200) continue;                 // 透明像素不算数
-            var hsl = rgbToHsl(d[i], d[i + 1], d[i + 2]);
-            if (hsl[2] < 0.16 || hsl[2] > 0.94 || hsl[1] < 0.22) continue;
-            var k = hsl[1] * hsl[1];
-            r += d[i] * k; g += d[i + 1] * k; b += d[i + 2] * k; w += k;
-          }
-          if (!w) { resolve(''); return; }
-          var m = rgbToHsl(r / w, g / w, b / w);
-          resolve(hslToHex(m[0],
-                           Math.min(0.9, Math.max(0.55, m[1])),
-                           Math.min(0.72, Math.max(0.52, m[2]))));
-        } catch (e) { resolve(''); }
+        var out = [];
+        try { out = paletteOf(img); } catch (e) { out = []; }
+        resolve(out);
       };
-      img.onerror = function () { resolve(''); };
-      img.src = url;                                      // 走 /api/img：同源，canvas 读得到像素
+      img.onerror = function () { resolve([]); };
+      img.src = url;              // 走 /api/img：直连 hdslb 跨域，canvas 读不出像素
     });
+  }
+
+  /* 单色取色（后台补色、静默取色都只要一个色）。
+
+     取「第一个够鲜艳的」而不是占比最大的：占比最大的往往是一大块中性灰白
+     （银白发、浅色衣服），拿它当主题色等于没上色。一个鲜艳的都没有，才退回
+     占比最大的那个。这条规则与 UI 上默认高亮的那一格完全一致。 */
+  function pickAccent(list) {
+    for (var i = 0; i < list.length; i++) {
+      if ((list[i].chroma || 0) >= COLOR_AT) return list[i].hex;
+    }
+    return list.length ? list[0].hex : '';
+  }
+
+  function accentFromImage(url) {
+    return paletteFromImage(url).then(pickAccent);
+  }
+
+  /* 调试出口（只读）：自动化测试可以直接拿构造好的图验证「色块占比」的
+     排序与过滤规则 —— 靠真实头像断言不了具体色值。与 window.__STATE 同理。 */
+  window.__PALETTE = { of: paletteOf, fromImage: paletteFromImage, pick: pickAccent };
+
+  /* 候选色块的按钮组。ratio 是色块在头像「有颜色的像素」里的占比。
+     点选的行为由调用方的事件委托处理（data-color 带的就是色值）。 */
+  function paletteHTML(list, cur) {
+    var now = (themeHex(cur) || '').toLowerCase();
+    return (list || []).map(function (c) {
+      /* 占比按量级用不同精度：主色看整数就够（88%），小色块得给一位小数
+         （0.9%）—— 全取整的话一排候选会全写成「1%」，看不出大小差别。 */
+      var pct = c.ratio >= 0.1
+        ? Math.round(c.ratio * 100) + '%'
+        : (c.ratio * 100).toFixed(1) + '%';
+      var on = now && now === c.hex.toLowerCase();
+      return '<button type="button" class="st-swatch' + (on ? ' on' : '') + '"'
+        + ' data-color="' + esc(c.hex) + '"'
+        + ' style="--sw:' + esc(c.hex) + '"'
+        + ' title="头像里约占 ' + (c.ratio * 100).toFixed(1) + '%">'
+        + '<i></i><span>' + pct + '</span></button>';
+    }).join('');
   }
 
   function themeSweep(hex, x, y) {
@@ -1780,7 +2035,27 @@
     var stList = document.getElementById('st-list');
     if (stList) {
       stList.addEventListener('click', function (e) {
-        var b = e.target && e.target.closest ? e.target.closest('[data-st-del]') : null;
+        var t = e.target;
+        // 点主播名 → 行内改名（弹输入框，Enter 存、Esc 取消）
+        var r = t && t.closest ? t.closest('[data-st-rename]') : null;
+        if (r) {
+          renameStation(r.getAttribute('data-st-rename'),
+                        r.getAttribute('data-st-mid'), r);
+          return;
+        }
+        // ▾ → 在该行下面展开「按头像色块占比」的候选色
+        var p = t && t.closest ? t.closest('[data-st-pal]') : null;
+        if (p) { toggleRowPalette(p.getAttribute('data-st-pal'), p); return; }
+        // 候选色块 → 选中即存
+        var sw = t && t.closest ? t.closest('.st-swatch[data-color]') : null;
+        if (sw) { pickRowColor(sw); return; }
+        // 「自定义」→ 开系统色盘
+        var cu = t && t.closest ? t.closest('[data-st-custom]') : null;
+        if (cu) { openCustomColor(cu.getAttribute('data-st-custom')); return; }
+        // ☆ → 把这位设为默认（主站）
+        var mk = t && t.closest ? t.closest('[data-st-main]') : null;
+        if (mk) { setMainStation(mk.getAttribute('data-st-main')); return; }
+        var b = t && t.closest ? t.closest('[data-st-del]') : null;
         if (b) deleteStation(b.getAttribute('data-st-del'));
       });
       // 行首色点就是颜色盘：改完直接存，不用再去点保存
@@ -1793,11 +2068,38 @@
       });
     }
 
+    /* 候选面板里的「自定义」用的系统色盘。做成一个藏在卡片里的 input，
+       而不是每行各带一个 —— 面板是动态插的，带在行里会被重渲染冲掉。 */
+    var palCustom = document.getElementById('st-pal-custom');
+    if (palCustom) {
+      palCustom.addEventListener('change', function () {
+        var s = findStation(palCustom.getAttribute('data-for') || '');
+        if (s) saveStationColor(s.id, s.mid, palCustom.value);
+      });
+    }
+
     var autoBtn = document.getElementById('st-accent-auto');
     if (autoBtn) {
       autoBtn.addEventListener('click', function () {
         if (stProbe && stProbe.face) stAccentAuto(stProbe.face);
         else stTip('先点「检测」，拿到头像之后才能取色');
+      });
+    }
+
+    /* 添加表单里的候选色块：点一下写进左边色盘即可，不立即保存 ——
+       这一位的颜色要跟着「保存」一起提交（和显示名、来源一个节奏）。 */
+    var palBox = document.getElementById('st-palette');
+    if (palBox) {
+      palBox.addEventListener('click', function (e) {
+        var b = e.target && e.target.closest ? e.target.closest('.st-swatch[data-color]') : null;
+        if (!b) return;
+        var hex = b.getAttribute('data-color');
+        var input = document.getElementById('st-accent');
+        if (input) input.value = hex;
+        var all = palBox.querySelectorAll('.st-swatch');
+        for (var i = 0; i < all.length; i++) all[i].classList.toggle('on', all[i] === b);
+        var note = document.getElementById('st-accent-note');
+        if (note) { note.hidden = false; note.textContent = '已选 ' + hex + '。'; }
       });
     }
 
@@ -1959,8 +2261,11 @@
         var sr = s.series || {};
         var tail;
         if (sr.id) {
-          tail = '系列 ' + sr.id + (sr.total ? ' · ' + sr.total + ' 场' : '')
-            + '（' + (sr.source === 'config' ? 'stations.json 手填' : '自动发现') + '）';
+          // 系列与合集取归档的接口不同，显示上也分开写 —— 免得用户拿着一个合集 ID
+          // 去「系列」里找而找不到（kind 由后端随来源一起给出）
+          var what = sr.kind === 'season' ? '合集 ' : (sr.kind === 'series' ? '系列 ' : '来源 ');
+          tail = what + sr.id + (sr.total ? ' · ' + sr.total + ' 场' : '')
+            + '（' + (sr.source === 'config' ? '已在设置里指定' : '自动发现') + '）';
         } else if (sr.error) {
           tail = '没拿到：' + sr.error;
         } else {
@@ -1995,22 +2300,42 @@
       var meta = [];
       if (s.mid) meta.push('UID ' + s.mid);
       if (s.room) meta.push('房间 ' + s.room);
-      meta.push(s.series_id ? ('系列 ' + s.series_id + '（手填）') : '来源自动发现');
+      // 来源 ID 藏在嵌套的 series 里（/api/stations 给的是 station_head 的结构），
+      // 顶层那个 series_id 是另一条负载的形状 —— 两处都认，免得永远显示「自动发现」
+      var srcId = s.series_id || (s.series && s.series.id) || '';
+      meta.push(srcId ? ('来源 ' + srcId + '（已指定）') : '来源自动发现');
       /* 名与元信息分两行 —— 原来挤在一行时，UID/房间号那串没有宽度约束，
          会把主播名压到几乎看不见（自定义 UID 变长后更明显）。
-         行首那个圆点本身就是 <input type="color">，点一下就能改这位的板块色。 */
+         行首那个圆点本身就是 <input type="color">，点一下就能改这位的板块色；
+         紧跟的 ▾ 展开「按头像色块占比」算出来的候选色（face 不进属性，
+         点击时按 id 现查 —— 免得 URL 里的特殊字符在属性里要额外转义）。 */
       return '<div class="st-row">'
         + '<input type="color" class="st-dot" data-st-color="' + esc(s.id) + '"'
         + ' data-st-mid="' + esc(s.mid || '') + '"'
         + ' value="' + esc(themeHex(s.accent) || '#8a8a95') + '"'
         + ' title="点这里改「' + esc(s.short || s.name || s.id) + '」的板块颜色">'
+        + '<button type="button" class="st-dot-more" data-st-pal="' + esc(s.id) + '"'
+        + ' title="按头像挑几个颜色">▾</button>'
         + '<div class="st-row-main">'
-        + '<div class="st-row-name">' + esc(s.short || s.name || s.id)
+        + '<div class="st-row-name">'
+        + '<span class="st-name" data-st-rename="' + esc(s.id) + '"'
+        + ' data-st-mid="' + esc(s.mid || '') + '"'
+        + ' title="点一下改显示名">' + esc(s.name || s.short || s.id) + '</span>'
         + (s.main ? ' <b>（主站）</b>' : '') + '</div>'
         + '<div class="st-row-meta">' + esc(meta.join(' · ')) + '</div>'
         + '</div>'
-        + (s.main ? '' : '<button class="key-del" type="button" title="删除"'
-           + ' data-st-del="' + esc(s.id) + '">×</button>')
+        /* 主站 = 「没特别指定时默认用谁」（顶栏品牌名、没手动选过板块时的兜底）。
+           非主站行给个星标按钮，点一下上位；已经是主站的那位不再显示按钮，
+           免得出现「点自己」这种无意义动作。
+           删除按钮**所有行都有**（主站以前没有，于是删不掉）—— 删掉主站后
+           服务端会把主站让给剩下的第一位，删光了就回到首屏引导。 */
+        + '<div class="st-row-act">'
+        + (s.main ? ''
+           : '<button class="st-act" type="button" data-st-main="' + esc(s.id) + '"'
+             + ' title="设为默认（主站）">☆</button>')
+        + '<button class="key-del" type="button" title="删除"'
+        + ' data-st-del="' + esc(s.id) + '">×</button>'
+        + '</div>'
         + '</div>';
     }).join('');
   }
@@ -2030,20 +2355,31 @@
     });
   }
 
-  /* 按头像自动挑一个板块色。图片必须走 /api/img 代理 —— 直连 hdslb 是跨域，
-     canvas 读不出像素（会抛 SecurityError）。 */
+  /* 按头像挑板块色：算出色块占比，把前几个当候选摆出来，默认落在一个够鲜艳的
+     候选上（占比最大的往往是一大块灰白，拿它当主题色等于没上色）。
+     图片必须走 /api/img 代理 —— 直连 hdslb 是跨域，canvas 读不出像素。 */
   function stAccentAuto(face) {
     var input = document.getElementById('st-accent');
     var note = document.getElementById('st-accent-note');
+    var box = document.getElementById('st-palette');
     if (!input) return;
-    if (note) { note.hidden = false; note.textContent = '正在按头像取色…'; }
-    accentFromImage('/api/img?u=' + b64url(face)).then(function (hex) {
+    if (note) { note.hidden = false; note.textContent = '正在按头像算色块占比…'; }
+    if (box) { box.hidden = true; box.innerHTML = ''; }
+    paletteFromImage('/api/img?u=' + b64url(face)).then(function (list) {
       if (!input) return;
-      if (hex) {
-        input.value = hex;
-        if (note) note.textContent = '已按头像取色 ' + hex + '（不满意可以自己调）。';
-      } else if (note) {
-        note.textContent = '头像里没挑到合适的颜色，手动选一个吧。';
+      if (!list.length) {
+        if (note) note.textContent = '头像里没挑到合适的颜色，手动选一个吧。';
+        return;
+      }
+      var def = pickAccent(list);
+      input.value = def;
+      if (box) {
+        box.innerHTML = paletteHTML(list, def);
+        box.hidden = false;
+      }
+      if (note) {
+        note.innerHTML = '按头像的色块占比挑出 <b>' + list.length + '</b> 个候选，'
+          + '点一下就换。不满意也可以用左边的色盘自己调。';
       }
     });
   }
@@ -2061,12 +2397,121 @@
       .catch(function () { stTip('改色失败，请重试'); });
   }
 
+  /* ---------------- 主播行里的「按头像挑色」面板 ----------------
+
+     ▾ 点开 → 在该行下方插一条候选色带（色块 + 占比 + 自定义）。
+     候选是按头像的色块占比算的，和添加表单里那套完全一样。
+
+     每个主播只算一次：头像不变、占比就不会变，取过就缓存住，
+     免得反复点开反复解码图片。 */
+  var _palCache = {};
+
+  function closeRowPalettes() {
+    var all = document.querySelectorAll('.st-row-palette');
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].parentNode) all[i].parentNode.removeChild(all[i]);
+    }
+  }
+
+  function toggleRowPalette(id, btn) {
+    var row = btn && btn.closest ? btn.closest('.st-row') : null;
+    if (!row) return;
+    var next = row.nextElementSibling;
+    var opened = !!(next && next.classList && next.classList.contains('st-row-palette'));
+    closeRowPalettes();                     // 同时只留一条，免得页面越点越长
+    if (opened) return;                     // 再点一次 = 收起
+
+    var s = findStation(id) || {};
+    var pan = document.createElement('div');
+    pan.className = 'st-row-palette';
+    pan.setAttribute('data-for', id);
+    pan.innerHTML = '<span class="st-pal-load">正在按头像算色块占比…</span>';
+    row.parentNode.insertBefore(pan, row.nextSibling);
+
+    function fill(items) {
+      var cur = (findStation(id) || {}).accent || '';
+      var html = items.length
+        ? paletteHTML(items, cur)
+        : '<span class="st-pal-load">头像里没挑到合适的颜色，用「自定义」吧</span>';
+      pan.innerHTML = html
+        + '<button type="button" class="st-swatch st-swatch-cus"'
+        + ' data-st-custom="' + esc(id) + '"><i></i><span>自定义</span></button>';
+    }
+
+    if (_palCache.hasOwnProperty(id)) { fill(_palCache[id]); return; }
+    if (!s.face) { fill([]); return; }
+    paletteFromImage('/api/img?u=' + b64url(s.face)).then(function (items) {
+      _palCache[id] = items;
+      if (pan.parentNode) fill(items);       // 期间可能已经被收起
+    });
+  }
+
+  /* 点候选色块 → 直接存（保存成功后 stRefreshUI() 重建列表，面板随之收起）。 */
+  function pickRowColor(sw) {
+    var pan = sw.closest ? sw.closest('.st-row-palette') : null;
+    var id = pan ? (pan.getAttribute('data-for') || '') : '';
+    var s = findStation(id);
+    var hex = sw.getAttribute('data-color');
+    if (!s || !hex) return;
+    saveStationColor(s.id, s.mid, hex);
+  }
+
+  /* 「自定义」→ 借一个藏在卡片里的系统色盘（值先设成当前色）。 */
+  function openCustomColor(id) {
+    var s = findStation(id);
+    var el = document.getElementById('st-pal-custom');
+    if (!s || !el) return;
+    el.value = themeHex(s.accent) || '#8a8a95';
+    el.setAttribute('data-for', id);
+    el.click();
+  }
+
+  /* 改一位已有主播的显示名。名字有两处用途：各处标题（name）与窄栏短名（short），
+     自定义时一起写 —— 只改一处会出现「顶栏一个名字、列表里另一个名字」。
+     复用同一个 save 接口（它按 id/mid 更新），后端不用新增东西。 */
+  function renameStation(id, mid, host) {
+    if (!host || host.getAttribute('data-editing')) return;
+    var cur = host.textContent || '';
+    host.setAttribute('data-editing', '1');
+    // 那一行默认带省略号，改名时得让输入框能伸出来
+    if (host.parentNode && host.parentNode.classList) {
+      host.parentNode.classList.add('st-row-name-editing');
+    }
+    host.innerHTML = '<input class="st-rename-input" type="text" spellcheck="false">'
+      + '<button class="btn small primary st-rename-ok" type="button">保存</button>'
+      + '<button class="btn small ghost st-rename-no" type="button">取消</button>';
+    var input = host.querySelector('.st-rename-input');
+    input.value = cur;
+    input.focus();
+    input.select();
+
+    function finish(ok) {
+      var v = (input.value || '').trim();
+      if (!ok || !v || v === cur) { stRefreshUI(); return; }   // 取消 / 没改：还原
+      postJSON('/api/stations/save', { mid: mid, id: id, name: v, short: v })
+        .then(function (d) {
+          if (d.error) { stTip('<b>' + esc(d.error) + '</b>'); return; }
+          stTip('显示名已改为「' + esc(v) + '」✓');
+          stRefreshUI();
+        })
+        .catch(function () { stTip('改名失败，请重试'); });
+    }
+    host.querySelector('.st-rename-ok').onclick = function () { finish(true); };
+    host.querySelector('.st-rename-no').onclick = function () { finish(false); };
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+  }
+
   function probeStation() {
     var input = document.getElementById('st-mid');
     var sel = document.getElementById('st-source');
     var box = document.getElementById('st-source-box');
     var note = document.getElementById('st-source-note');
     var save = document.getElementById('st-save');
+    var nameBox = document.getElementById('st-name-box');
+    var nameInput = document.getElementById('st-name');
     var mid = (input.value || '').trim();
     if (!mid) { stTip('先填主播 UID'); return; }
     stTip('正在检测…');
@@ -2078,6 +2523,7 @@
     if (save) save.hidden = true;
     if (colorBox) colorBox.hidden = true;
     if (accentNote) accentNote.hidden = true;
+    if (nameBox) nameBox.hidden = true;
     postJSON('/api/stations/probe', { mid: mid })
       .then(function (d) {
         if (d.error) { stTip('<b>' + esc(d.error) + '</b>'); return; }
@@ -2091,11 +2537,15 @@
         if (stProbe && stProbe.suggested) sel.value = stProbe.suggested;
         box.hidden = false;
         save.hidden = false;
+        if (nameBox) {
+          nameBox.hidden = false;
+          if (nameInput) nameInput.value = (stProbe && stProbe.name) || '';
+        }
         if (note) {
-          note.hidden = !srcs.length;
+          note.hidden = !!srcs.length;
           if (!srcs.length) {
-            note.innerHTML = '这位的「合集和系列」里还没有可用的<b>系列</b>，'
-              + '加进来也能用，但回放清单会是空的（只有合集不行，归档接口只认系列）。';
+            note.innerHTML = '这位的「合集和系列」里还没有内容 —— '
+              + '加进来也能用，但回放清单会是空白的。';
           }
         }
         if (colorBox) colorBox.hidden = false;
@@ -2122,6 +2572,10 @@
       if (stProbe.name) body.name = stProbe.name;
       if (stProbe.room) body.room = stProbe.room;
     }
+    // 显示名：检测出来的名字只是默认值，用户改过就以改过的为准
+    var nmEl = document.getElementById('st-name');
+    var nm = nmEl ? (nmEl.value || '').trim() : '';
+    if (nm) { body.name = nm; body.short = nm; }
     var sid = (sel.value || '').trim();
     if (sid) body.series_id = sid;      // 留空 = 自动发现（v2 语义）
     var acc = document.getElementById('st-accent');
@@ -2136,9 +2590,35 @@
       .catch(function () { stTip('保存失败，请重试'); });
   }
 
+  /* 把某位设为默认板块（主站）。主站只决定「没特别指定时用谁」——顶栏品牌名、
+     没手动选过板块时的兜底那一位；各板块的数据各存各的，换主站不搬也不动数据。 */
+  function setMainStation(id) {
+    var s = findStation(id);
+    var nm = (s && (s.name || s.short)) || id;
+    if (!window.confirm('把「' + nm + '」设为默认板块（主站）？\n\n'
+      + '主站是没特别指定时使用的那一位：顶栏品牌名、没手动选过板块时的兜底板块都跟着它。\n'
+      + '各主播的回放清单与分段互不影响，也不会因此搬动。')) return;
+    postJSON('/api/stations/main', { id: id })
+      .then(function (d) {
+        if (d.error) { stTip('<b>' + esc(d.error) + '</b>'); return; }
+        // 品牌名、兜底板块、分段加载路径都要跟着换，整页重载最干净
+        location.reload();
+      })
+      .catch(function () { stTip('设置失败，请重试'); });
+  }
+
   function deleteStation(id) {
-    var tip = document.getElementById('st-state');
-    if (!window.confirm('删除这位主播？\n\n只是从列表里移除；已经抓下来的回放清单仍留在本机。')) return;
+    var s = findStation(id);
+    var nm = (s && (s.name || s.short)) || id;
+    var isMain = !!(s && s.main);
+    var others = (STATIONS || []).filter(function (x) { return x.id !== id; });
+    var msg = '删除「' + nm + '」？\n\n只是从列表里移除；已经抓下来的回放清单与分段仍留在本机。';
+    if (isMain) {
+      msg += others.length
+        ? '\n\n它现在是主站（默认板块）。删除后主站会交给剩下的第一位。'
+        : '\n\n它是最后一位主播，删除后会回到首次添加的引导页。';
+    }
+    if (!window.confirm(msg)) return;
     postJSON('/api/stations/delete', { id: id })
       .then(function (d) {
         if (d.error) { stTip('<b>' + esc(d.error) + '</b>'); return; }
@@ -4108,7 +4588,26 @@
     var sel = document.getElementById('ob-series');
     var note = document.getElementById('ob-src-note');
     var out = document.getElementById('ob-result');
+    var nameBox = document.getElementById('ob-name-box');
+    var nameInput = document.getElementById('ob-name');
+    var colorBox = document.getElementById('ob-color-box');
+    var palBox = document.getElementById('ob-palette');
     var picked = null;
+
+    /* 候选色块：点一下换成那个色（只改本地的 picked，跟着「就听 TA 的」一起提交）。
+       用 onclick 赋值而不是 addEventListener —— showPicker 可能被调用多次，
+       叠加监听会让一次点击执行 N 遍。 */
+    if (palBox) {
+      palBox.onclick = function (ev) {
+        var b = ev.target && ev.target.closest
+          ? ev.target.closest('.st-swatch[data-color]') : null;
+        if (!b) return;
+        var hex = b.getAttribute('data-color');
+        if (picked) picked.accent = hex;
+        var all = palBox.querySelectorAll('.st-swatch');
+        for (var i = 0; i < all.length; i++) all[i].classList.toggle('on', all[i] === b);
+      };
+    }
 
     function say(html) { if (out) out.innerHTML = html || ''; }
 
@@ -4132,6 +4631,8 @@
       picked = null;
       srcBox.hidden = true;
       saveBtn.hidden = true;
+      if (colorBox) colorBox.hidden = true;       // 上一次的候选别留着误导
+      if (palBox) palBox.innerHTML = '';
       postJSON('/api/stations/probe', { mid: mid }).then(function (d) {
         if (d.error) { say('<b>' + esc(d.error) + '</b>'); return; }
         picked = d.probe || null;
@@ -4142,21 +4643,39 @@
                 + esc((s.name || s.id) + '（' + s.total + ' 个）') + '</option>';
             }).join('');
         if (picked && picked.suggested) sel.value = picked.suggested;
-        /* 按头像自动取色（与设置页同一套）：顶栏那排灯靠 accent 上色，
-           不取的话灯一直是默认灰。取色是异步的 —— 用户手快先点了保存，
-           那就先不带色（和设置页行为一致），后台补色会再兜一次底。 */
+        /* 按头像算候选色（与设置页同一套）：默认等在一个「够鲜艳」的候选上，
+           用户点了别的就换成那个。取色是异步的 —— 手快先点了保存也行，
+           不带色时后台补色会再兜一次底。 */
+        if (colorBox) colorBox.hidden = true;
+        if (palBox) palBox.innerHTML = '';
         if (picked && picked.face) {
-          accentFromImage('/api/img?u=' + b64url(picked.face)).then(function (hex) {
-            if (picked && hex) picked.accent = hex;
+          paletteFromImage('/api/img?u=' + b64url(picked.face)).then(function (list) {
+            if (!picked || !list.length) return;
+            var def = pickAccent(list);
+            picked.accent = def;
+            if (palBox && colorBox) {
+              palBox.innerHTML = paletteHTML(list, def);
+              colorBox.hidden = false;
+            }
           });
         }
         srcBox.hidden = false;
         saveBtn.hidden = false;
+        /* 显示名：默认填 B 站昵称，但**允许改** —— 名字长短由用户说了算，
+           界面上所有标题都跟这个名字走。用户已经手改过就别覆盖掉他的输入。 */
+        if (nameBox && nameInput) {
+          if (!nameBox.hidden && (nameInput.value || '').trim()) {
+            /* 保留用户输入 */
+          } else {
+            nameInput.value = (picked && picked.name) || '';
+          }
+          nameBox.hidden = false;
+        }
         if (note) {
           note.hidden = !!srcs.length;
           if (!srcs.length) {
-            note.innerHTML = '这位的「合集和系列」里还没有可用的<b>系列</b>，'
-              + '加进来也能用，但回放清单会是空的（只有合集不行，归档接口只认系列）。';
+            note.innerHTML = '这位的「合集和系列」里还没有内容，'
+              + '加进来也能用，但回放清单会是空的（等 TA 建了合集或系列再点保存即可）。';
           }
         }
         say('查到 <b>' + esc((picked && picked.name) || ('UID ' + mid)) + '</b>'
@@ -4175,6 +4694,10 @@
         if (picked.face) body.face = picked.face;    // 头像给选择页卡片用
         if (picked.accent) body.accent = picked.accent;  // 按头像取的板块色
       }
+      // 自定义显示名（留空则用探测到的名字）：name 与 short 一起写，
+      // 前者是各处标题、后者是窄栏里的短名，两处不一致会看起来像两个主播。
+      var nm = nameInput ? (nameInput.value || '').trim() : '';
+      if (nm) { body.name = nm; body.short = nm; }
       var sid = (sel.value || '').trim();
       if (sid) body.series_id = sid;      // 留空 = 自动发现
       say('正在保存…');
@@ -4191,6 +4714,11 @@
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') (saveBtn.hidden ? probeBtn : saveBtn).click();
     });
+    if (nameInput) {
+      nameInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !saveBtn.hidden) save();
+      });
+    }
 
     function renderCards(list) {
       if (!grid) return;
@@ -4428,9 +4956,12 @@
       });
     }
 
-    /* index.html 里是写死加载主站那份 data/segments.js 的（主站行为不变）。
-       副站的分段在各自数据目录里，这里单独取回覆盖 window.SEGMENTS —— 必须在 boot 之前
-       完成，否则频道会拿主站的 cid 去匹配副站的分P，一个都对不上。 */
+    /* 每个点亮的板块（**含主站**）都各自取回自己的 segments.js / sung.js 合并。
+
+       以前主站那份是 index.html 静态加载 data/segments.js 的，所以这里特意跳过
+       主站；现在所有主播的数据都在 data/stations/<id>/ 下，静态那份只是包内快照
+       （新版是空的），统一都走 ?station= 取。必须在 boot 之前完成，否则频道会拿
+       别人的 cid 去匹配自己的分P，一个都对不上。 */
     // 从 segments.js 的文本里取出对象（格式固定是 `window.SEGMENTS = {...};`）
     function segObject(txt) {
       if (!txt) return null;
@@ -4439,33 +4970,24 @@
       try { return JSON.parse(txt.slice(i, k + 1)); } catch (e) { return null; }
     }
 
-    /* index.html 里静态加载的那份是**主站**的分段。多选时要把其余板块各自取回、
-       并进同一个对象（cid 全局唯一，直接合并不冲突）。
-       没选主站时先清空，免得主站的 cid 留在内存里白占地方。 */
     function loadStationSegments() {
-      var mine = [], keepMain = false;
-      ST_SET.forEach(function (id, i) {
-        var isMain = MAIN_ID ? (id === MAIN_ID) : (i === 0);
-        if (isMain) { keepMain = true; return; }
-        mine.push(id);
-      });
-      if (!mine.length) return Promise.resolve();
+      if (!ST_SET.length) return Promise.resolve();
+      // 一律先清空：不清的话上一轮留下的 cid 会赖在内存里（cid 全局唯一，
+      // 直接合并不冲突，但残留会让「换板块」后还认得别人的分P）
+      window.SEGMENTS = {};
+      window.SUNGKEYS = {};
       // 登记时刻（自动标注用）与分段同源同目录，一起取回合并
-      function objOf(txt) {
-        return segObject(txt);
-      }
-      if (!keepMain) { window.SEGMENTS = {}; window.SUNGKEYS = {}; }
-      return Promise.all(mine.map(function (id) {
+      return Promise.all(ST_SET.map(function (id) {
         var q = '?station=' + encodeURIComponent(id);
         return Promise.all([
           fetch('data/segments.js' + q).then(function (r) { return r.ok ? r.text() : ''; })
-            .then(objOf).catch(function () { return null; }),
+            .then(segObject).catch(function () { return null; }),
           fetch('data/sung.js' + q).then(function (r) { return r.ok ? r.text() : ''; })
-            .then(objOf).catch(function () { return null; })
+            .then(segObject).catch(function () { return null; })
         ]);   // 离线时忽略，页面会提示没有分段
       })).then(function (pairs) {
-        var merged = window.SEGMENTS || {};
-        var keys = window.SUNGKEYS || {};
+        var merged = {};
+        var keys = {};
         pairs.forEach(function (pair) {
           [merged, keys].forEach(function (box, i) {
             var o = pair[i];

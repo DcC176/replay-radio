@@ -156,6 +156,21 @@ window.__BOOT_T0 = Date.now();
 
     <div class="ob-result" id="ob-result"></div>
 
+    <div class="ob-name-box" id="ob-name-box" hidden>
+      <label class="ob-label" for="ob-name">显示名</label>
+      <input id="ob-name" type="text" autocomplete="off" spellcheck="false"
+             placeholder="想显示成什么名字">
+      <p class="ob-note">默认是 B 站昵称，可以改成任何你习惯的叫法（只影响界面显示）。</p>
+    </div>
+
+    <div class="ob-color-box" id="ob-color-box" hidden>
+      <label class="ob-label">板块颜色</label>
+      <div class="st-palette" id="ob-palette"></div>
+      <p class="ob-note" id="ob-color-note">这些都是 TA 头像上真实存在的颜色，
+        标的是各自占的面积；点一下就能换成那个。已经帮你默认挑了一个占比够大的，
+        不换也行。</p>
+    </div>
+
     <div class="ob-src" id="ob-src" hidden>
       <label class="ob-label" for="ob-series">回放来源</label>
       <select id="ob-series"></select>
@@ -520,17 +535,18 @@ window.__BOOT_T0 = Date.now();
         <div class="live-card-h">回放清单（自动获取）
           <button class="btn small ghost live-wheel-btn" id="series-refresh" type="button">重新获取</button>
         </div>
-        <p class="live-note">回放清单按<b>主播主页 → 合集和系列 → 系列·直播回放</b>自动获取，
+        <p class="live-note">回放清单按<b>主播主页 → 合集和系列</b>自动获取（<b>系列</b>和<b>合集</b>都行），
           只需要 UID —— 换成别的主播也一样。拿不到时点「重新获取」，或等它自己重试；
-          也可以在这里<b>手动指定</b>某位主播用哪个系列（见下面「主播管理」）。</p>
+          也可以在这里<b>手动指定</b>某位主播用哪个来源（见下面「主播管理」）。</p>
         <div class="live-result" id="series-state"></div>
       </div>
       <div class="live-card" style="margin-top:18px">
         <div class="live-card-h">主播管理</div>
         <p class="live-note">填 B 站<b>空间号</b>（个人主页网址
           <code>space.bilibili.com/&lt;数字&gt;</code> 里那串数字），点「检测」自动查出
-          主播名、直播间号与可选的回放系列。加进来的人会出现在顶栏那排色灯里 ——
-          <b>不用再手工改 data/stations.json</b>。</p>
+          主播名、直播间号与可选的回放来源。加进来的人会出现在顶栏那排色灯里 ——
+          <b>不用再手工改 data/stations.json</b>。下面列表里<b>点一下主播名就能改显示名</b>，
+          <b>点 ☆ 设为默认板块</b>（主站，顶栏品牌名跟着它走），<b>点 × 删除</b>。</p>
         <div class="live-send">
           <input id="st-mid" inputmode="numeric" autocomplete="off" placeholder="主播 UID">
           <button class="btn small primary" id="st-probe" type="button">检测</button>
@@ -539,12 +555,18 @@ window.__BOOT_T0 = Date.now();
           <select id="st-source"></select>
         </label>
         <p class="live-note" id="st-source-note" hidden></p>
+        <label class="seg-auto" id="st-name-box" hidden>显示名
+          <input id="st-name" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="默认用 B 站昵称">
+        </label>
         <label class="seg-auto" id="st-color-box" hidden>板块颜色
           <span class="st-color-wrap">
             <input type="color" id="st-accent" value="#8a8a95" aria-label="板块颜色">
             <button class="btn small ghost" id="st-accent-auto" type="button">按头像取色</button>
           </span>
         </label>
+        <div class="st-palette" id="st-palette" hidden></div>
+        <input type="color" id="st-pal-custom" hidden tabindex="-1" aria-hidden="true">
         <p class="live-note" id="st-accent-note" hidden></p>
         <div class="qp-btns">
           <button class="btn small primary" id="st-save" type="button" hidden>保存</button>

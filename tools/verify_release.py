@@ -134,6 +134,48 @@ def check_unpacked():
     return True
 
 
+def find_node():
+    """找 node（首屏冒烟要用）。找不到就跳过那一步，不当成失败。"""
+    p = shutil.which("node")
+    if p:
+        return p
+    cands = [os.path.join(os.path.expanduser("~"), ".workbuddy", "binaries",
+                          "node", "versions", v, "node.exe")
+             for v in ("22.22.2-6", "24.21.0")]
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    return shutil.which("node.exe")
+
+
+def check_first_screen():
+    """在浏览器环境（jsdom）里真跑一遍首屏 —— 只看接口是不够的。
+
+    v1.0.9 的教训：那版的前端引用了一个**不存在的函数名**，接口全都 200，
+    页面却永远停在「正在载入…」，连节目单接口都不会被请求。当时的自检
+    只打接口，于是全绿放行。这一步就是补那个洞，别删。
+    """
+    node = find_node()
+    script = os.path.join(ROOT, "tools", "tests", "smoke_first_screen.js")
+    if not node or not os.path.exists(script):
+        print("注意 没找到 node 或冒烟脚本，跳过首屏冒烟"
+              "（这一步拦的是「只坏在浏览器里」的错，有条件时务必跑）")
+        return True
+    env = dict(os.environ, PORT=str(PORT))
+    for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        env.pop(k, None)
+    r = subprocess.run([node, script], cwd=ROOT, env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = r.stdout.decode("utf-8", "replace")
+    for line in out.strip().splitlines()[-12:]:
+        print("    " + line)
+    if r.returncode != 0:
+        print("FAIL 首屏冒烟没通过（页面在浏览器环境里跑不起来）")
+        return False
+    print("OK   首屏冒烟通过（页面真的渲染出节目单，启动链完整）")
+    return True
+
+
 def main():
     if not os.path.exists(EXE):
         print("找不到 %s\n请先运行：python tools/build_exe.py" % EXE)
@@ -207,6 +249,11 @@ def main():
             newest = max(p["pubdate"] for p in d["programs"])
             print("OK   最新一集距今 %.1f 天：%s"
                   % ((time.time() - newest) / 86400.0, d["programs"][0]["title"]))
+
+        # 接口对了不等于页面能用 —— 必须真的把页面跑一遍
+        print("\n-- 首屏启动链（jsdom 真跑页面）--")
+        if not check_first_screen():
+            return 1
 
         # 再双击一次：不该起第二个实例，而应复用已在跑的那个。
         #
