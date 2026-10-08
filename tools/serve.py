@@ -1957,10 +1957,10 @@ def chat_state(sid=None):
         st = CHAT.get(sid)
         if st is None:
             st = {"subs": [], "backlog": [], "worker": {
-                "thread": None, "running": False, "popularity": 0, "error": ""}}
+                "thread": None, "running": False, "popularity": 0,
+                "error": "", "logged_err": ""}}
             CHAT[sid] = st
         return st
-_BUVID = [None]
 _UID = [None]
 
 
@@ -1971,19 +1971,17 @@ def self_uid():
             d = bili_get("https://api.bilibili.com/x/web-interface/nav")
             _UID[0] = int(((d.get("data") or {}).get("mid") or 0))
         except Exception:
-            _UID[0] = 0
+            # 取失败**不能**缓存：缓存 0 会把它钉死，之后每次连接都用 0 去认证，
+            # 网关直接关连接 —— 表现为弹幕永远连不上，只能重启。未登录时接口
+            # 返回的 mid 本来就是 0，那种「确定没登录」才值得缓存。
+            return 0
     return _UID[0]
 
 
-def buvid3():
-    """弹幕网关握手要带 buvid3（设备指纹），取一次缓存住。"""
-    if _BUVID[0] is None:
-        try:
-            d = bili_get("https://api.bilibili.com/x/frontend/finger/spi")
-            _BUVID[0] = ((d.get("data") or {}).get("b_3") or "")
-        except Exception:
-            _BUVID[0] = ""
-    return _BUVID[0]
+# buvid3 用下方「主播动态」段的 bili_buvid3()。这里原本**另写了一份**缓存
+# `_BUVID = [None]`，与那一份撞名：模块级后定义的那份（dict）把列表覆盖掉，
+# 于是 buvid3() 里的 _BUVID[0] 抛 KeyError，而 _chat_worker 的 except 又把异常
+# 吞进内存 —— 症状就是弹幕每 3 秒重连一次、永远连不上。
 
 
 def _ws_handshake(host, port, path, headers):
@@ -2125,14 +2123,15 @@ def _chat_worker(sid):
                 host = info["hosts"][0]["host"]
                 port = info["hosts"][0]["wss_port"] or 443
                 sess = load_credentials()[0]
-                ck = "buvid3=%s; b_nut=%d" % (buvid3(), int(time.time()))
+                ck = "buvid3=%s; b_nut=%d" % (bili_buvid3(), int(time.time()))
                 if sess:
                     ck = "SESSDATA=%s; %s" % (sess, ck)
                 sock = _ws_handshake(host, port, "/sub", {
                     "Origin": "https://live.bilibili.com", "User-Agent": UA, "Cookie": ck})
+                st["worker"]["logged_err"] = ""      # 连上了：下次失败照常记日志
                 _ws_send(sock, _bili_pack(json.dumps({
                     "uid": self_uid(), "roomid": int(cur_room()), "proto_ver": 2,
-                    "buvid": buvid3(), "platform": "web", "clientver": "1.14.3",
+                    "buvid": bili_buvid3(), "platform": "web", "clientver": "1.14.3",
                     "type": 2, "key": info["token"]}).encode(), 7))
                 last_hb = time.time()
                 while True:
@@ -2156,6 +2155,12 @@ def _chat_worker(sid):
                         raise RuntimeError("网关要求关闭")
             except Exception as e:
                 st["worker"]["error"] = "%s: %s" % (type(e).__name__, e)
+                # 以前这个错误只存在内存里，用户机上只能看到一句「连接中断」，
+                # 排查时毫无线索（真实原因就藏在这里）。同一个错误只记一次，
+                # 免得重连间隔 3 秒把日志刷爆。
+                if st["worker"]["error"] != st["worker"]["logged_err"]:
+                    st["worker"]["logged_err"] = st["worker"]["error"]
+                    print("[chat] %s 弹幕连接失败：%s" % (sid, st["worker"]["error"]))
                 _chat_broadcast(sid, {"type": "state", "text": "弹幕连接中断，正在重试…"})
             finally:
                 if sock:
