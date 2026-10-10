@@ -142,29 +142,40 @@ def report_progress(**kw):
 # 还要下载整支视频，抢起来比播放本身还凶。
 # 网页端把 media_busy() 接进来（tools/serve.py 装），命令行跑时没人接 = 不让路。
 PLAYBACK_BUSY = [None]
+# B 站限流（412）的冷却截止时间，由 tools/serve.py 接进来（返回时间戳）。
+# 为什么限流也要让：分段要下载整轨音频、抓节目单，和前台取流抢的是**同一份接口配额** ——
+# 它不停，限流就一直解除不了，前台清晰度就一直回不来（2026-10-10 实测：分段开着时
+# 降级反复触发，清晰度在 720P 和 480P 之间来回跳）。命令行跑时没人接 = 不让路。
+BAN_UNTIL = [None]
 YIELD_STEP = 2.0        # 让路时的轮询间隔
 YIELD_MAX = 120.0       # 单个分块最多让路这么久，免得播放不停就永远不干活
 
 
 def yield_to_playback():
-    """有人在看就等一下再下载。返回实际让路的秒数。"""
+    """有人在看、或 B 站正在限流，就先不抢出口。返回实际让路的秒数。"""
     fn = PLAYBACK_BUSY[0]
-    if fn is None:
+    ban = BAN_UNTIL[0]
+    if fn is None and ban is None:
         return 0.0
     t0 = time.time()
     told = False
     while True:
         try:
-            busy = bool(fn())
+            busy = bool(fn()) if fn else False
+            left = (float(ban()) - time.time()) if ban else 0.0
         except Exception:
             return time.time() - t0
         waited = time.time() - t0
-        if not busy or waited >= YIELD_MAX:
+        if (not busy and left <= 0) or waited >= YIELD_MAX:
             return waited
         if not told:
             told = True
-            report_progress(stage="让路中：有人在看，等这一块空下来")
-            log("    （有人在看直播/回放，先让路；最多等 %d 秒）" % int(YIELD_MAX))
+            if left > 0:
+                report_progress(stage="让路中：B 站限流中，先不抢接口")
+                log("    （B 站限流中，分段先让路；最多等 %d 秒）" % int(YIELD_MAX))
+            else:
+                report_progress(stage="让路中：有人在看，等这一块空下来")
+                log("    （有人在看直播/回放，先让路；最多等 %d 秒）" % int(YIELD_MAX))
         time.sleep(YIELD_STEP)
 
 

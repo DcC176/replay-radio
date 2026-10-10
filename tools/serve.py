@@ -1093,7 +1093,13 @@ def bili_get(url, referer=REFERER, timeout=25, fallback_anon=False):
         return _bili_fetch(url, referer, s, timeout)
     except urllib.error.HTTPError as e:
         if e.code == 412 and s and fallback_anon:
+            # 上一次冷却已结束才算「新一轮」，免得每次重试都往日志里刷一行。
+            # 这条日志是排障唯一线索：不然用户只看到「画质变差」，看不到原因。
+            fresh = time.time() >= _BAN["until"]
             _BAN["until"] = time.time() + BAN_COOLDOWN
+            if fresh:
+                print("[play] 取流撞上 B 站限流（412），暂时改用匿名方式"
+                      "（清晰度会降低，%d 秒后再试登录态）" % BAN_COOLDOWN)
             return _bili_fetch(url, referer, "", timeout)
         raise
 
@@ -1377,14 +1383,18 @@ def b64url_encode(s):
     return base64.urlsafe_b64encode(s.encode("utf-8")).decode("ascii").rstrip("=")
 
 
-DASH_CACHE = {}         # (bvid, cid) → (时间戳, dash 数据)
+DASH_CACHE = {}         # (bvid, cid) → (时间戳, dash 数据, 有效期秒数)
 DASH_TTL = 5400         # 90 分钟。播放地址约 2 小时过期，留足余量；同时避免频繁打 B 站接口触发风控
+# ⚠️ 降级（不带登录态）取到的那份**绝不能**按 90 分钟缓存：它最高只有 480P，
+# 而限流往往几十分钟就解除 —— 缓存会让 480P 一直挂着，用户以为画质永久变差了
+# （2026-10-10 实测：封禁早已解除，缓存却把 480P 钉了 90 分钟）。
+DASH_TTL_ANON = 30      # 降级结果的缓存下限（秒）
 
 
 def dash_data(bvid, cid):
     key = (bvid, cid)
     hit = DASH_CACHE.get(key)
-    if hit and time.time() - hit[0] < DASH_TTL:
+    if hit and time.time() - hit[0] < hit[2]:
         return hit[1], None
     url = ("https://api.bilibili.com/x/player/playurl?bvid=%s&cid=%s&fnval=16&fourk=1&qn=0"
            % (urllib.parse.quote(bvid), urllib.parse.quote(cid)))
@@ -1403,7 +1413,12 @@ def dash_data(bvid, cid):
     data = d.get("data") or {}
     if not (data.get("dash") or {}).get("video"):
         return None, "该视频没有 DASH 流"
-    DASH_CACHE[key] = (time.time(), data)
+    # 降级取到的：缓存只留到冷却结束为止，冷却一结束就立刻用登录态重试高清。
+    # ⚠️ 不能写死一个秒数 —— 缓存比冷却短的话，它会在冷却期内被反复刷新成低清，
+    # 高清就迟迟回不来（2026-10-10 实测：缓存 60s < 冷却 120s，等于永远刷新鲜度）。
+    left = _BAN["until"] - time.time()
+    ttl = DASH_TTL if left <= 0 else max(DASH_TTL_ANON, left)
+    DASH_CACHE[key] = (time.time(), data, ttl)
     return data, None
 
 
@@ -2713,6 +2728,8 @@ def _seg_worker():
                 mod.LOG_SINK[0] = logf
                 mod.PROGRESS_SINK[0] = _prog_sink
                 mod.PLAYBACK_BUSY[0] = media_busy   # 有人在看就给播放让路
+                # 限流期间别抢 B 站接口配额 —— 见 auto_segments.yield_to_playback
+                mod.BAN_UNTIL[0] = lambda: _BAN["until"]
 
                 prog = SEG_PROGRAMS.get(bvid)
                 res = mod.process_bvid(bvid, logf=logf,
