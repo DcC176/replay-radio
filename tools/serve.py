@@ -1060,7 +1060,16 @@ def urlopen(req, timeout):
         return urllib.request.urlopen(req, timeout=timeout)
 
 
-def bili_get(url, referer=REFERER, timeout=25):
+# B 站风控：请求太密会回 412（响应体 code=-412「request was banned」），持续几十分钟。
+# 实测「登录态被限流、匿名请求仍能取到」（2026-10-10，匿名返回 720P/480P）——
+# 所以取流撞上 412 就记住冷却时间、冷却期内**不带 SESSDATA**。否则每失败一次就
+# 再用登录态撞一次，会把风控窗口越撑越长，用户只看到「播放地址获取失败」反复刷。
+# ⚠️ 只对取流开（fallback_anon）：弹幕、发弹幕、动态这些**必须**带登录态的不能降级。
+_BAN = {"until": 0.0}
+BAN_COOLDOWN = 120
+
+
+def _bili_fetch(url, referer, sess, timeout):
     hdrs = {
         "User-Agent": UA,
         "Referer": referer,
@@ -1068,12 +1077,33 @@ def bili_get(url, referer=REFERER, timeout=25):
         "Accept-Encoding": "identity",
         "Origin": "https://www.bilibili.com",
     }
-    s = sessdata()
-    if s:
-        hdrs["Cookie"] = "SESSDATA=%s" % s
+    if sess:
+        hdrs["Cookie"] = "SESSDATA=%s" % sess
     req = urllib.request.Request(url, headers=hdrs)
     with urlopen(req, timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def bili_get(url, referer=REFERER, timeout=25, fallback_anon=False):
+    """打 B 站接口。fallback_anon=True 时，412 会自动去掉登录态再试一次（见 _BAN）。"""
+    s = sessdata()
+    if s and fallback_anon and time.time() < _BAN["until"]:
+        s = ""                      # 冷却期内直接匿名，别再去撞风控
+    try:
+        return _bili_fetch(url, referer, s, timeout)
+    except urllib.error.HTTPError as e:
+        if e.code == 412 and s and fallback_anon:
+            _BAN["until"] = time.time() + BAN_COOLDOWN
+            return _bili_fetch(url, referer, "", timeout)
+        raise
+
+
+def bili_err(e):
+    """把请求异常翻成人话。412 是最常见的那个：B 站风控限流，等一会儿自己会好。"""
+    if isinstance(e, urllib.error.HTTPError) and e.code == 412:
+        return ("B 站暂时拒绝了这个请求（风控限流 code -412），"
+                "多半是刚才请求太密 —— 等一会儿会自动恢复")
+    return "%s" % e
 
 
 def api_playurl(query):
@@ -1086,9 +1116,10 @@ def api_playurl(query):
            "&fnval=1&fnver=0&fourk=0&platform=pc&high_quality=1"
            % (urllib.parse.quote(bvid), urllib.parse.quote(cid), urllib.parse.quote(qn)))
     try:
-        d = bili_get(url, "https://www.bilibili.com/video/%s" % bvid)
+        d = bili_get(url, "https://www.bilibili.com/video/%s" % bvid,
+                     fallback_anon=True)
     except Exception as e:
-        return 502, {"error": "取播放地址失败：%s" % e}
+        return 502, {"error": "取播放地址失败：%s" % bili_err(e)}
 
     if d.get("code") != 0:
         return 502, {"error": "B 站返回 code=%s %s" % (d.get("code"), d.get("message"))}
@@ -1358,12 +1389,13 @@ def dash_data(bvid, cid):
     url = ("https://api.bilibili.com/x/player/playurl?bvid=%s&cid=%s&fnval=16&fourk=1&qn=0"
            % (urllib.parse.quote(bvid), urllib.parse.quote(cid)))
     try:
-        d = bili_get(url, "https://www.bilibili.com/video/%s" % bvid)
+        d = bili_get(url, "https://www.bilibili.com/video/%s" % bvid,
+                     fallback_anon=True)
     except Exception as e:
         # 风控（412）或网络抖动时，宁可先用过期的缓存，也不要直接失败
         if hit:
             return hit[1], "接口暂时不可用，使用缓存数据"
-        return None, "取 DASH 失败：%s" % e
+        return None, "取 DASH 失败：%s" % bili_err(e)
     if d.get("code") != 0:
         if hit:
             return hit[1], "B 站返回 code=%s，使用缓存数据" % d.get("code")
