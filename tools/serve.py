@@ -31,6 +31,7 @@ import json
 import os
 import queue
 import re
+import select
 import shutil
 import socket
 import ssl
@@ -1005,6 +1006,8 @@ STATIONLESS_OK = (
     "/api/ping", "/api/status", "/api/img", "/api/quit",
     "/api/page/alive", "/api/page/bye",
     "/api/protocol/register", "/api/protocol/unregister",
+    "/api/following/live",     # 只依赖登录态，与有没有注册主播无关
+    "/api/live/ws",            # 同上：房间号由 URL 带，跟注册表无关
 )
 
 
@@ -1836,37 +1839,187 @@ def api_live_wheel_status():
 
 
 DEFAULT_LIVE_QN = 250          # 超清。原画(10000)带宽太大，直播默认不抢它
-LIVE_URL_CACHE = {"at": 0.0, "qn": 0, "url": "", "qualities": [], "current_qn": 0}
+LIVE_URL_CACHE = {}            # room -> {at, qn, url, qualities, current_qn}
 LIVE_URL_TTL = 60              # 流地址带时效，缓存一分钟，别频繁打接口
 
 
-def live_play_url(qn):
+def live_play_url(room, qn):
     """取直播 FLV 地址（room/v1/Room/playUrl，不需要签名）。
 
     CDN 校验 Referer：不带 Referer 直连返回 403，所以浏览器只能在服务端中转后播放。
+    缓存**按房间分开**：监控室「关注的直播」会同时取好几路的地址，一份共享缓存
+    会互相覆盖 —— A 房间刚取完 B 房间就把它顶掉，两路都拿错流（做多路前必须拆）。
+    取流撞上 B 站限流（412）会自动降级匿名再试（见 _BAN），跟回放取流同一套策略。
     """
+    room = str(room or cur_room())
     now = time.time()
-    c = LIVE_URL_CACHE
-    if c["url"] and c["qn"] == qn and now - c["at"] < LIVE_URL_TTL:
+    c = LIVE_URL_CACHE.get(room)
+    if c and c["qn"] == qn and now - c["at"] < LIVE_URL_TTL:
         return c
     url = ("https://api.live.bilibili.com/room/v1/Room/playUrl?cid=%s&qn=%s"
-           "&platform=web&ptype=8"
-           % (urllib.parse.quote(cur_room()), urllib.parse.quote(str(qn))))
-    d = bili_get(url, "https://live.bilibili.com/%s" % cur_room())
+           "&platform=web&ptype=8" % (urllib.parse.quote(room), urllib.parse.quote(str(qn))))
+    d = bili_get(url, "https://live.bilibili.com/%s" % room, fallback_anon=True)
     if d.get("code") != 0:
         raise RuntimeError("B 站返回 code=%s" % d.get("code"))
     data = d.get("data") or {}
     media = ((data.get("durl") or [{}])[0]).get("url") or ""
     if not media:
         raise RuntimeError("没有取到直播流地址（可能刚下播）")
-    c.update(at=now, qn=qn, url=media, current_qn=data.get("current_qn") or qn,
-             qualities=[{"qn": q["qn"], "desc": q["desc"]}
-                        for q in (data.get("quality_description") or [])])
+    c = {"at": now, "qn": qn, "url": media,
+         "current_qn": data.get("current_qn") or qn,
+         "qualities": [{"qn": q["qn"], "desc": q["desc"]}
+                       for q in (data.get("quality_description") or [])]}
+    LIVE_URL_CACHE[room] = c
     return c
 
 
-def api_live_playinfo():
-    """直播间画面信息：是否开播 + 可选清晰度。前端据此决定要不要接管播放器。"""
+# ---------------------------------------------------------------- 关注列表（监控室）
+# 读**登录账号**的关注列表，过滤出正在直播的 —— 监控室「关注的直播」的数据源。
+# 两步：followings 翻页拿 uid（必须带 SESSDATA）→ get_status_info_by_uids 批量查开播。
+# 后一个接口 fetch_live_for 已在用，天然支持一次带多个 uids[]。
+
+FOLLOWING_API = "https://api.bilibili.com/x/relation/followings"
+FOLLOW_LIVE_TTL = 120        # 直播状态两分钟足够新，也免得每次切页面都打一轮接口
+FOLLOW_CACHE = {"at": 0.0, "list": []}
+
+
+def _following_uids():
+    uid = self_uid()
+    if not uid:
+        raise RuntimeError("需要登录：设置页扫码登录后才能读关注列表")
+    out = []
+    pn = 1
+    while True:
+        d = bili_get("%s?vmid=%s&pn=%d&ps=50" % (FOLLOWING_API, uid, pn))
+        if d.get("code") != 0:
+            raise RuntimeError("关注列表 code=%s %s" % (d.get("code"), d.get("message")))
+        data = d.get("data") or {}
+        lst = data.get("list") or []
+        out.extend(str(u.get("mid")) for u in lst if u.get("mid"))
+        if not lst or len(out) >= int(data.get("total") or 0) or pn > 20:
+            break
+        pn += 1
+    return out
+
+
+def api_following_live():
+    """关注列表里正在直播的主播（未登录给明确提示；结果缓存 2 分钟）。"""
+    if not sessdata():
+        return 401, {"error": "需要登录：设置页扫码登录后才能读关注列表"}
+    now = time.time()
+    if FOLLOW_CACHE["list"] and now - FOLLOW_CACHE["at"] < FOLLOW_LIVE_TTL:
+        return 200, {"list": FOLLOW_CACHE["list"], "cached": True}
+    uids = _following_uids()
+    live = []
+    for i in range(0, len(uids), 50):          # 一批 50 个，URL 长度安全
+        q = "&".join("uids[]=%s" % u for u in uids[i:i + 50])
+        d = bili_get("https://api.live.bilibili.com/room/v1/Room/"
+                     "get_status_info_by_uids?%s" % q, "https://live.bilibili.com/")
+        if d.get("code") != 0:
+            continue                            # 一批失败不整体失败：下一批照样出人
+        for uid, info in (d.get("data") or {}).items():
+            if int(info.get("live_status") or 0) != 1:
+                continue
+            live.append({
+                "mid": str(uid),
+                "uname": info.get("uname") or "",
+                "face": info.get("face") or "",
+                "title": info.get("title") or "",
+                "room": str(info.get("room_id") or ""),
+                "cover": info.get("cover_from_user") or info.get("keyframe") or "",
+                "area": info.get("area_v2_name") or "",
+                "online": info.get("online") or 0,
+            })
+    live.sort(key=lambda x: -(x.get("online") or 0))    # 人多的排前面，监控场景直觉
+    FOLLOW_CACHE.update(at=now, list=live)
+    return 200, {"list": live}
+
+
+# --- 添加任意直播间（监控室）：房间号 / 直播间链接 / b23.tv 短链 → 可直接播的卡片 ---
+
+LIVE_ROOM_INFO_API = "https://api.live.bilibili.com/room/v1/Room/get_info"
+
+
+def _resolve_room_input(text):
+    """把用户输入解析成 (mid, 真实房间号)。
+
+    房间号可能是**短号**（短号 ≠ 真实 room_id，playUrl 只认真实的），
+    所以拿到数字后必须走 get_info 换算，顺带拿到 uid。
+    """
+    text = (text or "").strip()
+    m = re.search(r"live\.bilibili\.com/(\d+)", text)
+    if not m:
+        m = re.search(r"b23\.tv/([A-Za-z0-9]+)", text)
+        if m:
+            # b23 短链要跟一次跳转才能拿到直播间号；urllib 默认就会跟随，
+            # geturl() 给的是最终地址。
+            req = urllib.request.Request("https://b23.tv/" + m.group(1),
+                                         headers={"User-Agent": UA})
+            with DIRECT_OPENER.open(req, timeout=15) as r:
+                final = r.geturl()
+            m2 = re.search(r"live\.bilibili\.com/(\d+)", final)
+            if not m2:
+                raise RuntimeError("短链没跳转到直播间（跳到了 %s）" % final[:80])
+            text = m2.group(1)
+        else:
+            m3 = re.search(r"\d+", text)
+            if not m3:
+                raise RuntimeError("认不出房间号：请输入房间号、直播间链接或 b23.tv 短链")
+            text = m3.group(0)
+    else:
+        text = m.group(1)
+    d = bili_get("%s?room_id=%s" % (LIVE_ROOM_INFO_API, urllib.parse.quote(text)))
+    if d.get("code") != 0:
+        raise RuntimeError("直播间信息 code=%s %s" % (d.get("code"), d.get("message")))
+    info = d.get("data") or {}
+    return str(info.get("uid") or ""), str(info.get("room_id") or text)
+
+
+def api_live_resolve(query):
+    """把「房间号 / 直播间链接 / b23 短链」解析成监控室能直接播的卡片信息。"""
+    try:
+        mid, room = _resolve_room_input(query.get("input", [""])[0])
+        live = fetch_live_for(mid) if mid else None
+    except Exception as e:
+        return 502, {"error": "%s" % bili_err(e)}
+    if not live:
+        return 502, {"error": "该直播间没有绑定 uid，无法播放"}
+    return 200, {"mid": mid, "room": room, "uname": live.get("uname"),
+                 "title": live.get("title"), "living": bool(live.get("living")),
+                 "cover": live.get("cover"), "area": live.get("area"),
+                 "online": live.get("online"), "face": live.get("face")}
+
+
+def api_live_playinfo(query):
+    """直播间画面信息：是否开播 + 可选清晰度。前端据此决定要不要接管播放器。
+
+    ?mid=<uid>：查**注册表之外**的主播（监控室「关注的直播」用）—— 直接按 uid 查，
+    返回里带 room_id 供取流用。不带参数则跟当前板块走（原有行为不变）。
+    """
+    mid = (query.get("mid", [""])[0] or "").strip()
+    room = (query.get("room", [""])[0] or "").strip()
+    if room.isdigit():
+        # 已知房间号时不必再按 uid 查一遍开播状态（省一趟 B 站接口，少一点被限流的概率）
+        return 200, playinfo_by_room(room)
+    if mid and mid.isdigit() and mid != cur_mid():
+        try:
+            live = fetch_live_for(mid)
+        except Exception as e:
+            return 502, {"error": "开播状态获取失败：%s" % bili_err(e)}
+        out = {"room_id": live.get("room_id") or "", "mid": mid}
+        out.update(living=bool(live.get("living")), title=live.get("title") or "",
+                   online=live.get("online") or 0, uname=live.get("uname") or "",
+                   face=live.get("face") or "", cover=live.get("cover") or "",
+                   area=live.get("area") or "", start=live.get("start") or 0,
+                   url=live.get("url") or "")
+        if out["living"] and out["room_id"]:
+            try:
+                info = live_play_url(out["room_id"], DEFAULT_LIVE_QN)
+                out["qualities"] = info["qualities"]
+                out["current_qn"] = info["current_qn"]
+            except Exception as e:
+                out["error"] = str(e)
+        return 200, out
     out = {"room_id": cur_room(), "mid": cur_mid(), "station": station_head()}
     try:
         live = fetch_live()
@@ -1880,7 +2033,7 @@ def api_live_playinfo():
                url=live.get("url") or "")
     if out["living"]:
         try:
-            info = live_play_url(DEFAULT_LIVE_QN)
+            info = live_play_url(cur_room(), DEFAULT_LIVE_QN)
             out["qualities"] = info["qualities"]
             out["current_qn"] = info["current_qn"]
         except Exception as e:
@@ -1889,14 +2042,19 @@ def api_live_playinfo():
 
 
 def api_live_stream(handler, query):
-    """转发直播流。直播是持续流，不支持 Range；断开由客户端决定（关页面 / 切走）。"""
+    """转发直播流。直播是持续流，不支持 Range；断开由客户端决定（关页面 / 切走）。
+
+    ?room=<真实房间号>：播**注册表之外**的直播间（监控室「关注的直播」用）；
+    不带则跟当前板块走（原有行为不变）。
+    """
+    room = (query.get("room", [""])[0] or "").strip() or cur_room()
     qn = parse_int(query.get("qn", ["0"])[0], DEFAULT_LIVE_QN)
     try:
-        media = live_play_url(qn)["url"]
+        media = live_play_url(room, qn)["url"]
     except Exception as e:
-        return 502, {"error": "取直播流失败：%s" % e}
+        return 502, {"error": "取直播流失败：%s" % bili_err(e)}
     req = urllib.request.Request(media, headers={
-        "User-Agent": UA, "Referer": "https://live.bilibili.com/%s" % cur_room(),
+        "User-Agent": UA, "Referer": "https://live.bilibili.com/%s" % room,
         "Accept": "*/*",
     })
     try:
@@ -1920,6 +2078,147 @@ def api_live_stream(handler, query):
         except Exception:
             pass
     return None, None
+
+
+def playinfo_by_room(room):
+    """按**房间号**确认「这一路现在能不能播」，只打一次 playUrl（比按 uid 查少一趟接口）。
+
+    监控室「关注的直播」在左栏就已经拿到了标题 / 主播名 / 是否在播，这里只为画质档位
+    与一次确认：取不到流地址就是「没在播 / 刚下播」。
+    """
+    out = {"room_id": str(room), "mid": "", "living": False}
+    try:
+        info = live_play_url(room, DEFAULT_LIVE_QN)
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+    out.update(living=True, qualities=info["qualities"], current_qn=info["current_qn"])
+    return out
+
+
+# ---------------------------------------------------------------- 直播流走 WebSocket
+# 为什么不用 HTTP 长连接：浏览器对**同一个源**只给 6 条 HTTP/1.1 连接，而每路直播
+# 都是一条永不结束的响应 —— 6 路之后同源的一切请求（连 /api/ping 都算）全部排队：
+# 实测 10 格里恰好前 6 格在播、另外 4 格永远停在「正在获取开播状态」，页面里
+# fetch('/api/ping') 38 秒都没返回（2026-10-12）。
+# WebSocket 不占那 6 条（Chrome 对同名主机的 WS 上限是 255），而且 mpegts.js 见到
+# ws:// 会自动改用内置的 WebSocket 加载器 —— 服务端只要把 FLV 字节按二进制帧发出去，
+# 前端一行解析代码都不用写。
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_CHUNK = 262144
+
+
+def ws_accept(handler):
+    """服务端一侧的 WebSocket 握手（跟上面连 B 站网关那个方向相反）。"""
+    key = handler.headers.get("Sec-WebSocket-Key") or ""
+    if not key:
+        handler.send_error(400, "need Sec-WebSocket-Key")
+        return False
+    accept = base64.b64encode(
+        hashlib.sha1((key + WS_GUID).encode("ascii")).digest()).decode("ascii")
+    handler.send_response(101, "Switching Protocols")
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    return True
+
+
+def ws_frame(payload):
+    """二进制帧。服务端发出的帧按协议**不加掩码**（客户端发来的才要）。"""
+    n = len(payload)
+    if n < 126:
+        head = struct.pack("!BB", 0x82, n)
+    elif n < 65536:
+        head = struct.pack("!BBH", 0x82, 126, n)
+    else:
+        head = struct.pack("!BBQ", 0x82, 127, n)
+    return head + payload
+
+
+def ws_client_closed(handler):
+    """非阻塞看一眼客户端有没有发 close 帧（关页面 / 取消勾选 / 离开监控室时都会发）。
+
+    ⚠️ 必须感知这件事：只靠「写失败」判断的话，客户端已经不再读取，
+    而我们还在一股脑往 TCP 里灌 —— 要等浏览器自己的超时（几十秒）才断，
+    这期间上游那条流一直占着（孤儿连接，多路同看时就是白占带宽）。
+    客户端只会发控制帧（close / ping），所以读到什么都可以直接丢掉。
+    用 select 探可读性、再交给 rfile 读 —— 千万别把 socket 设成非阻塞：
+    BufferedReader 遇到非阻塞 socket 会抛 BlockingIOError。
+    """
+    try:
+        ready, _, _ = select.select([handler.connection], [], [], 0)
+    except OSError:
+        return True
+    if not ready:
+        return False
+    try:
+        head = handler.rfile.read(2)
+        if len(head) < 2:
+            return True                      # 对端已经关掉
+        opcode = head[0] & 0x0F
+        ln = head[1] & 0x7F
+        n = ln
+        if ln == 126:
+            n = struct.unpack("!H", handler.rfile.read(2))[0]
+        elif ln == 127:
+            n = struct.unpack("!Q", handler.rfile.read(8))[0]
+        if head[1] & 0x80:                   # 客户端发来的帧一定带掩码
+            handler.rfile.read(4)
+        if n:
+            handler.rfile.read(n)
+        return opcode == 0x8
+    except (OSError, struct.error):
+        return True
+
+
+def api_live_ws(handler, query):
+    """把一路直播流按 WebSocket 二进制帧推给页面（监控室多路同看的取流通道）。
+
+    ?room=<真实房间号>：播注册表之外的直播间；不带则跟当前板块走。
+    断开由客户端决定（关页面 / 取消勾选 / 切走），这里写失败或收到 close 就收工。
+    """
+    room = (query.get("room", [""])[0] or "").strip() or cur_room()
+    qn = parse_int(query.get("qn", ["0"])[0], DEFAULT_LIVE_QN)
+    if not ws_accept(handler):
+        return
+    handler.close_connection = True          # 别指望这条连接还能再收 HTTP 请求
+    try:
+        media = live_play_url(room, qn)["url"]
+        req = urllib.request.Request(media, headers={
+            "User-Agent": UA, "Referer": "https://live.bilibili.com/%s" % room,
+            "Accept": "*/*",
+        })
+        resp = urlopen(req, 30)
+    except Exception as e:
+        # 握手已经回过 101 了，只能用「一条关闭帧」把失败告诉前端
+        try:
+            handler.wfile.write(struct.pack("!BBH", 0x88, 2, 1011))
+            handler.wfile.flush()
+        except Exception:
+            pass
+        print("[play] ws 房间 %s 取流失败：%s" % (room, bili_err(e)))
+        return
+    try:
+        while True:
+            if ws_client_closed(handler):
+                try:
+                    handler.wfile.write(struct.pack("!BBH", 0x88, 2, 1000))
+                    handler.wfile.flush()
+                except Exception:
+                    pass
+                break
+            chunk = resp.read(WS_CHUNK)
+            if not chunk:
+                break
+            handler.wfile.write(ws_frame(chunk))
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+        pass                       # 观众关页面 / 取消勾选，属正常断开
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
 
 
 def api_live_credential(obj):
@@ -2458,6 +2757,13 @@ def build_programs():
             if detail:
                 results[bvid] = detail
 
+    # 一个详情都拿不到，基本只有一种可能：撞上限流了（412）。这时**必须报错**，
+    # 不能返回一份空清单 —— 否则调用方会把「0 个节目」当成新结果存下来，把本地完整的
+    # 那份覆盖掉，界面就从「40 个节目」直接变成「没有匹配的节目」（2026-10-12 实测踩过）。
+    # 报错会走既有的失败回退：继续用上一次那份清单。
+    if not results:
+        raise RuntimeError("投稿详情一个都没取到（共 %d 个，多半是 B 站限流）" % len(archives))
+
     tz = __import__("datetime").timezone(
         __import__("datetime").timedelta(hours=8))
     dtime = __import__("datetime").datetime
@@ -2680,7 +2986,7 @@ def segments_have():
 MEDIA_SEEN = [0.0]        # 最近一次媒体活动的时刻
 MEDIA_QUIET = 20.0        # 安静这么久才算「没人看」
 MEDIA_PATHS = ("/api/stream", "/api/dash", "/api/dashinfo", "/api/playurl",
-               "/api/live/stream", "/api/live/playinfo")
+               "/api/live/stream", "/api/live/ws", "/api/live/playinfo")
 
 
 def media_touch():
@@ -3330,6 +3636,8 @@ def api_protocol_status():
 PROGRAMS_STALE_AFTER = 60          # 秒：比这更新就直接用，连一次上游请求都不发
 _PROGRAMS_BUILDING = {}            # sid -> True（同一主播同时只允许一个重抓在跑）
 _PROGRAMS_BUILD_LOCK = threading.Lock()
+_PROGRAMS_LOW = {}                 # sid -> 第一次发现「腰斩」的时刻（见 _programs_build）
+_PROGRAMS_LOW_CONFIRM = 1800       # 秒：同一份残缺清单持续这么久才认（限流不会持续半小时）
 
 
 def programs_cache_file(st=None):
@@ -3389,10 +3697,43 @@ def _programs_store(sid, st, out):
     _write_programs_disk(st, out)
 
 
+def _programs_prev(sid, st):
+    """上一次存下的那份清单（先内存后磁盘）。"""
+    with PROGRAMS_LOCK:
+        hit = (PROGRAMS_CACHE.get(sid) or {}).get("data")
+    return hit or _read_programs_disk(st)
+
+
 def _programs_build(sid, st, label):
     """抓一次并落盘。调用方负责 _PROGRAMS_BUILDING 的置位与清理。"""
     _CUR.station = st            # 后台线程里线程局部的「当前主播」是空的，得自己绑
     out = build_programs()
+    new_n = int((out.get("meta") or {}).get("count") or 0)
+    prev = _programs_prev(sid, st)
+    prev_n = int(((prev or {}).get("meta") or {}).get("count") or 0)
+
+    # 上游被限流时会「半途返回」：归档列得出来，但每个投稿的详情大半取不到，
+    # 拼出来的清单就残缺（实测 68 → 1 → 0）。这种结果**不能覆盖**本地那份好的，
+    # 否则界面会从「68 个节目」变成「没有匹配的节目」，而且刷新也回不来。
+    # 判据是「腰斩」；但要**同一份残缺清单持续够久**才认它 —— 真删了投稿也得能落地，
+    # 而限流窗口里前端每 4 秒就会重试一次，只按次数确认等于没守。
+    if prev_n >= 4 and new_n * 2 < prev_n:
+        first = _PROGRAMS_LOW.get(sid)
+        if first and time.time() - first >= _PROGRAMS_LOW_CONFIRM:
+            _PROGRAMS_LOW.pop(sid, None)          # 半小时都是这么少 → 认了
+        else:
+            _PROGRAMS_LOW.setdefault(sid, time.time())
+            keep = dict(prev)
+            keep["cached"] = True
+            keep["stale"] = True
+            keep["error"] = ("B 站这次只返回了 %d 个节目（上次 %d 个，多半是限流），"
+                             "先继续用上一次的清单" % (new_n, prev_n))
+            print("[programs] %s %s：只拿到 %d 个（上次 %d 个），疑似上游限流 —— 保留上一次的清单"
+                  % (sid, label, new_n, prev_n))
+            return keep
+    else:
+        _PROGRAMS_LOW.pop(sid, None)
+
     out["cached"] = False
     out["stale"] = False
     _programs_store(sid, st, out)
@@ -3495,8 +3836,8 @@ STATUS_CACHE = {}
 STATUS_LOCK = threading.Lock()
 
 
-def fetch_live():
-    """当前是否在播。
+def fetch_live_for(mid):
+    """按 uid 查开播状态。mid 是字符串/数字都行 —— 监控室「关注的直播」用的就是它。
 
     走 room/v1/Room/get_status_info_by_uids：只认 uid，不需要真实房间号，
     不挑 Referer、不需要 wbi 签名、也不依赖登录态，字段里直接带
@@ -3505,18 +3846,21 @@ def fetch_live():
     实测被排除的几条路：get_info 要先知道真实房间号且给的是另一个号；
     space/wbi/acc/info 无签名时风控 -352；空间投稿类接口 -799 限流。
     """
+    mid = str(mid)
     d = bili_get("https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids"
-                 "?uids[]=%s" % cur_mid(), "https://live.bilibili.com/")
+                 "?uids[]=%s" % urllib.parse.quote(mid), "https://live.bilibili.com/")
     if d.get("code") != 0:
         raise RuntimeError("开播接口 code=%s %s" % (d.get("code"), d.get("message")))
-    info = ((d.get("data") or {}).get(cur_mid())) or {}
+    info = ((d.get("data") or {}).get(mid)) or {}
     if not info:
         raise RuntimeError("开播接口未返回该 uid 的数据")
 
-    room = str(info.get("room_id") or cur_room())
+    room = str(info.get("room_id") or "")
+    if mid == cur_mid():
+        room = room or cur_room()      # 注册主播保留原有兜底；关注的主播直接用返回值
     return {
         "living": int(info.get("live_status") or 0) == 1,
-        "mid": cur_mid(),
+        "mid": mid,
         "room_id": room,
         "url": "https://live.bilibili.com/%s" % room,
         "uname": info.get("uname") or "",
@@ -3529,6 +3873,10 @@ def fetch_live():
         # live_time 未开播时是 0 或负数，前端据此判断「从未开播」还是「已播多久」
         "start": int(info.get("live_time") or 0),
     }
+
+
+def fetch_live():
+    return fetch_live_for(cur_mid())
 
 
 def api_status_board(refresh=False):
@@ -3724,7 +4072,11 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/live/wheel":
             return self._json(*api_live_wheel_status())
         if parsed.path == "/api/live/playinfo":
-            return self._json(*api_live_playinfo())
+            return self._json(*api_live_playinfo(q))
+        if parsed.path == "/api/live/resolve":
+            return self._json(*api_live_resolve(q))
+        if parsed.path == "/api/following/live":
+            return self._json(*api_following_live())
         if parsed.path == "/api/live/danmu-info":
             return self._json(*api_live_danmu_info())
         if parsed.path == "/api/live/chat/stream":
@@ -3734,6 +4086,9 @@ class Handler(SimpleHTTPRequestHandler):
             if code is None:
                 return
             return self._json(code, obj)
+        if parsed.path == "/api/live/ws":
+            api_live_ws(self, q)       # 自己写完整个响应（含握手），这里不用再回 JSON
+            return
         if parsed.path == "/api/stream":
             code, obj = api_stream(self, q)
             if code is None:

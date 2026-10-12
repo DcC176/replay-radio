@@ -240,9 +240,17 @@ def main():
             st, body = get("api/programs?refresh=1&hard=1")
             d3 = json.loads(body.decode("utf-8"))
             if d3["meta"]["generated_at"] == stamps[0]:
-                print("FAIL hard=1 没有真正重抓（generated_at 未推进）")
-                return 1
-            print("OK   hard=1 是实时重抓（generated_at 推进到 %d）" % d3["meta"]["generated_at"])
+                # v1.0.19 起，「抓回来的清单比本地少一半以上」会被判为上游限流、
+                # 保留本地那份不动（这正是我们要的行为）。所以「没推进」本身不再是失败，
+                # 但必须能说出为什么 —— 说不出来才是真 bug（比如重抓根本没发起）。
+                why = d3.get("error") or ""
+                if not why:
+                    print("FAIL hard=1 没有真正重抓（generated_at 未推进，且没给出原因）")
+                    return 1
+                print("WARN hard=1 这次拿回的是残缺清单，已按设计保留本地那份：%s" % why)
+            else:
+                print("OK   hard=1 是实时重抓（generated_at 推进到 %d）"
+                      % d3["meta"]["generated_at"])
             d = d3
 
         if d is not None:

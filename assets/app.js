@@ -3020,6 +3020,7 @@
       void document.body.offsetWidth;
     }
     document.body.classList.toggle('view-other', name !== 'live');
+    document.body.classList.toggle('view-multi', name === 'multi');
     document.body.classList.toggle('view-broadcast', name === 'broadcast');
     document.querySelectorAll('.tab').forEach(function (t) {
       t.classList.toggle('active', t.getAttribute('data-view') === name);
@@ -5507,6 +5508,16 @@
     return s ? s.value : 'min';
   }
 
+  /* 监控室的取流地址走 WebSocket。原因不是「WS 更快」，而是**连接数**：
+     浏览器对同一个源只给 6 条 HTTP/1.1 连接，而每路直播都是一条永不结束的响应 ——
+     6 路之后同源的一切请求（连心跳 /api/ping 都算）全部排队，表现就是「开多了
+     后面的格子一直卡在正在获取开播状态」（实测 10 格里恰好前 6 格在播）。
+     WebSocket 不占那 6 条；mpegts.js 见到 ws:// 会自动用内置的 WebSocket 加载器。 */
+  function multiWsUrl(qs) {
+    return (location.protocol === 'https:' ? 'wss://' : 'ws://')
+      + location.host + '/api/live/ws?' + qs;
+  }
+
   function multiPickQn(choice, qualities) {
     var list = (qualities || []).slice();
     if (!list.length) return 250;
@@ -5517,6 +5528,36 @@
     return hit ? hit.qn : lowest.qn;      // 该主播没有这一档就退到最低档
   }
 
+  /* 缩放热区：**八个方向**都能拖（四边 + 四角）。
+     用户反馈「变换框被遮住」—— 浮在页面右下角的主播状态胶囊会压住卡片的右下角，
+     只留那一个角根本够不着；改成贴着卡片四周都能捏，就不怕被别的浮层盖住。
+     自由布局下才显示（CSS 控制），其中右下角带可见的斜纹提示。 */
+  var MS_HANDLES = ['n', 's', 'w', 'e', 'nw', 'ne', 'sw', 'se'];
+
+  function msHandlesHtml() {
+    return MS_HANDLES.map(function (d) {
+      return '<i class="ms-h ms-h-' + d + '" data-hd="' + d + '"></i>';
+    }).join('');
+  }
+
+  /* 格子底栏（两个来源共用）：名字 + 状态 + 单路画质 + 音量 + 独奏/全屏/聚焦。
+     参照 DD_Monitor：每一路都能独立调音量与画质，而不是只有全局档。
+     末尾的 .ms-h* 是「自由」布局下的拖动/缩放手柄，别的布局里由 CSS 藏起来。 */
+  function msBarHtml(tag, name, accent) {
+    return '<div class="ms-bar">'
+      + '<span class="ms-tag" style="background:' + esc(accent) + '">' + esc(tag) + '</span>'
+      + '<span class="ms-name">' + esc(name) + '</span>'
+      + '<span class="ms-state" data-role="state">—</span>'
+      + '<span class="ms-btns">'
+      + '<select class="ms-qn" data-act="qn" title="这一路的画质"></select>'
+      + '<input class="ms-vol" data-act="vol" type="range" min="0" max="100" value="0" title="这一路的音量">'
+      + '<button class="ms-btn" data-act="solo" type="button" title="只开这一路的声音">🔇</button>'
+      + '<button class="ms-btn" data-act="full" type="button" title="这一路全屏">⛶</button>'
+      + '<button class="ms-btn" data-act="zoom" type="button" title="聚焦 / 取消聚焦">⤢</button>'
+      + '</span></div>'
+      + msHandlesHtml();
+  }
+
   function multiCellHtml(s) {
     var accent = s.accent || '#8a8a95';
     var picked = ST_SET.indexOf(s.id) >= 0;
@@ -5525,17 +5566,13 @@
       + '<video muted playsinline></video>'
       + '<div class="ms-off"><b>' + esc(s.short || s.name) + '</b>'
       + '<span class="ms-off-sub">正在获取开播状态…</span></div>'
-      + '<div class="ms-bar">'
-      + '<span class="ms-tag" style="background:' + esc(accent) + '">' + esc(s.tag || '') + '</span>'
-      + '<span class="ms-name">' + esc(s.short || s.name) + '</span>'
-      + '<span class="ms-state" data-role="state">—</span>'
-      + '<span class="ms-btns">'
-      + '<button class="ms-btn" data-act="solo" type="button" title="只开这一路的声音">🔇</button>'
-      + '<button class="ms-btn" data-act="zoom" type="button" title="放大 / 还原">⤢</button>'
-      + '</span></div></div>';
+      + msBarHtml(s.tag || '', s.short || s.name, accent) + '</div>';
   }
 
-  function startMultiCell(s, cell) {
+  function startMultiCell(s, cell, src) {
+    src = src || {};                     // 「关注的直播」传 {info, stream}：按 uid 查、按房间取
+    cell._s = s;                         // 单路画质/音量控件要按格重启，把数据挂在格子上
+    cell._src = src;
     var video = cell.querySelector('video');
     var off = cell.querySelector('.ms-off');
     var sub = cell.querySelector('.ms-off-sub');
@@ -5558,10 +5595,12 @@
 
     function connect(qualities, attempt) {
       if (typeof mpegts === 'undefined') { offline('播放库缺失（assets/mpegts.js）'); return; }
-      var qn = multiPickQn(multiQnChoice(), qualities);
+      if (!cell.isConnected) return;     // 这一格已被移除（取消勾选），别再连
+      var qn = cell._qn || multiPickQn(multiQnChoice(), qualities);   // 单路选择优先于全局
       var p = mpegts.createPlayer({
         type: 'flv', isLive: true,
-        url: '/api/live/stream?station=' + encodeURIComponent(s.id) + '&qn=' + qn,
+        url: src.stream ? src.stream(qn)
+          : multiWsUrl('station=' + encodeURIComponent(s.id) + '&qn=' + qn),
         enableStashBuffer: false,
         liveBufferLatencyChasing: true
       });
@@ -5573,6 +5612,7 @@
       } catch (e) { /* 浏览器可能要求手势 */ }
       p.on(mpegts.Events.ERROR, function () {
         try { p.destroy(); } catch (e) { /* 已销毁 */ }
+        if (!cell.isConnected) return;   // 格子已移除：别再挂重连定时器
         if (attempt < maxTry) {
           stateEl.textContent = '连接中断，重连中…（' + (attempt + 1) + '/' + maxTry + '）';
           multiTimers.push(setTimeout(function () { connect(qualities, attempt + 1); }, 3000));
@@ -5580,14 +5620,26 @@
           offline('连接中断，可点「刷新开播状态」重试');
         }
       });
+      /* 键取「格子的 DOM id」而不是 s.id：关注源的数据里根本没有 id 字段
+         （只有 mid），以前这里存进去的是 undefined —— 于是**所有关注格共用同一个键**，
+         换一路的画质会把其它几路一起 destroy，取消勾选时也匹配不上、流不会被销毁。
+         格子的 data-id 两个来源都稳定（板块是主播 id、关注是 mid）。 */
+      p._cellKey = cell.getAttribute('data-id') || s.id;
       multiPlayers.push(p);
     }
 
-    fetch('/api/live/playinfo?station=' + encodeURIComponent(s.id))
+    fetch(src.info || '/api/live/playinfo?station=' + encodeURIComponent(s.id))
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (state.view !== 'multi') return;   // 同上：等开播状态回来时可能已经切走了
         cell.classList.remove('loading');
+        var sel = cell.querySelector('.ms-qn');
+        if (sel && d && d.qualities && d.qualities.length) {
+          sel.innerHTML = d.qualities.map(function (x) {
+            return '<option value="' + x.qn + '">' + esc(x.desc || x.qn) + '</option>';
+          }).join('');
+          sel.value = String(cell._qn || d.current_qn || d.qualities[0].qn);
+        }
         if (!d || !d.living) {
           offline(d && d.title ? ('未开播 · ' + d.title) : '未开播');
           return;
@@ -5615,15 +5667,13 @@
     });
   }
 
-  function multiZoom(cell) {
-    var grid = document.getElementById('multi-grid');
-    if (!grid) return;
-    var on = !cell.classList.contains('lead');
-    Array.prototype.forEach.call(grid.querySelectorAll('.ms-cell'), function (c) {
-      c.classList.remove('lead');
-    });
-    if (on) cell.classList.add('lead');
-    grid.classList.toggle('solo', on);
+  /* ⤢ = 聚焦：这一格变成主画面（占上半屏），其余格在下面一排平铺 —— 再点一次取消。
+     以前这里是「独占放大」（其余格隐藏）—— 那种效果现在由布局「1」覆盖。
+     真实布局在 applyMultiLayout 里算：这里只改「聚焦谁」。 */
+  function multiFocus(cell) {
+    var id = cell.getAttribute('data-id');
+    multiFocusId = (multiFocusId === id) ? '' : id;
+    applyMultiLayout();
   }
 
   function bindMulti() {
@@ -5637,19 +5687,160 @@
       if (!cell) return;
       var act = btn.getAttribute('data-act');
       if (act === 'solo') multiSolo(cell);
-      if (act === 'zoom') multiZoom(cell);
+      if (act === 'zoom') multiFocus(cell);
+      if (act === 'full') {
+        var v = cell.querySelector('video');
+        if (v && v.requestFullscreen) {
+          try { v.requestFullscreen(); } catch (err) { /* 浏览器拒绝就算了 */ }
+        }
+      }
+    });
+    // 每格独立音量与画质（参照 DD_Monitor：每一路都能单独调，不用动全局档）
+    grid.addEventListener('input', function (e) {
+      if (!e.target.classList || !e.target.classList.contains('ms-vol')) return;
+      var cell = e.target.closest('.ms-cell');
+      var v = cell && cell.querySelector('video');
+      if (v) {
+        v.volume = e.target.value / 100;
+        v.muted = e.target.value === '0';
+      }
+    });
+    grid.addEventListener('change', function (e) {
+      if (!e.target.classList || !e.target.classList.contains('ms-qn')) return;
+      var cell = e.target.closest('.ms-cell');
+      if (!cell || !cell._s) return;
+      cell._qn = parseInt(e.target.value, 10) || 0;
+      multiRestartCell(cell);
+    });
+    /* 自由布局：按住卡片任意位置拖动，捏住四周（四边或四角）缩放。
+       底栏上的按钮/滑杆/下拉照常能点（pointerdown 里先把控件排除掉，否则一按按钮就开始拖）。
+       位置尺寸都是画布的百分比，拖完写回记忆。 */
+    grid.addEventListener('pointerdown', function (e) {
+      if (multiLayout !== 'free') return;
+      var cell = e.target.closest ? e.target.closest('.ms-cell') : null;
+      if (!cell) return;
+      if (e.target.closest('.ms-btn, .ms-qn, .ms-vol')) return;
+      var hd = (e.target.getAttribute && e.target.getAttribute('data-hd')) || '';
+      e.preventDefault();
+      var box = grid.getBoundingClientRect();
+      var sx = e.clientX, sy = e.clientY;
+      var r = {
+        x: parseFloat(cell.style.left) || 0, y: parseFloat(cell.style.top) || 0,
+        w: parseFloat(cell.style.width) || FREE_MIN_W,
+        h: parseFloat(cell.style.height) || FREE_MIN_H
+      };
+      multiFreeZ += 1;
+      cell.style.zIndex = String(20 + (multiFreeZ % 30));   // 正在拖的那张浮到最上面
+      cell.classList.add('dragging');
+
+      function moveTo(ev) {
+        var dx = (ev.clientX - sx) / box.width * 100;
+        var dy = (ev.clientY - sy) / box.height * 100;
+        var x = r.x, y = r.y, w = r.w, h = r.h;
+        if (hd) {
+          // 捏的是哪条边就改哪条：改左边/上边时要连带挪 x/y，右边/下边不动它
+          var right = r.x + r.w, bottom = r.y + r.h;
+          if (hd.indexOf('e') >= 0) {
+            w = Math.min(100 - r.x, Math.max(FREE_MIN_W, r.w + dx));
+          } else if (hd.indexOf('w') >= 0) {
+            x = Math.min(right - FREE_MIN_W, Math.max(0, r.x + dx));
+            w = right - x;
+          }
+          if (hd.indexOf('s') >= 0) {
+            h = Math.min(100 - r.y, Math.max(FREE_MIN_H, r.h + dy));
+          } else if (hd.indexOf('n') >= 0) {
+            y = Math.min(bottom - FREE_MIN_H, Math.max(0, r.y + dy));
+            h = bottom - y;
+          }
+        } else {
+          x = Math.min(100 - w, Math.max(0, r.x + dx));
+          y = Math.min(100 - h, Math.max(0, r.y + dy));
+        }
+        cell.style.left = x + '%';
+        cell.style.top = y + '%';
+        cell.style.width = w + '%';
+        cell.style.height = h + '%';
+      }
+
+      function stop() {
+        window.removeEventListener('pointermove', moveTo);
+        window.removeEventListener('pointerup', stop);
+        cell.classList.remove('dragging');
+        saveFreeRects(grid);
+      }
+      window.addEventListener('pointermove', moveTo);
+      window.addEventListener('pointerup', stop);
     });
     var rf = document.getElementById('multi-refresh');
     if (rf) rf.addEventListener('click', function () { renderMulti(); });
     var qs = document.getElementById('multi-qn');
     if (qs) qs.addEventListener('change', function () { renderMulti(); });
+    Array.prototype.forEach.call(
+      document.querySelectorAll('#multi-src [data-msrc]'), function (b) {
+        // 来源是记住的：先把按钮状态对齐上次的选择，再挂切换
+        b.classList.toggle('on', b.getAttribute('data-msrc') === multiSrc);
+        b.addEventListener('click', function () {
+          var next = b.getAttribute('data-msrc');
+          if (next === multiSrc) return;
+          multiSrc = next;
+          store.set('xl_mf_src', multiSrc);
+          Array.prototype.forEach.call(
+            document.querySelectorAll('#multi-src [data-msrc]'), function (x) {
+              x.classList.toggle('on', x === b);
+            });
+          renderMulti();
+        });
+      });
+    Array.prototype.forEach.call(
+      document.querySelectorAll('#multi-layout [data-ml]'), function (b) {
+        b.classList.toggle('on', b.getAttribute('data-ml') === multiLayout);
+        b.addEventListener('click', function () {
+          multiLayout = b.getAttribute('data-ml');
+          store.set('xl_mf_layout', multiLayout);
+          Array.prototype.forEach.call(
+            document.querySelectorAll('#multi-layout [data-ml]'), function (x) {
+              x.classList.toggle('on', x === b);
+            });
+          // 布局只管「怎么排」：换布局不碰已经在播的直播间。
+          // （以前这里会把超出上限的那几路取消勾选并关掉，切一下布局就丢人 —— 用户反馈）
+          applyMultiLayout();
+        });
+      });
+    var add = document.getElementById('multi-add');
+    if (add) add.addEventListener('click', multiAdd);
+    var side = document.getElementById('multi-side');
+    if (side) {
+      /* 用 pointerdown 而不是 click：左栏会被后台刷新（关注列表定时重取）
+         整体换掉 innerHTML，若「按下」与「松开」之间节点被换掉，click 就落在一个
+         已经脱离文档的节点上，委托收不到 —— 表现正是「点一下有概率没反应」。
+         pointerdown 在按下那一刻就触发，不受这个竞态影响。 */
+      side.addEventListener('pointerdown', function (e) {
+        var item = e.target.closest ? e.target.closest('.mf-item') : null;
+        if (!item) return;
+        toggleFollow(item.getAttribute('data-mid'), item);
+      });
+      side.addEventListener('input', function (e) {
+        if (!e.target.classList.contains('mf-search')) return;
+        var kw = e.target.value.trim().toLowerCase();
+        Array.prototype.forEach.call(side.querySelectorAll('.mf-item'), function (it) {
+          it.style.display = (!kw || it.textContent.toLowerCase().indexOf(kw) >= 0) ? '' : 'none';
+        });
+      });
+    }
+    // 窗口一变，可用高度就变了：重新算列数与行高（自由布局是百分比，等比跟着走）
+    window.addEventListener('resize', function () {
+      if (state.view === 'multi') applyMultiLayout();
+    });
   }
 
   function renderMulti() {
     var grid = document.getElementById('multi-grid');
     if (!grid) return;
     multiTeardown();
-    grid.classList.remove('solo');
+    applyMultiLayout();
+    if (multiSrc === 'following') { renderMultiFollowing(); return; }
+    var side = document.getElementById('multi-side');
+    if (side) side.hidden = true;
     fetchStations().then(function (list) {
       // 名单是异步回来的：等它回来时用户可能已经切走了 —— 这时不该再接流
       if (state.view !== 'multi') return;
@@ -5660,13 +5851,358 @@
       grid.innerHTML = list.map(multiCellHtml).join('');
       var note = document.getElementById('multi-note');
       if (note) {
-        note.textContent = list.length + ' 路 · 声音默认关闭，点 🔊 独奏；点 ⤢ 放大';
+        note.textContent = list.length + ' 路 · 声音默认关闭，点 🔊 独奏；点 ⤢ 聚焦';
       }
       list.forEach(function (s) {
         var cell = grid.querySelector('.ms-cell[data-id="' + s.id + '"]');
         if (cell) startMultiCell(s, cell);
       });
+      applyMultiLayout();               // 路数定下来了：按它排一次
     });
+  }
+
+  /* ------- 关注的直播：数据源是**登录账号**的关注列表（/api/following/live） ------- */
+  /* 播放与「我的板块」共用同一套格子（独奏/放大/断流重连），差别只在取流地址：
+     这些主播不在注册表里，按 uid 查开播（?mid=）、按房间号取流（?room=）。
+     默认不自动播：每路直播都是一条常驻流，本机到 B 站实测只有 1~1.4 MB/s，
+     多路低清也会挤爆 —— 点左栏把它加进墙，同时最多 4 路。 */
+  var multiSrc = store.get('xl_mf_src', 'stations') || 'stations';   // 来源也记住，刷新后回到上次那一边
+  var multiFollowOn = store.get('xl_mf_on', {}) || {};     // mid -> true（已在监控墙里的）
+  var multiFollowList = [];
+  var multiCustom = store.get('xl_mf_custom', []) || [];   // 手动添加的直播间（「＋ 添加直播间」）
+  var multiLayout = store.get('xl_mf_layout', 'auto') || 'auto';
+  var multiFocusId = '';                                    // 聚焦中的那格（不记忆：刷新后回到均分）
+  var multiFreeRects = store.get('xl_mf_rects', {}) || {};  // 自由布局：id -> {x,y,w,h}，单位百分比
+  var multiFreeZ = 0;                                       // 拖动时把当前那张浮到最上面
+  var FREE_MIN_W = 14, FREE_MIN_H = 16;                     // 再小就看不清画面了
+
+  function mfAllList() {   // 左栏 = 手动添加的 + 关注列表里在播的（按 mid 去重，添加的在前）
+    var seen = {};
+    var out = [];
+    multiCustom.concat(multiFollowList).forEach(function (s) {
+      if (s && s.mid && !seen[s.mid]) { seen[s.mid] = 1; out.push(s); }
+    });
+    return out;
+  }
+
+  function saveMfState() {
+    store.set('xl_mf_on', multiFollowOn);
+    store.set('xl_mf_custom', multiCustom);
+  }
+
+  /* 布局改成「每次重算」：列数、行高、跨列、聚焦、自由定位全部写在 grid 的行内样式上。
+     以前只给 grid 挂 g1/g2/… 类、每格固定 16:9 —— 2 路时只占上面一行，下面空一大片。
+     现在按**当前路数**排（2 路左右、3 路上 1 下 2、4 路四宫格…），并把可用高度均分。
+     调用点：切布局、路数变化（加/取消一路）、进入监控室、窗口尺寸变化。 */
+  function multiCols(n) {
+    if (n <= 1) return 1;
+    if (n <= 4) return 2;      // 2 路左右；3 路让第 1 格跨两列 → 上 1 下 2；4 路四宫格
+    if (n <= 9) return 3;
+    return 4;
+  }
+
+  /* 画面墙该有多高：从 grid 在文档里的位置一直铺到视口底部，但要给右下角那个
+     「主播状态」悬浮胶囊（position:fixed 108×40 + 20px 边距）留出位置 ——
+     否则铺到底时右下角那张卡的底栏按钮与缩放角点会被它压住，点不到（用户反馈）。
+     ⚠️ 用 offsetTop 链而不是 getBoundingClientRect：切页入场动画是 translate
+     （viewEnter 会整体下移 10px），rect 会把那 10px 算进去，高度就短一截。 */
+  var MULTI_BOTTOM_GAP = 64;         // 视口底部留给悬浮胶囊的高度
+
+  function sizeMultiGrid() {
+    var grid = document.getElementById('multi-grid');
+    if (!grid || state.view !== 'multi') return;
+    var node = grid, top = 0;
+    while (node) { top += node.offsetTop; node = node.offsetParent; }
+    var h = Math.max(260, Math.round(window.innerHeight - top - MULTI_BOTTOM_GAP));
+    grid.style.height = h + 'px';
+    var side = document.getElementById('multi-side');
+    if (side && !side.hidden) side.style.maxHeight = h + 'px';   // 左栏跟画面墙一样高
+  }
+
+  /* 自由布局里每格的位置尺寸，单位是画布的百分比 —— 窗口变了也等比跟着走。
+     没有记忆时先按自动排布给个初始值，用户拖过之后就一直是拖好的那个。 */
+  function freeRectFor(id, idx, n) {
+    var r = multiFreeRects[id];
+    if (r && typeof r.x === 'number') return r;
+    var cols = multiCols(n), rows = Math.ceil(n / cols), gap = 1.2;
+    return {
+      x: (idx % cols) * (100 / cols) + gap / 2,
+      y: Math.floor(idx / cols) * (100 / rows) + gap / 2,
+      w: 100 / cols - gap,
+      h: 100 / rows - gap
+    };
+  }
+
+  function saveFreeRects(grid) {
+    Array.prototype.forEach.call(grid.querySelectorAll('.ms-cell'), function (c) {
+      var id = c.getAttribute('data-id');
+      if (!id) return;
+      multiFreeRects[id] = {
+        x: parseFloat(c.style.left) || 0, y: parseFloat(c.style.top) || 0,
+        w: parseFloat(c.style.width) || FREE_MIN_W,
+        h: parseFloat(c.style.height) || FREE_MIN_H
+      };
+    });
+    store.set('xl_mf_rects', multiFreeRects);
+  }
+
+  function applyMultiLayout() {
+    var grid = document.getElementById('multi-grid');
+    if (!grid) return;
+    var cells = grid.querySelectorAll('.ms-cell');
+    var n = cells.length;
+    var i, c, box, cols, narrow;
+    // 聚焦的那格可能已经被取消勾选删掉了；只剩一格时聚焦也没有意义
+    if (multiFocusId && !grid.querySelector('.ms-cell[data-id="' + multiFocusId + '"]')) {
+      multiFocusId = '';
+    }
+    if (n < 2) multiFocusId = '';
+    if (multiLayout === 'free') multiFocusId = '';   // 自由布局用拖动缩放，不用聚焦
+
+    grid.classList.toggle('free', multiLayout === 'free');
+    grid.style.gridTemplateColumns = '';
+    grid.style.gridTemplateRows = '';
+    for (i = 0; i < cells.length; i++) {
+      c = cells[i];
+      c.classList.remove('lead');
+      c.style.gridColumn = '';
+      c.style.left = c.style.top = c.style.width = c.style.height = '';
+      c.style.zIndex = '';
+    }
+    if (!n) { sizeMultiGrid(); return; }
+
+    if (multiLayout === 'free') {
+      for (i = 0; i < cells.length; i++) {
+        box = freeRectFor(cells[i].getAttribute('data-id'), i, n);
+        cells[i].style.left = box.x + '%';
+        cells[i].style.top = box.y + '%';
+        cells[i].style.width = box.w + '%';
+        cells[i].style.height = box.h + '%';
+      }
+      sizeMultiGrid();
+      return;
+    }
+
+    narrow = window.innerWidth < 820;      // 窄屏一律单列，别把格子挤成一条缝
+    if (multiFocusId) {
+      var lead = grid.querySelector('.ms-cell[data-id="' + multiFocusId + '"]');
+      lead.classList.add('lead');          // order:-1 → 自动落到第一行
+      cols = narrow ? 1 : Math.min(n - 1, 4);
+      if (cols < 1) cols = 1;
+      grid.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+      grid.style.gridTemplateRows = '1.9fr';   // 主画面约占 2/3，其余行均分剩下的
+      lead.style.gridColumn = '1 / -1';
+    } else if (multiLayout === 'auto') {
+      cols = narrow ? 1 : multiCols(n);
+      grid.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+      if (!narrow && n === 3) cells[0].style.gridColumn = '1 / -1';
+    } else {
+      cols = narrow ? 1 : ({ g1: 1, g2: 2, g4: 2, g6: 3, g9: 3 }[multiLayout] || 1);
+      grid.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+    }
+    sizeMultiGrid();
+  }
+
+  function multiRestartCell(cell) {   // 单路画质切换：只重连这一格，别的路不动
+    var key = cell.getAttribute('data-id');
+    multiPlayers = multiPlayers.filter(function (p) {
+      if (p && p._cellKey === key) {
+        try { p.destroy(); } catch (e) { /* 已销毁 */ }
+        return false;
+      }
+      return true;
+    });
+    startMultiCell(cell._s, cell, cell._src);
+  }
+
+  function multiAdd() {   // ＋ 添加直播间：房间号 / 直播间链接 / b23.tv 短链
+    var text = window.prompt('输入直播间号、直播间链接（live.bilibili.com/…）或 b23.tv 短链：');
+    if (!text) return;
+    mfNote('正在解析「' + text.slice(0, 40) + '」…');
+    fetch('/api/live/resolve?input=' + encodeURIComponent(text))
+      .then(function (r) {
+        return r.json().then(function (j) { return { code: r.status, j: j }; });
+      })
+      .then(function (res) {
+        if (state.view !== 'multi') return;
+        if (res.code !== 200) {
+          mfNote((res.j && res.j.error) || '添加失败');
+          return;
+        }
+        var card = res.j;
+        var dup = mfAllList().some(function (x) { return x.mid === card.mid; });
+        if (!dup) multiCustom.unshift(card);
+        multiFollowOn[card.mid] = true;
+        saveMfState();
+        if (multiSrc !== 'following') {
+          var b = document.querySelector('#multi-src [data-msrc="following"]');
+          if (b) {
+            b.click();                     // 走切换事件：按钮状态与记忆一起更新
+          } else {
+            multiSrc = 'following';
+            store.set('xl_mf_src', multiSrc);
+            renderMulti();
+          }
+          return;                        // click 里会自己渲染
+        }
+        renderFollowList();
+        renderFollowGrid();
+        mfNote('已添加：' + (card.uname || ('房间 ' + card.room))
+          + (card.living ? '' : '（当前未开播，格子会显示状态）'));
+      })
+      .catch(function () {
+        if (state.view !== 'multi') return;
+        mfNote('添加失败（网络问题），稍后再试');
+      });
+  }
+
+  function mfNote(text) {
+    var n = document.getElementById('multi-note');
+    if (n) n.textContent = text || '';
+  }
+
+  function multiFollowCellHtml(s) {
+    return '<div class="ms-cell loading" data-id="' + esc(s.mid) + '" style="--lc:#8a8a95">'
+      + '<video muted playsinline></video>'
+      + '<div class="ms-off"><b>' + esc(s.uname) + '</b>'
+      + '<span class="ms-off-sub">正在获取开播状态…</span></div>'
+      + msBarHtml('关注', s.uname, '#8a8a95') + '</div>';
+  }
+
+  function startMultiFollowCell(s, cell) {
+    startMultiCell(s, cell, {
+      // 左栏数据里已经有房间号了：按房间号确认（只打一趟 B 站接口），比再按 uid 查一遍快
+      info: '/api/live/playinfo?room=' + encodeURIComponent(s.room),
+      stream: function (qn) {
+        return multiWsUrl('room=' + encodeURIComponent(s.room) + '&qn=' + qn);
+      }
+    });
+  }
+
+  function mfItemHtml(s) {
+    var on = multiFollowOn[s.mid] ? ' on' : '';
+    var img = s.face
+      ? '<img class="mf-face" src="' + dynImg(s.face) + '" alt="">'
+      : '<span class="mf-face mf-noface"></span>';
+    return '<div class="mf-item' + on + '" data-mid="' + esc(s.mid) + '">' + img
+      + '<div class="mf-meta"><div class="mf-name">' + esc(s.uname)
+      + '<span class="mf-live">LIVE</span></div>'
+      + '<div class="mf-title" title="' + esc(s.title) + '">' + esc(s.title || '直播中') + '</div></div>'
+      + '<div class="mf-pop">' + fmtNum(s.online || 0) + '</div></div>';
+  }
+
+  function renderFollowGrid() {
+    var grid = document.getElementById('multi-grid');
+    if (!grid) return;
+    multiTeardown();
+    applyMultiLayout();
+    var picked = mfAllList().filter(function (s) { return multiFollowOn[s.mid]; });
+    if (!picked.length) {
+      grid.innerHTML = '<p class="sub">点左侧列表里正在直播的主播，把它加进监控墙'
+        + '（默认不自动播：每路都是一条常驻流，看几路由你点几路）。'
+        + '也可以用「＋ 添加直播间」直接输入房间号。</p>';
+      return;
+    }
+    grid.innerHTML = picked.map(multiFollowCellHtml).join('');
+    picked.forEach(function (s) {
+      var cell = grid.querySelector('.ms-cell[data-id="' + s.mid + '"]');
+      if (cell) startMultiFollowCell(s, cell);
+    });
+    applyMultiLayout();                 // 路数定下来了：按它排一次
+  }
+
+  function addFollowCell(s) {
+    var grid = document.getElementById('multi-grid');
+    if (!grid) return;
+    // 墙上原来是「空提示」时，先把提示换成真正的格子
+    if (!grid.querySelector('.ms-cell')) grid.innerHTML = '';
+    var tmp = document.createElement('div');
+    tmp.innerHTML = multiFollowCellHtml(s);
+    var cell = tmp.firstChild;
+    grid.appendChild(cell);
+    startMultiFollowCell(s, cell);
+    applyMultiLayout();
+  }
+
+  function dropFollowCell(mid) {
+    var grid = document.getElementById('multi-grid');
+    multiPlayers = multiPlayers.filter(function (p) {
+      if (p && p._cellKey === mid) { try { p.destroy(); } catch (e) { /* 已销毁 */ } return false; }
+      return true;
+    });
+    var cell = grid && grid.querySelector('.ms-cell[data-id="' + mid + '"]');
+    if (cell) cell.remove();
+    if (grid) applyMultiLayout();
+  }
+
+  function toggleFollow(mid, item) {
+    if (multiFollowOn[mid]) {
+      delete multiFollowOn[mid];
+      if (item) item.classList.remove('on');
+      dropFollowCell(mid);
+      saveMfState();
+      if (!Object.keys(multiFollowOn).length) renderFollowGrid();   // 空了就回到提示页
+      return;
+    }
+    var s = null;
+    mfAllList().some(function (x) { if (x.mid === mid) { s = x; return true; } return false; });
+    if (!s) {
+      // 以前这里直接 return：点了完全没反应，用户只会觉得「点不动」。
+      // 会走到这里的真实情况是列表刚被后台刷新过（那一位下播了），所以重刷一次列表。
+      mfNote('这一位已不在列表里（可能刚下播）—— 已刷新列表');
+      renderFollowList();
+      return;
+    }
+    multiFollowOn[mid] = true;
+    if (item) item.classList.add('on');
+    saveMfState();
+    addFollowCell(s);
+  }
+
+  function renderFollowList() {
+    var side = document.getElementById('multi-side');
+    if (!side) return;
+    side.hidden = false;
+    var list = mfAllList();
+    if (!list.length) {
+      side.innerHTML = '<p class="sub" style="padding:10px">关注列表里现在没有人在播；'
+        + '也可以用「＋ 添加直播间」直接输入房间号或链接。</p>';
+      return;
+    }
+    side.innerHTML = '<input class="mf-search" type="search" placeholder="搜主播名 / 标题…">'
+      + list.map(mfItemHtml).join('');
+  }
+
+  function renderMultiFollowing() {
+    var side = document.getElementById('multi-side');
+    var grid = document.getElementById('multi-grid');
+    if (!side || !grid) return;
+    side.hidden = false;
+    side.innerHTML = '<p class="sub" style="padding:10px">正在读关注列表…</p>';
+    grid.innerHTML = '';
+    renderFollowGrid();    // 已勾选的先画出来；关注数据回来后左栏会再刷新一次
+    fetch('/api/following/live')
+      .then(function (r) {
+        return r.json().then(function (j) { return { code: r.status, j: j }; });
+      })
+      .then(function (res) {
+        if (state.view !== 'multi') return;   // 等回来时可能已经切走了
+        if (res.code !== 200) {
+          side.innerHTML = '<p class="sub" style="padding:10px">'
+            + esc((res.j && res.j.error) || '读取失败') + '</p>';
+          renderFollowGrid();
+          return;
+        }
+        multiFollowList = res.j.list || [];
+        renderFollowList();
+        renderFollowGrid();
+        mfNote(multiFollowList.length + ' 位关注在播 · 点左侧加入监控墙（声音默认关）');
+      })
+      .catch(function () {
+        if (state.view !== 'multi') return;
+        side.innerHTML = '<p class="sub" style="padding:10px">关注列表读取失败（网络或接口限流），稍后再试。</p>';
+        renderFollowGrid();
+      });
   }
 
 
