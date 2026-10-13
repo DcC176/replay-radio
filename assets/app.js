@@ -5501,6 +5501,7 @@
       try { p.destroy(); } catch (e) { /* 已经销毁 */ }
     });
     multiPlayers = [];
+    mfPickedKey = '';          // 拆过之后墙上没格子了：下次必须重建（见 renderFollowGrid）
   }
 
   function multiQnChoice() {
@@ -5772,7 +5773,12 @@
       window.addEventListener('pointerup', stop);
     });
     var rf = document.getElementById('multi-refresh');
-    if (rf) rf.addEventListener('click', function () { renderMulti(); });
+    if (rf) rf.addEventListener('click', function () {
+      // 「关注的直播」下只刷名单、**不动画面墙**：走 renderMulti 会先 multiTeardown 把正在播的
+      // 几路全部销毁再重连，刷新一下要黑屏好几秒 —— 而用户要的只是「状态新一点」。
+      if (multiSrc === 'following') { renderMultiFollowing(true); return; }
+      renderMulti(true);
+    });
     var qs = document.getElementById('multi-qn');
     if (qs) qs.addEventListener('change', function () { renderMulti(); });
     Array.prototype.forEach.call(
@@ -5833,12 +5839,12 @@
     });
   }
 
-  function renderMulti() {
+  function renderMulti(force) {
     var grid = document.getElementById('multi-grid');
     if (!grid) return;
     multiTeardown();
     applyMultiLayout();
-    if (multiSrc === 'following') { renderMultiFollowing(); return; }
+    if (multiSrc === 'following') { renderMultiFollowing(force); return; }
     var side = document.getElementById('multi-side');
     if (side) side.hidden = true;
     fetchStations().then(function (list) {
@@ -5875,6 +5881,8 @@
   var multiFreeRects = store.get('xl_mf_rects', {}) || {};  // 自由布局：id -> {x,y,w,h}，单位百分比
   var multiFreeZ = 0;                                       // 拖动时把当前那张浮到最上面
   var FREE_MIN_W = 14, FREE_MIN_H = 16;                     // 再小就看不清画面了
+  var mfPickedKey = '';      // 墙上这批格子的指纹（mid@room）：没变就不重建，别把直播流断掉
+  var mfReqSeq = 0;          // 关注列表请求序号：晚回来的旧响应不许覆盖新结果
 
   function mfAllList() {   // 左栏 = 手动添加的 + 关注列表里在播的（按 mid 去重，添加的在前）
     var seen = {};
@@ -6046,7 +6054,7 @@
           return;                        // click 里会自己渲染
         }
         renderFollowList();
-        renderFollowGrid();
+        renderFollowGrid(true);       // 只多一路：别把已在播的其它几路一起断掉重连
         mfNote('已添加：' + (card.uname || ('房间 ' + card.room))
           + (card.living ? '' : '（当前未开播，格子会显示状态）'));
       })
@@ -6082,7 +6090,9 @@
   function mfItemHtml(s) {
     var on = multiFollowOn[s.mid] ? ' on' : '';
     var img = s.face
-      ? '<img class="mf-face" src="' + dynImg(s.face) + '" alt="">'
+      // 懒加载 + 异步解码：名单可能有上百条，一次性打几百个 /api/img 会把本机服务的
+      // 连接池占满（同源只有 6 条 HTTP/1.1），慢的是「整页其它请求跟着排队」。
+      ? '<img class="mf-face" src="' + dynImg(s.face) + '" alt="" loading="lazy" decoding="async">'
       : '<span class="mf-face mf-noface"></span>';
     return '<div class="mf-item' + on + '" data-mid="' + esc(s.mid) + '">' + img
       + '<div class="mf-meta"><div class="mf-name">' + esc(s.uname)
@@ -6091,12 +6101,25 @@
       + '<div class="mf-pop">' + fmtNum(s.online || 0) + '</div></div>';
   }
 
-  function renderFollowGrid() {
+  function mfPicked() {      // 当前该在墙上的那几路
+    return mfAllList().filter(function (s) { return multiFollowOn[s.mid]; });
+  }
+
+  function mfPickedKeyNow() {   // 上面那批的指纹：mid + 房间号（房间号变了要重新取流）
+    return mfPicked().map(function (s) { return s.mid + '@' + s.room; }).join(',');
+  }
+
+  function renderFollowGrid(keepIfSame) {
     var grid = document.getElementById('multi-grid');
     if (!grid) return;
+    var picked = mfPicked();
+    // 墙上这批格子（mid@room）与上次一模一样时**不重建**：重建 = multiTeardown 把每路直播
+    // 都销毁再重连，刷新一次要黑屏好几秒。名单没变就别动它（只有静默刷新才会传 keepIfSame）。
+    var key = mfPickedKeyNow();
+    if (keepIfSame && key === mfPickedKey && grid.querySelector('.ms-cell')) return;
+    mfPickedKey = key;
     multiTeardown();
     applyMultiLayout();
-    var picked = mfAllList().filter(function (s) { return multiFollowOn[s.mid]; });
     if (!picked.length) {
       grid.innerHTML = '<p class="sub">点左侧列表里正在直播的主播，把它加进监控墙'
         + '（默认不自动播：每路都是一条常驻流，看几路由你点几路）。'
@@ -6121,6 +6144,7 @@
     var cell = tmp.firstChild;
     grid.appendChild(cell);
     startMultiFollowCell(s, cell);
+    mfPickedKey = mfPickedKeyNow();    // 单格增删是就地改 DOM：指纹同步跟上，别让下次刷新白重建
     applyMultiLayout();
   }
 
@@ -6132,6 +6156,7 @@
     });
     var cell = grid && grid.querySelector('.ms-cell[data-id="' + mid + '"]');
     if (cell) cell.remove();
+    mfPickedKey = mfPickedKeyNow();
     if (grid) applyMultiLayout();
   }
 
@@ -6173,35 +6198,75 @@
       + list.map(mfItemHtml).join('');
   }
 
-  function renderMultiFollowing() {
+  /* 列表指纹：只比「会影响界面」的字段 —— 在线人数每几秒就变，但为了它重建整个左栏
+     （输入框、滚动位置全丢）不值得。 */
+  function mfListKey(list) {
+    return (list || []).map(function (s) {
+      return s.mid + '|' + s.uname + '|' + s.title + '|' + (s.room || '');
+    }).join('\n');
+  }
+
+  function mfApplyList(list) {
+    if (mfListKey(list) === mfListKey(multiFollowList)) return false;
+    multiFollowList = list;
+    renderFollowList();
+    return true;
+  }
+
+  function renderMultiFollowing(force, quiet) {
     var side = document.getElementById('multi-side');
     var grid = document.getElementById('multi-grid');
     if (!side || !grid) return;
-    side.hidden = false;
-    side.innerHTML = '<p class="sub" style="padding:10px">正在读关注列表…</p>';
-    grid.innerHTML = '';
-    renderFollowGrid();    // 已勾选的先画出来；关注数据回来后左栏会再刷新一次
-    fetch('/api/following/live')
+    var seq = ++mfReqSeq;
+    if (!quiet) {
+      side.hidden = false;
+      if (force && mfAllList().length) {
+        mfNote('正在刷新开播状态…');       // 手动刷新：名单留着别闪，只在状态栏提示
+      } else {
+        side.innerHTML = '<p class="sub" style="padding:10px">正在读关注列表…</p>';
+      }
+      // 已勾选的那几路先画出来顶着（keepIfSame：名单没回之前别把正在播的流断掉重连）
+      renderFollowGrid(true);
+    }
+    // 后端是「先给旧的、后台刷新」：冷启动约 1.5 秒，之后每次都是毫秒级。
+    fetch('/api/following/live' + (force ? '?refresh=1' : ''))
       .then(function (r) {
         return r.json().then(function (j) { return { code: r.status, j: j }; });
       })
       .then(function (res) {
-        if (state.view !== 'multi') return;   // 等回来时可能已经切走了
+        // 等回来时可能已经切走，或已被后发的请求取代（晚回的旧响应直接丢掉）
+        if (state.view !== 'multi' || seq !== mfReqSeq) return;
         if (res.code !== 200) {
-          side.innerHTML = '<p class="sub" style="padding:10px">'
-            + esc((res.j && res.j.error) || '读取失败') + '</p>';
-          renderFollowGrid();
+          if (!quiet) {
+            side.innerHTML = '<p class="sub" style="padding:10px">'
+              + esc((res.j && res.j.error) || '读取失败') + '</p>';
+            renderFollowGrid(true);
+          }
           return;
         }
-        multiFollowList = res.j.list || [];
-        renderFollowList();
-        renderFollowGrid();
-        mfNote(multiFollowList.length + ' 位关注在播 · 点左侧加入监控墙（声音默认关）');
+        var list = res.j.list || [];
+        mfApplyList(list);
+        renderFollowGrid(true);      // 墙上的格子没变就不重建（见 renderFollowGrid 的 keepIfSame）
+        if (!quiet) {
+          mfNote(list.length + ' 位关注在播 · 点左侧加入监控墙（声音默认关）'
+            + (res.j.stale ? '　·　正在后台刷新…' : ''));
+        }
+        if (res.j.stale) {
+          // 后端给的是旧数据（>2 分钟）并已在后台刷新：2.5 秒后静默取一次新的。
+          // 刷新结果没变就什么都不做（不重渲染、不重建格子）。
+          setTimeout(function () {
+            if (state.view === 'multi' && multiSrc === 'following') {
+              renderMultiFollowing(false, true);
+            }
+          }, 2500);
+        }
       })
-      .catch(function () {
-        if (state.view !== 'multi') return;
-        side.innerHTML = '<p class="sub" style="padding:10px">关注列表读取失败（网络或接口限流），稍后再试。</p>';
-        renderFollowGrid();
+      .catch(function (e) {
+        if (state.view !== 'multi' || seq !== mfReqSeq) return;
+        if (!quiet) {
+          side.innerHTML = '<p class="sub" style="padding:10px">关注列表读取失败（网络或接口限流），稍后再试。</p>';
+          renderFollowGrid(true);
+        }
       });
   }
 

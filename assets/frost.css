@@ -14,17 +14,23 @@
 
    ⚠️ 强度经过一轮收紧（2026-10-12，用户反馈「影响可读性」）：
       压在**亮画面**上的文字曾经只有 2.5~3.1:1 —— 低不透明度叠在亮画面上，字就糊了。
-      现在：压画面的那几条改成**接近不透明的深底**（--fx-veil*），颗粒浓度减半，
-      模糊半径 20→12 / 10→6，静态面板也提到 ~82% 不透明度。
-      实测（measure_over_video.py，最坏情况用「亮彩虹底」当画面）：全部 ≥ 4.5:1。
+      现在：颗粒浓度减半（4.5%→2.2%），模糊半径 20→12 / 10→6，静态面板提到 ~82% 不透明度。
+
+   ⚠️ **播放器不在本文件的作用范围内（v1.0.24）**：用户明确要求「播放器界面不要磨砂玻璃、
+      改回原先设计」。所以这些选择器**故意不在此文件出现**，一律走 style.css 的原设计：
+        · 主播放器：`.player-box`、`.pv-top`、`.pv-ctrl`、`.pv-btn` / `.pv-ic` / `.pv-sel` / `.ctrl`、`.mute-hint`
+        · 监控室每格：`.ms-bar`、`.ms-btn` / `.ms-qn`
+      原设计里这些是**黑色渐变蒙版 + 半透明黑胶囊**（顶栏 `.pv-top` = 上黑下透明，
+      控制条 `.pv-ctrl` = 下黑上透明，按钮 `rgba(0,0,0,.45)`，音量提示 `rgba(0,0,0,.62)`）。
+      ⚠️ 别再给它们补「深底」或 backdrop-filter —— 那就是用户要求撤掉的东西。
+      （播放器**下方**的画质/标注/分段工具面板不在这个例外里，仍然走玻璃面。）
 
    ⚠️ 两条踩过的坑：
     · `.wrap` 是堆叠上下文（position:relative; z-index:1），它里面的元素用
       backdrop-filter **采不到** .wrap 外面的任何东西 —— 所以别指望给面板加模糊
       能透出外层背景。这里也就不加。
     · 颜色从 `--ink / --panel / --panel-2 / --bg` 派生，不写死 —— `--ink` 在浅色主题下
-      翻成黑色，高光细线与颗粒因此自动反向。**唯一写死的是压在视频上的深底**
-      （--fx-veil*）：画面内容是任意的，那里只能用恒定深色，跟主题无关。
+      翻成黑色，高光细线与颗粒因此自动反向。
    ========================================================================== */
 
 :root {
@@ -42,10 +48,6 @@
   /* 模糊半径整体收一档：20→12 / 10→6。磨砂「毛」的程度主要靠半径，收敛后文字边缘更清。 */
   --fx-blur: blur(12px) saturate(1.35);
   --fx-blur-sm: blur(6px) saturate(1.2);
-  /* 压在视频/图片上的底：恒定深色，接近不透明。画面什么样都不影响可读性。 */
-  --fx-veil: rgba(8, 8, 10, .88);
-  --fx-veil-2: rgba(8, 8, 10, .74);
-  --fx-veil-hair: rgba(255, 255, 255, .18);
 }
 
 /* ---------------------------------------------------------------- 1. 静态面板 */
@@ -76,14 +78,12 @@
 .mark-panel,
 .chapters-panel { background-color: var(--fx-face); background-image: var(--fx-grain); }
 
-/* 装着视频或图片的框体：内部必须不透明，只给「边框 + 投影」让它成为一块玻璃框 */
+/* 装着视频或图片的框体：内部必须不透明，只给「边框 + 投影」让它成为一块玻璃框。
+   ⚠️ `.player-box`（主播放器）**不在这里** —— 见文件头「播放器不在本文件的作用范围内」。
+   监控室每格 `.ms-cell` 只有框体投影，没有磨砂材质，保留。 */
 .ms-cell {
   border-color: var(--fx-hair);
   box-shadow: 0 14px 32px rgba(0, 0, 0, .34), inset 0 1px 0 rgba(var(--ink), .07);
-}
-.player-box {
-  border: 1px solid var(--fx-hair);
-  box-shadow: var(--fx-sh);
 }
 
 /* 头像 / 缩略图这类小方形：只做次级面，别加颗粒（太小，颗粒会变脏点） */
@@ -104,7 +104,6 @@
 .ob-src select,
 .live-card input,
 .multi-qn select,
-.ms-qn,
 .multi-layout button,
 .btn.ghost,
 .ghost-btn,
@@ -117,9 +116,11 @@
 }
 
 /* ---------------------------------------------------------------- 3. 浮在内容之上的框体
-   这些框体背后是**滚动内容或视频**，所以用真模糊 —— 磨砂效果在这里最读得出来，
-   可读性风险也全在这里（实测旧参数下标题只有 3.1:1、清晰度下拉 2.6:1）。
-   现在一律用接近不透明的深底：画面再亮再花，字也是白的压在深底上。 */
+   这些框体背后是**滚动内容**，所以用真模糊 —— 磨砂效果在这里最读得出来。
+
+   ⚠️ 播放器与监控室的「压画面控件」**故意不在本节**（v1.0.24 起走 style.css 原设计）：
+      `.pv-top` / `.pv-ctrl` / `.pv-btn` / `.pv-ic` / `.pv-sel` / `.ctrl` / `.mute-hint` /
+      `.ms-bar` / `.ms-btn` / `.ms-qn` 都不在此文件里出现。 */
 
 .topbar {
   background: color-mix(in srgb, var(--bg) 88%, transparent);
@@ -127,46 +128,6 @@
   -webkit-backdrop-filter: var(--fx-blur);
   border-bottom: 1px solid var(--fx-hair);
   box-shadow: 0 8px 26px rgba(0, 0, 0, .22);
-}
-
-.pv-top {                       /* 标题条：整条都是实底，不做渐变（渐变中段会亮到 3:1） */
-  background: var(--fx-veil);
-  backdrop-filter: var(--fx-blur-sm);
-  -webkit-backdrop-filter: var(--fx-blur-sm);
-  border-bottom: 1px solid rgba(255, 255, 255, .09);
-}
-.pv-ctrl {                      /* 控制条：越靠下越实 */
-  background: linear-gradient(color-mix(in srgb, #08080a 78%, transparent),
-                              color-mix(in srgb, #08080a 94%, transparent));
-  backdrop-filter: var(--fx-blur-sm);
-  -webkit-backdrop-filter: var(--fx-blur-sm);
-  border-top: 1px solid rgba(255, 255, 255, .10);
-}
-
-/* 压在画面上的控件（按钮 / 图标钮 / 清晰度下拉）：深底 + 白细边 */
-.pv-btn,
-.pv-ic,
-.pv-sel,
-.ctrl {
-  background-color: var(--fx-veil-2);
-  border: 1px solid var(--fx-veil-hair);
-  backdrop-filter: var(--fx-blur-sm);
-  -webkit-backdrop-filter: var(--fx-blur-sm);
-}
-
-.ms-bar {                       /* 监控室每格底栏 */
-  background: linear-gradient(color-mix(in srgb, #08080a 80%, transparent),
-                              color-mix(in srgb, #08080a 94%, transparent));
-  backdrop-filter: var(--fx-blur-sm);
-  -webkit-backdrop-filter: var(--fx-blur-sm);
-  border-top: 1px solid rgba(255, 255, 255, .10);
-}
-.ms-btn,
-.ms-qn {
-  background-color: var(--fx-veil-2);
-  border: 1px solid var(--fx-veil-hair);
-  backdrop-filter: var(--fx-blur-sm);
-  -webkit-backdrop-filter: var(--fx-blur-sm);
 }
 
 .status-fab {
@@ -191,12 +152,6 @@
   -webkit-backdrop-filter: var(--fx-blur);
   border: 1px solid var(--fx-hair);
   box-shadow: var(--fx-sh);
-}
-.mute-hint {
-  background: var(--fx-veil);
-  backdrop-filter: var(--fx-blur-sm);
-  -webkit-backdrop-filter: var(--fx-blur-sm);
-  border: 1px solid var(--fx-veil-hair);
 }
 /* 「正在获取开播状态」这层盖在空格子上 */
 .ms-off {
@@ -236,13 +191,13 @@
 .search input:focus,
 .st-rename-input:focus,
 .wb-paste textarea:focus,
-.mf-search:focus,
-.ms-qn:focus {
+.mf-search:focus {
   border-color: color-mix(in srgb, var(--red) 48%, transparent);
   box-shadow: var(--fx-hi), 0 0 0 3px color-mix(in srgb, var(--red) 14%, transparent);
 }
 
-.ms-btn.on { background-color: var(--red); border-color: var(--red); }
+/* ⚠️ `.ms-btn.on` 不在这里 —— style.css 原设计就把它做成红色（含 --on-red 字色），
+   本文件再写一遍只会覆盖掉字色。 */
 .multi-layout button.on,
 .multi-src .btn.on {
   background-color: var(--red);
@@ -250,17 +205,11 @@
   border-color: var(--red);
 }
 
-/* 压在画面上的下拉/按钮，悬停时只提亮一点点，别把可读性让出去 */
-.pv-ic:hover, .pv-sel:hover, .ctrl:hover, .ms-btn:hover {
-  background-color: rgba(255, 255, 255, .18);
-}
-
 /* ---------------------------------------------------------------- 5. 降级 */
 
 /* 不支持 backdrop-filter：底子已经是实色了，这里只需把「完全没底」的补齐 */
 @supports not (backdrop-filter: blur(2px)) {
   .topbar { background: color-mix(in srgb, var(--bg) 96%, transparent); }
-  .pv-top, .pv-ctrl, .ms-bar { background: rgba(8, 8, 10, .95); }
   .status-fab, .status-panel { background-color: var(--panel); }
 }
 
@@ -268,5 +217,4 @@
 @media (prefers-reduced-transparency: reduce) {
   :root { --fx-face: var(--panel); --fx-face-2: var(--panel-2); --fx-grain: none; }
   .topbar { background: var(--bg); }
-  .pv-top, .pv-ctrl, .ms-bar { background: rgba(8, 8, 10, .97); }
 }

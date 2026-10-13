@@ -24,6 +24,7 @@
 """
 import argparse
 import base64
+import concurrent.futures
 import hashlib
 import http.client
 import html
@@ -1876,63 +1877,264 @@ def live_play_url(room, qn):
 # ---------------------------------------------------------------- 关注列表（监控室）
 # 读**登录账号**的关注列表，过滤出正在直播的 —— 监控室「关注的直播」的数据源。
 # 两步：followings 翻页拿 uid（必须带 SESSDATA）→ get_status_info_by_uids 批量查开播。
-# 后一个接口 fetch_live_for 已在用，天然支持一次带多个 uids[]。
-
+#
+# ⚠️ 这两步**都要并发**，否则慢得没有理由。2026-10-13 实测（1588 个关注）：
+#    32 页 + 32 批全部串行时冷启动 **5.0 秒**，而单次往返只有 0.12 秒 ——
+#    慢的全是「排队等往返」，不是接口慢。并发 6 之后两段各约 0.7 秒。
+#    ⚠️ 并发度别往上调：B 站对密集请求回 412（见上面 _BAN 那段），实测 6 稳定，
+#    再往上只会把风控窗口撑长（代价比省下的几百毫秒大得多）。
 FOLLOWING_API = "https://api.bilibili.com/x/relation/followings"
-FOLLOW_LIVE_TTL = 120        # 直播状态两分钟足够新，也免得每次切页面都打一轮接口
-FOLLOW_CACHE = {"at": 0.0, "list": []}
+FOLLOW_PAGE = 50                 # 每页条数（接口上限）
+FOLLOW_PAGE_MAX = 60             # 最多翻 60 页 = 3000 个关注（防呆上限）
+# 开播状态一次带多少个 uid。对照实验（2026-10-13，同一批 150 个 uid）：
+# 3×50 与 1×150 返回的条目、在播集合**完全一致** → 放大批次不丢人，
+# 但请求数从 32 降到 11（1588 个关注）。⚠️ 别只看「返回条数 < 请求条数」就
+# 以为被截断：没有直播间的账号本来就不返回（50 个里实测回 45 个）。
+FOLLOW_BATCH = 150
+FOLLOW_WORKERS = 6               # 并发度：翻页与开播状态共用
+FOLLOW_LIVE_TTL = 120            # 在播列表：两分钟内算新鲜
+FOLLOW_UIDS_TTL = 1800           # 关注关系变化很慢，uid 名单缓存半小时
+# 落盘缓存：进程重启后第一次进监控室也不必干等（实测冷启动约 1.2 秒）。
+# 超过这个时长就当作没有 —— 半年前的名单没有意义。
+FOLLOW_DISK = os.path.join(ROOT, "data", "follow_cache.json")
+FOLLOW_DISK_TTL = 86400
+FOLLOW_CACHE = {"at": 0.0, "list": [], "uids": [], "uids_at": 0.0, "busy": False,
+                "disk_tried": False}
+FOLLOW_LOCK = threading.Lock()
+
+
+def _follow_json(url, referer):
+    """关注列表专用 GET：走**连接池**。
+
+    实测（同一接口连续 6 次）：urllib 每次新建 TCP+TLS = 135 ms/次，
+    复用连接 = 70 ms/次 —— 一次抓取要打 40 多个请求，差价约 0.5 秒。
+    复用失败（连接被对端关了等）由 `cached_get` 自己回退到新建连接，语义不变。
+    ⚠️ 响应要整份读完（`cached_get` 靠 `isclosed()` 决定是否把连接放回池）。
+    """
+    hdrs = {
+        "User-Agent": UA,
+        "Referer": referer,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": "identity",
+        "Origin": "https://www.bilibili.com",
+    }
+    s = sessdata()
+    if s:
+        hdrs["Cookie"] = "SESSDATA=%s" % s
+    with cached_get(url, hdrs, timeout=25) as r:
+        status = getattr(r, "status", 200)
+        body = r.read()
+    if status >= 400:
+        # 412 是 B 站风控：抛错让上层「留旧数据」，不要把它当成「一个在播都没有」
+        raise RuntimeError("HTTP %d" % status)
+    return json.loads(body.decode("utf-8", "replace"))
+
+
+def _follow_page(uid, pn):
+    """翻一页，返回 uid 列表；取不到返回 None（由调用方判断是整体失败还是留旧数据）。"""
+    try:
+        d = _follow_json("%s?vmid=%s&pn=%d&ps=%d" % (FOLLOWING_API, uid, pn, FOLLOW_PAGE),
+                         REFERER)
+    except Exception as e:
+        print("[follow] 第 %d 页取失败：%s" % (pn, e))
+        return None
+    if d.get("code") != 0:
+        print("[follow] 第 %d 页 code=%s %s" % (pn, d.get("code"), d.get("message")))
+        return None
+    return [str(u.get("mid")) for u in ((d.get("data") or {}).get("list") or [])
+            if u.get("mid")]
 
 
 def _following_uids():
+    """关注的全部 uid（半小时缓存；翻页并发跑）。"""
+    now = time.time()
+    if FOLLOW_CACHE["uids"] and now - FOLLOW_CACHE["uids_at"] < FOLLOW_UIDS_TTL:
+        return FOLLOW_CACHE["uids"]
     uid = self_uid()
     if not uid:
         raise RuntimeError("需要登录：设置页扫码登录后才能读关注列表")
-    out = []
-    pn = 1
-    while True:
-        d = bili_get("%s?vmid=%s&pn=%d&ps=50" % (FOLLOWING_API, uid, pn))
-        if d.get("code") != 0:
-            raise RuntimeError("关注列表 code=%s %s" % (d.get("code"), d.get("message")))
-        data = d.get("data") or {}
-        lst = data.get("list") or []
-        out.extend(str(u.get("mid")) for u in lst if u.get("mid"))
-        if not lst or len(out) >= int(data.get("total") or 0) or pn > 20:
-            break
-        pn += 1
+    first = _follow_json("%s?vmid=%s&pn=1&ps=%d" % (FOLLOWING_API, uid, FOLLOW_PAGE), REFERER)
+    if first.get("code") != 0:
+        raise RuntimeError("关注列表 code=%s %s" % (first.get("code"), first.get("message")))
+    data = first.get("data") or {}
+    out = [str(u.get("mid")) for u in (data.get("list") or []) if u.get("mid")]
+    pages = min(max(1, (int(data.get("total") or 0) + FOLLOW_PAGE - 1) // FOLLOW_PAGE),
+                FOLLOW_PAGE_MAX)
+    if pages > 1:
+        todo = list(range(2, pages + 1))
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(FOLLOW_WORKERS, len(todo))) as ex:
+            got = list(ex.map(lambda pn: _follow_page(uid, pn), todo))
+        failed = [pn for pn, g in zip(todo, got) if g is None]
+        if failed:
+            # ⚠️ 缺页 = 名单不完整。宁可抛错让上层继续用旧数据，也不要把残缺名单写进缓存
+            #    （跟 v1.0.19 节目单 68→0 是同一个教训：半途的结果最会骗人）。
+            raise RuntimeError("关注列表有 %d/%d 页取失败（%s…）"
+                               % (len(failed), pages, ", ".join(str(p) for p in failed[:5])))
+        for g in got:
+            out.extend(g)
+    FOLLOW_CACHE["uids"] = out
+    FOLLOW_CACHE["uids_at"] = now
+    print("[follow] 关注名单 %d 人（%d 页，并发 %d）" % (len(out), pages, FOLLOW_WORKERS))
     return out
 
 
-def api_following_live():
-    """关注列表里正在直播的主播（未登录给明确提示；结果缓存 2 分钟）。"""
+def _follow_batch(batch):
+    """一批（≤FOLLOW_BATCH 个 uid）的在播信息；失败返回 None（单批失败不该拖垮整体）。"""
+    q = "&".join("uids[]=%s" % u for u in batch)
+    try:
+        d = _follow_json("https://api.live.bilibili.com/room/v1/Room/"
+                         "get_status_info_by_uids?%s" % q, "https://live.bilibili.com/")
+    except Exception as e:
+        print("[follow] 开播状态取失败：%s" % e)
+        return None
+    if d.get("code") != 0:
+        return None
+    out = []
+    for uid, info in (d.get("data") or {}).items():
+        if int(info.get("live_status") or 0) != 1:
+            continue
+        out.append({
+            "mid": str(uid),
+            "uname": info.get("uname") or "",
+            "face": info.get("face") or "",
+            "title": info.get("title") or "",
+            "room": str(info.get("room_id") or ""),
+            "cover": info.get("cover_from_user") or info.get("keyframe") or "",
+            "area": info.get("area_v2_name") or "",
+            "online": info.get("online") or 0,
+        })
+    return out
+
+
+def _follow_live_fetch():
+    """同步跑完整条链：名单 → 并发查开播 → 按人气排序。"""
+    uids = _following_uids()
+    batches = [uids[i:i + FOLLOW_BATCH] for i in range(0, len(uids), FOLLOW_BATCH)]
+    live = []
+    if batches:
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(FOLLOW_WORKERS, len(batches))) as ex:
+            got = list(ex.map(_follow_batch, batches))
+        if all(g is None for g in got):
+            raise RuntimeError("开播状态全部取失败（可能被限流）")
+        for g in got:
+            if g:
+                live.extend(g)
+    live.sort(key=lambda x: -(x.get("online") or 0))    # 人多的排前面，监控场景直觉
+    return live
+
+
+def _follow_disk_load():
+    """把上次落盘的名单 / 在播列表装回内存（进程重启后第一次进监控室不必干等）。
+
+    任何异常都当作「没有缓存」—— 缓存不该把功能带崩。只装「还新鲜」的东西：
+    在播列表给 24 小时（当 stale 用，后台会立刻刷新），名单给 `FOLLOW_UIDS_TTL`。
+    """
+    try:
+        with open(FOLLOW_DISK, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return False
+    if not isinstance(d, dict) or not d.get("list"):
+        return False
+    at = float(d.get("at") or 0)
+    if time.time() - at > FOLLOW_DISK_TTL:
+        return False
+    uids_at = float(d.get("uids_at") or 0)
+    with FOLLOW_LOCK:
+        FOLLOW_CACHE["list"] = d["list"]
+        FOLLOW_CACHE["at"] = at
+        if d.get("uids") and time.time() - uids_at < FOLLOW_UIDS_TTL:
+            FOLLOW_CACHE["uids"] = [str(u) for u in d["uids"]]
+            FOLLOW_CACHE["uids_at"] = uids_at
+    print("[follow] 命中落盘缓存：%d 位在播（%.0f 分钟前）"
+          % (len(d["list"]), (time.time() - at) / 60))
+    return True
+
+
+def _follow_disk_save():
+    """整份覆盖写（缓存被写坏只是少一次加速，不值得为它引入原子替换的复杂度）。"""
+    try:
+        os.makedirs(os.path.dirname(FOLLOW_DISK), exist_ok=True)
+        with open(FOLLOW_DISK, "w", encoding="utf-8") as f:
+            json.dump({"at": FOLLOW_CACHE["at"], "list": FOLLOW_CACHE["list"],
+                       "uids": FOLLOW_CACHE["uids"], "uids_at": FOLLOW_CACHE["uids_at"]},
+                      f, ensure_ascii=False)
+    except Exception as e:
+        print("[follow] 落盘缓存写失败（不影响功能）：%s" % e)
+
+
+def _follow_store(live):
+    """写缓存，并挡住「新结果比旧结果少一半以上」这种残缺覆盖。"""
+    old = FOLLOW_CACHE["list"]
+    if old and len(old) >= 4 and len(live) < len(old) / 2:
+        raise RuntimeError("新结果只有 %d 位在播（旧数据 %d 位），疑似上游残缺，保留旧数据"
+                           % (len(live), len(old)))
+    with FOLLOW_LOCK:
+        FOLLOW_CACHE["at"] = time.time()
+        FOLLOW_CACHE["list"] = live
+    _follow_disk_save()
+
+
+def _kick_follow_refresh():
+    """后台刷新（stale-while-revalidate 的写半边）：同一时刻只跑一轮。"""
+    with FOLLOW_LOCK:
+        if FOLLOW_CACHE["busy"]:
+            return False
+        FOLLOW_CACHE["busy"] = True
+
+    def work():
+        try:
+            t0 = time.time()
+            _follow_store(_follow_live_fetch())
+            print("[follow] 后台刷新完成：%d 位在播，%d ms"
+                  % (len(FOLLOW_CACHE["list"]), int((time.time() - t0) * 1000)))
+        except Exception as e:
+            print("[follow] 后台刷新失败（继续用旧数据）：%s" % e)
+        finally:
+            with FOLLOW_LOCK:
+                FOLLOW_CACHE["busy"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+    return True
+
+
+def api_following_live(force=False):
+    """关注列表里正在直播的主播。
+
+    缓存策略（四层）：
+      ① 进程重启后**先读落盘缓存**（`data/follow_cache.json`，24 小时内有效）——
+         第一次进监控室也是毫秒级，不用等上游；
+      ② 两分钟内 → 直接给，`cached: true`；
+      ③ 更旧但**有旧数据** → **立刻给旧的**（`stale: true`）并后台刷新 ——
+         用户不会再对着「正在读关注列表…」等，下一次进来就是新的；
+      ④ 一份都没有（首次运行）→ 同步跑，约 1.2 秒。
+    `force=1`（页面上的「刷新开播状态」）跳过 ①②③，同步拿最新的一份。
+    """
     if not sessdata():
         return 401, {"error": "需要登录：设置页扫码登录后才能读关注列表"}
     now = time.time()
-    if FOLLOW_CACHE["list"] and now - FOLLOW_CACHE["at"] < FOLLOW_LIVE_TTL:
-        return 200, {"list": FOLLOW_CACHE["list"], "cached": True}
-    uids = _following_uids()
-    live = []
-    for i in range(0, len(uids), 50):          # 一批 50 个，URL 长度安全
-        q = "&".join("uids[]=%s" % u for u in uids[i:i + 50])
-        d = bili_get("https://api.live.bilibili.com/room/v1/Room/"
-                     "get_status_info_by_uids?%s" % q, "https://live.bilibili.com/")
-        if d.get("code") != 0:
-            continue                            # 一批失败不整体失败：下一批照样出人
-        for uid, info in (d.get("data") or {}).items():
-            if int(info.get("live_status") or 0) != 1:
-                continue
-            live.append({
-                "mid": str(uid),
-                "uname": info.get("uname") or "",
-                "face": info.get("face") or "",
-                "title": info.get("title") or "",
-                "room": str(info.get("room_id") or ""),
-                "cover": info.get("cover_from_user") or info.get("keyframe") or "",
-                "area": info.get("area_v2_name") or "",
-                "online": info.get("online") or 0,
-            })
-    live.sort(key=lambda x: -(x.get("online") or 0))    # 人多的排前面，监控场景直觉
-    FOLLOW_CACHE.update(at=now, list=live)
-    return 200, {"list": live}
+    if not FOLLOW_CACHE["disk_tried"]:
+        FOLLOW_CACHE["disk_tried"] = True     # 只试一次，读不到就当没有（别每次请求都开文件）
+        if not FOLLOW_CACHE["list"]:
+            _follow_disk_load()
+    old = FOLLOW_CACHE["list"]
+    if old and not force:
+        if now - FOLLOW_CACHE["at"] < FOLLOW_LIVE_TTL:
+            return 200, {"list": old, "cached": True}
+        busy = _kick_follow_refresh()
+        return 200, {"list": old, "cached": True, "stale": True,
+                     "age": int(now - FOLLOW_CACHE["at"]), "refreshing": busy}
+    if old and force and FOLLOW_CACHE["busy"]:
+        # 已经在后台刷了：再同步跑一轮只会白打一遍接口（还可能招风控）
+        return 200, {"list": old, "cached": True, "stale": True, "refreshing": True}
+    t0 = time.time()
+    live = _follow_live_fetch()
+    _follow_store(live)
+    ms = int((time.time() - t0) * 1000)
+    print("[follow] 取到 %d 位在播，耗时 %d ms" % (len(live), ms))
+    return 200, {"list": live, "ms": ms}
 
 
 # --- 添加任意直播间（监控室）：房间号 / 直播间链接 / b23.tv 短链 → 可直接播的卡片 ---
@@ -4076,7 +4278,8 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/live/resolve":
             return self._json(*api_live_resolve(q))
         if parsed.path == "/api/following/live":
-            return self._json(*api_following_live())
+            # ?refresh=1 = 「刷新开播状态」按钮：跳过缓存同步拿最新的一份
+            return self._json(*api_following_live("refresh" in q))
         if parsed.path == "/api/live/danmu-info":
             return self._json(*api_live_danmu_info())
         if parsed.path == "/api/live/chat/stream":

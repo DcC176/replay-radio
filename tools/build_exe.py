@@ -31,7 +31,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "发布")
 BUILD = os.path.join(ROOT, "build")
 
-APP_VERSION = "1.0.23"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.0.26"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
@@ -103,7 +103,10 @@ DATA_RESET = {
 # .main_data_owner 是「data/ 顶层那批旧数据归位给哪位主站」的标记（见 serve.py 的
 # adopt_legacy_main_data）。它在包内存在的话，用户机 unpack 之后会以为早就搬过家，
 # 真主站的历史分段就永远归不了位 —— 所以它和 seg_state.json 一样**绝不能打包**。
-DATA_EXCLUDE_FILES = {"seg_state.json", ".main_data_owner"}   # 运行时状态，打包时直接不要
+#
+# follow_cache.json 是 v1.0.26 加的「关注列表落盘缓存」：里面是**开发者账号**的关注名单
+# 与在播列表。打进包不只是脏数据，还是把别人的关注关系随安装包发出去 —— 绝不能进。
+DATA_EXCLUDE_FILES = {"seg_state.json", ".main_data_owner", "follow_cache.json"}
 # 归位标记的**变体**（本地测试会把它重命名成 .main_data_owner.stash 再挪回来）同样
 # 不能进包：包里只要出现「已经搬过家」的痕迹，真主站的历史分段就永远归不了位。
 DATA_EXCLUDE_PREFIX = (".main_data_owner",)
