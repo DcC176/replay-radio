@@ -628,7 +628,8 @@
     };
   })();
 
-  var VIEWS = ['live', 'multi', 'broadcast', 'schedule', 'categories', 'dynamic', 'weibo', 'about', 'settings'];
+  var VIEWS = ['live', 'multi', 'broadcast', 'schedule', 'playlist',
+               'dynamic', 'weibo', 'about', 'settings'];
   var KEY_MUTED = 'xl_muted';
 
   var store = {
@@ -658,11 +659,12 @@
     playingKey: null,
     view: 'live',
     horizon: 86400,        // 节目单视界（秒）；0 = 整个循环
-    catFocus: null,
     skip: store.get('xl_skip', false),      // 跳过空白片段
     marking: false,
     chapKey: '',                            // 当前片段标识，用于避免每秒重渲染
     qn: store.get('xl_qn', 80),             // 请求的清晰度；B 站会按登录态降级到最高可用
+    qnDegraded: false,                      // 本次档位是不是「降级来的」（是的话不写进 xl_qn）
+    playlistCycle: false,                   // 当前时间轴是不是「借来的歌单」（离开歌单页要还回去）
     media: '',                              // 当前媒体地址
     mediaBase: null,                        // 媒体时间轴上的锚点
     cycleBase: 0,                           // 锚点对应的频道位置
@@ -972,6 +974,21 @@
     }).join('');
   }
 
+  /* 播放器顶栏那枚「可选 1080P60」提示（v1.0.27）。
+
+     为什么要有它：清晰度是**记在本地**的（`xl_qn`），而限流降级时下拉只列到 480P ——
+     用户在那时选一次「最高可用」就会被永久记住，等限流解除后画面仍停在 480P，
+     看起来像「一直被限」。所以只要当前请求档位低于**本片可用最高档**，就在顶栏摆一句
+     可点的提示，点了直接切过去。传 null 收起。 */
+  function showQnHint(top) {
+    var b = el.btnQnHint;
+    if (!b) return;
+    if (!top) { b.hidden = true; b.textContent = ''; return; }
+    b.textContent = '可选 ' + top.desc;
+    b.dataset.qn = String(top.qn);
+    b.hidden = false;
+  }
+
   // MP4（durl）通道：实现简单，但**封顶 720P**，只作为 DASH 失败时的兜底。
   function loadMediaMp4(seg, seekTo, anchor) {
     if (state.offline) return;
@@ -1091,9 +1108,17 @@
       .then(function (r) { return r.json(); })
       .then(function (info) {
         if (!info || !info.accept || !info.accept.length) return;
-        var cur = 0;
-        info.accept.forEach(function (x) { if (x.qn <= state.qn && x.qn > cur) cur = x.qn; });
+        var cur = 0, top = info.accept[0];
+        info.accept.forEach(function (x) {
+          if (x.qn <= state.qn && x.qn > cur) cur = x.qn;
+          if (x.qn > top.qn) top = x;
+        });
         setQualityList(info.accept, cur || info.accept[0].qn);
+        // 降级时（限流 412 / 缓存兜底，info.warn 非空）这批档位**不是真实上限**：
+        // 此刻用户选的档位只当临时用、不写进长期记忆，否则限流解除后会被 480P 钉住
+        // —— 跟 v1.0.13 修的是同一个坑，只是那次在后端缓存、这次在 UI 记忆。
+        state.qnDegraded = !!info.warn;
+        showQnHint(top.qn > state.qn ? top : null);
       }).catch(function () { /* 忽略，不影响播放 */ });
 
     if (typeof dashjs === 'undefined') { loadMediaMp4(seg, seekTo, base); return; }
@@ -1265,6 +1290,15 @@
     for (var i = 0; i < rows.length; i++) {
       rows[i].className = rows[i].getAttribute('data-bvid') === bvid ? 'playing' : '';
     }
+    // 歌单页也有一份列表，同样要高亮当前这首。
+    // ⚠️ 用 classList.toggle 而不是盖 className：那些行还挂着「勾选中」的类。
+    var pl = document.getElementById('pl-rows');
+    if (pl) {
+      var pr = pl.querySelectorAll('tr[data-bvid]');
+      for (var j = 0; j < pr.length; j++) {
+        pr[j].classList.toggle('playing', pr[j].getAttribute('data-bvid') === bvid);
+      }
+    }
   }
 
   function renderIdle() {
@@ -1430,61 +1464,11 @@
       + (state.cycle.total / 3600).toFixed(1) + '</b> 小时';
   }
 
-  /* ---------------------------------------------------------- 分类视图 */
-
-  function renderCategories() {
-    var stats = {};
-    CAT_ORDER.forEach(function (c) { stats[c] = { n: 0, dur: 0, dm: 0, top: null }; });
-
-    state.all.forEach(function (p) {
-      var s = stats[p.category];
-      if (!s) return;
-      s.n++;
-      s.dur += p.duration;
-      s.dm += p.dm_total;
-      if (!s.top || p.score > s.top.score) s.top = p;
-    });
-
-    var cards = [{
-      name: '全部',
-      focus: null,
-      s: {
-        n: state.all.length,
-        dur: state.all.reduce(function (a, p) { return a + p.duration; }, 0),
-        dm: state.all.reduce(function (a, p) { return a + p.dm_total; }, 0),
-        top: null
-      }
-    }];
-    CAT_ORDER.forEach(function (c) {
-      if (stats[c].n) cards.push({ name: c, focus: c, s: stats[c] });
-    });
-
-    el.catCards.innerHTML = cards.map(function (c) {
-      var s = c.s;
-      var dens = s.dur ? Math.round(s.dm / (s.dur / 3600)) : 0;
-      var lines = '<b>' + s.n + '</b> 个节目 · <b>' + (s.dur / 3600).toFixed(1) + '</b> 小时'
-        + '<br>均弹幕 <b>' + fmtNum(dens) + '</b> /小时';
-      var top = s.top ? '<div class="cc-t">最高：' + esc(s.top.title) + '</div>' : '';
-      return '<button class="cat-card' + (state.catFocus === c.focus ? ' active' : '')
-        + '" data-cat-focus="' + (c.focus || '') + '">'
-        + '<div class="cc-n">' + c.name + '</div>'
-        + '<div class="cc-s">' + lines + '</div>' + top + '</button>';
-    }).join('');
-
-    var list = state.all.filter(function (p) {
-      return !state.catFocus || p.category === state.catFocus;
-    }).sort(function (a, b) { return b.score - a.score || b.pubdate - a.pubdate; });
-
-    el.catRows.innerHTML = list.length
-      ? list.map(programRow).join('')
-      : emptyRow(5, '该分类下暂无节目');
-
-    var dur = list.reduce(function (a, p) { return a + p.duration; }, 0);
-    var dm = list.reduce(function (a, p) { return a + p.dm_total; }, 0);
-    el.catStat.innerHTML = (state.catFocus ? '「' + state.catFocus + '」' : '全部') + '：共 <b>'
-      + list.length + '</b> 个节目 · <b>' + (dur / 3600).toFixed(1) + '</b> 小时 · 弹幕 <b>'
-      + fmtNum(dm) + '</b> 条（按高能排序）';
-  }
+  /* 「分类」板块已于 v1.0.33 按用户要求移除（导航页 + 卡片墙 + 表格）。
+     ⚠️ 注意：**分类机制本身还在，别一起删** —— `state.cats` 仍是频道排期池的筛选条件
+     （`rebuildCycle` 用它决定在哪些类型里循环，频道页的分类 chips 也依赖它），
+     `CAT_ORDER` 与 `tools/overrides.json` 打标链同样保留。
+     移除的只是那个「按类型浏览」的只读仪表盘；想知道某类有多少条，频道页的分类 chips 上带着计数。 */
 
   /* ---------------------------------------------------------- 关于视图 */
 
@@ -1621,6 +1605,7 @@
       el.liveInfo.textContent = '播放库没加载（assets/mpegts.js 缺失），无法播放直播流';
       return;
     }
+    showQnHint(null);          // 回放才有的「可选 xxx」提示：进直播间收起
     destroyDash();
     destroyLive();
     livePlayer = mpegts.createPlayer({
@@ -3045,6 +3030,13 @@
     // 动态 / 微博：切进来时才取（都是外部服务，没必要在首页就拉）
     if (name === 'dynamic') { bindDynamic(); renderDynamic(); }
     if (name === 'weibo') { bindWeibo(); renderWeibo(); }
+    if (name === 'playlist') { bindPlaylist(); plAutoStart(); }
+
+    // 离开歌单页：把频道的时间轴换回来 —— 播放器只有一个，歌单是「临时借走」的
+    if (prev === 'playlist' && name !== 'playlist' && state.playlistCycle) {
+      state.playlistCycle = false;
+      rebuildCycle(false);
+    }
 
     // 真的换了页面就从顶部看起 —— 否则在列表里滚了几屏之后切到设置页，
     // 会直接落到那一页的中段（实测停在 1127px，用户以为自己点错了）。
@@ -3062,7 +3054,6 @@
     if (name === 'live') renderList();
     else if (name === 'broadcast') renderBroadcast();
     else if (name === 'schedule') renderSchedule();
-    else if (name === 'categories') renderCategories();
     else if (name === 'about') renderAbout();
     else if (name === 'settings') renderSettings();
 
@@ -3719,8 +3710,7 @@
       + '<a class="status-live' + (on ? ' on' : '') + '" href="' + esc(live.url || '#')
       + '" target="_blank" rel="noopener" style="text-decoration:none">';
     if (live.face) {
-      html += '<img class="status-live-face" src="' + esc(live.face) + '" alt="" '
-        + 'referrerpolicy="no-referrer">';
+      html += faceHtml(live.face, 'status-live-face', live.uname || 'UP');
     }
     html += '<div class="status-live-main">'
       + '<div class="status-live-row">'
@@ -3770,6 +3760,7 @@
     }
 
     el.statusBody.innerHTML = html;
+    bindFaceFallback(el.statusBody);
     el.statusLoading.hidden = true;
 
     // 底部：取数时间 + 空间入口
@@ -4057,20 +4048,13 @@
     });
 
     // error 不冒泡，用捕获阶段统一处理；取不到图就隐藏，避免整排裂图
-    ['rows', 'catRows'].forEach(function (key) {
-      el[key].addEventListener('error', function (e) {
-        if (!e.target || e.target.tagName !== 'IMG') return;
-        e.target.style.display = 'none';
-        if (String(e.target.src || '').indexOf('/api/img') >= 0) netFail();
-      }, true);
-    });
+    el.rows.addEventListener('error', function (e) {
+      if (!e.target || e.target.tagName !== 'IMG') return;
+      e.target.style.display = 'none';
+      if (String(e.target.src || '').indexOf('/api/img') >= 0) netFail();
+    }, true);
 
     el.rows.addEventListener('click', function (e) {
-      var b = e.target.closest('[data-play]');
-      if (b) playProgram(b.getAttribute('data-play'));
-    });
-
-    el.catRows.addEventListener('click', function (e) {
       var b = e.target.closest('[data-play]');
       if (b) playProgram(b.getAttribute('data-play'));
     });
@@ -4078,14 +4062,6 @@
     el.schRows.addEventListener('click', function (e) {
       var b = e.target.closest('[data-play]');
       if (b) playProgram(b.getAttribute('data-play'));
-    });
-
-    el.catCards.addEventListener('click', function (e) {
-      var b = e.target.closest('[data-cat-focus]');
-      if (!b) return;
-      var v = b.getAttribute('data-cat-focus');
-      state.catFocus = v || null;
-      renderCategories();
     });
 
     document.querySelectorAll('[data-horizon]').forEach(function (b) {
@@ -4157,8 +4133,16 @@
       var anchor = cyclePos();               // 当前频道位置（视频未就绪时用期望位置）
       var keep = seg.t0 + Math.max(0, anchor - seg.start);
       state.qn = qn || 80;
-      store.set('xl_qn', state.qn);
+      if (!state.qnDegraded) store.set('xl_qn', state.qn);
       loadMedia(seg, keep, anchor);
+    });
+
+    // 顶栏那枚「可选 1080P60」：点了切到该档位。走同一个 change 通路，逻辑只有一份。
+    if (el.btnQnHint) el.btnQnHint.addEventListener('click', function () {
+      var q = parseInt(el.btnQnHint.dataset.qn, 10);
+      if (!q) return;
+      el.quality.value = String(q);
+      el.quality.dispatchEvent(new Event('change'));
     });
 
     el.btnTheater.addEventListener('click', function () { toggleTheater(); });
@@ -4724,9 +4708,7 @@
     function renderCards(list) {
       if (!grid) return;
       grid.innerHTML = list.map(function (s) {
-        var face = s.face
-          ? '<img class="ob-face" src="' + esc(s.face) + '" alt="" loading="lazy">'
-          : '<span class="ob-face ob-face-ph">' + esc((s.name || '?').charAt(0)) + '</span>';
+        var face = faceHtml(s.face, 'ob-face', s.name || s.id);
         return '<button type="button" class="ob-card" data-pick="' + esc(s.id) + '">'
           + face
           + '<span class="ob-name">' + esc(s.name || s.id) + '</span>'
@@ -4735,6 +4717,7 @@
       }).join('')
         + '<button type="button" class="ob-card ob-add" id="ob-add">'
         + '<span class="plus">+</span><span class="ob-name">添加主播</span></button>';
+      bindFaceFallback(grid);      // 头像取不到时换首字母，不留破图图标
     }
 
     renderCards(STATIONS || []);
@@ -4869,6 +4852,7 @@
       btnRandom: document.getElementById('btn-random'),
       btnTheater: document.getElementById('btn-theater'),
       btnQuality: document.getElementById('btn-quality'),
+      btnQnHint: document.getElementById('btn-qn-hint'),
       qualityPanel: document.getElementById('quality-panel'),
       btnQpClose: document.getElementById('btn-qp-close'),
       btnLogin: document.getElementById('btn-login'),
@@ -4914,9 +4898,6 @@
       markHint: document.getElementById('mark-hint'),
       schRows: document.getElementById('sch-rows'),
       schStat: document.getElementById('sch-stat'),
-      catCards: document.getElementById('cat-cards'),
-      catRows: document.getElementById('cat-rows'),
-      catStat: document.getElementById('cat-stat'),
       aboutBody: document.getElementById('about-body'),
       statusDock: document.getElementById('status-dock'),
       statusFab: document.getElementById('status-fab'),
@@ -6271,6 +6252,367 @@
   }
 
 
+  /* ---------------------------------------------------------- 歌单（导入的合集 / 多P）
+
+     数据在后端（`data/playlists.json` + 歌名→语言/风格的映射表），这里只管画与放。
+
+     ⚠️ 播放走的是**临时循环**：把「当前筛选后的歌单」铺成一条时间轴塞进 `state.cycle`
+     （每首 = 一段，时长就是歌长），于是连播 / 进度条 / 拖动跳转 / 清晰度全部复用现有引擎 ——
+     播完最后一首会自然绕回第一首（循环就是这条时间轴的语义）。
+     离开歌单页时用 `rebuildCycle()` 把频道的时间轴换回来。 */
+
+  var PL = {
+    lists: [], curId: store.get('xl_pl', '') || '', data: null,
+    filter: { lang: {}, style: {}, artist: {} }, picked: {}
+  };
+
+  var PL_AXES = [['lang', '语言'], ['style', '风格'], ['artist', '演唱者']];
+
+  /* 条目唯一键。⚠️ **不能拿 bvid 当唯一标识**：合集里每个条目可能自己就是多P视频
+     （实测「羽啾啾」16 期歌切、每期 6~21 首，同一 bvid 下十几首不同的歌），
+     只按 bvid 定位会让它们互相串 —— 症状是「点第二首却播第一首」「高亮永远在第一行」
+     「勾一首连带选上一串」。后端随条目给了 `key`（cid 优先），这里只是兜底。 */
+  function plKeyOf(it) {
+    if (!it) return '';
+    return it.key || ((it.bvid || '') + 'p' + (it.page || 1));
+  }
+
+  function plNote(t) {
+    var n = document.getElementById('pl-note');
+    if (n) n.textContent = t || '';
+  }
+
+  function plFacets() {
+    return (PL.data && PL.data.facets) || { lang: {}, style: {}, artist: {} };
+  }
+
+  function plFiltered() {
+    var items = (PL.data && PL.data.items) || [];
+    var f = PL.filter;
+    var hasL = Object.keys(f.lang).length, hasS = Object.keys(f.style).length,
+        hasA = Object.keys(f.artist).length;
+    return items.filter(function (it) {
+      return (!hasL || !!f.lang[it.lang])
+        && (!hasS || !!f.style[it.style])
+        && (!hasA || !!f.artist[it.artist]);
+    });
+  }
+
+  function renderPlaylist() {
+    var tbody = document.getElementById('pl-rows');
+    if (!tbody) return Promise.resolve();
+    return fetch('/api/playlists').then(function (r) { return r.json(); })
+      .then(function (d) {
+        PL.lists = (d && d.lists) || [];
+        if (!PL.lists.length) {
+          PL.data = null; PL.curId = '';
+          renderPlPage();
+          return null;
+        }
+        var hit = null;
+        PL.lists.forEach(function (x) { if (x.id === PL.curId) hit = x; });
+        if (!hit) { PL.curId = PL.lists[0].id; store.set('xl_pl', PL.curId); }
+        return fetch('/api/playlist?id=' + encodeURIComponent(PL.curId))
+          .then(function (r) { return r.json(); })
+          .then(function (d2) {
+            PL.data = (d2 && d2.items) ? d2 : null;
+            renderPlPage();
+          });
+      })
+      .catch(function () { plNote('读歌单失败（网络问题）'); });
+  }
+
+  function renderPlPage() {
+    var sel = document.getElementById('pl-select');
+    if (sel) {
+      sel.innerHTML = PL.lists.map(function (x) {
+        return '<option value="' + esc(x.id) + '"'
+          + (x.id === PL.curId ? ' selected' : '') + '>'
+          + esc(x.name) + '（' + x.count + ' 首）</option>';
+      }).join('');
+      sel.disabled = !PL.lists.length;
+    }
+    ['pl-rename', 'pl-delete', 'pl-playall'].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (b) b.disabled = !PL.data;
+    });
+    renderPlFilters();
+    renderPlRows();
+  }
+
+  function renderPlFilters() {
+    var box = document.getElementById('pl-filters');
+    if (!box) return;
+    var facets = plFacets();
+    box.innerHTML = PL_AXES.map(function (ax) {
+      var key = ax[0], f = facets[key] || {};
+      var vals = Object.keys(f);
+      if (vals.length < 2) return '';      // 只有一个取值时筛选没有意义，不占地方
+      if (key === 'lang') {
+        var order = ['中文', '日文', '英文', '韩文', '其他'];
+        vals.sort(function (a, b) { return order.indexOf(a) - order.indexOf(b); });
+      } else {
+        vals.sort(function (a, b) { return f[b] - f[a]; });
+      }
+      var on = PL.filter[key];
+      var html = '<button class="chip' + (Object.keys(on).length ? '' : ' active')
+        + '" data-plaxis="' + key + '" data-plval="">全部</button>';
+      html += vals.map(function (v) {
+        return '<button class="chip' + (on[v] ? ' active' : '')
+          + '" data-plaxis="' + key + '" data-plval="' + esc(v) + '">'
+          + esc(v) + ' ' + f[v] + '</button>';
+      }).join('');
+      return '<div class="pl-axis" data-plaxiskey="' + key + '">'
+        + '<span class="pl-axis-name">' + ax[1] + '</span>' + html + '</div>';
+    }).join('');
+  }
+
+  function plNowKey() {
+    if (!state.playlistCycle || !state.cycle || state.segIndex < 0) return '';
+    var seg = state.cycle.segments[state.segIndex];
+    return seg ? (seg.key || '') : '';
+  }
+
+  function renderPlRows() {
+    var tbody = document.getElementById('pl-rows');
+    var stat = document.getElementById('pl-stat');
+    if (!tbody) return;
+    if (!PL.data) {
+      tbody.innerHTML = '<tr><td colspan="7" class="cell-title d">'
+        + '还没有歌单。粘一个 B 站视频 / 合集链接，点「导入」。</td></tr>';
+      if (stat) stat.textContent = '0 首';
+      return;
+    }
+    var items = plFiltered();
+    if (stat) {
+      // 名字与来源高度重合时只显示一次（合集导入时歌单名就是合集名，例如
+      // name=「合集「羽啾啾」」、source=「合集「羽啾啾」」→ 别并排出两遍）
+      var nm = PL.data.name || '';
+      var srcTxt = PL.data.source || '';
+      stat.textContent = items.length + ' / ' + PL.data.items.length + ' 首 · ' + nm
+        + (srcTxt && srcTxt.indexOf(nm) < 0 ? ' · ' + srcTxt : '');
+    }
+    if (!items.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="cell-title d">当前筛选下没有歌。</td></tr>';
+      return;
+    }
+    var cur = plNowKey();
+    tbody.innerHTML = items.map(function (it) {
+      var k = plKeyOf(it);
+      return '<tr' + (k === cur ? ' class="playing"' : '')
+        + (PL.picked[k] ? ' data-picked="1"' : '') + ' data-key="' + esc(k) + '">'
+        + '<td class="col-act"><input type="checkbox" class="pl-ck" value="' + esc(k) + '"'
+        + (PL.picked[k] ? ' checked' : '') + '></td>'
+        + '<td class="cell-title"><span class="n">' + esc(it.song || it.title) + '</span></td>'
+        + '<td class="pl-artist">' + esc(it.artist || '未识别') + '</td>'
+        + '<td class="pl-lang">' + esc(it.lang || '—') + '</td>'
+        + '<td class="pl-style">' + esc(it.style || '未分类') + '</td>'
+        + '<td class="col-dur">' + fmtClock(it.dur) + '</td>'
+        + '<td class="col-act"><button class="chip pl-play" data-key="'
+        + esc(k) + '" type="button">播放</button></td></tr>';
+    }).join('');
+    plSyncPick();
+  }
+
+  function plSyncPick() {
+    var n = Object.keys(PL.picked).filter(function (k) { return PL.picked[k]; }).length;
+    var box = document.getElementById('pl-bulk');
+    if (box) box.hidden = !n;
+    var t = document.getElementById('pl-picked');
+    if (t) t.textContent = '已选 ' + n + ' 首';
+    Array.prototype.forEach.call(
+      document.querySelectorAll('#pl-rows tr[data-key]'), function (tr) {
+        tr.classList.toggle('picked', !!PL.picked[tr.getAttribute('data-key')]);
+      });
+  }
+
+  /* 放进播放引擎：把 items 铺成时间轴，并把「当前位置」瞄到第 idx 首的开头。
+     `key` 是条目唯一键（见 plKeyOf）；空串 = 从头放。 */
+  function plPlay(key) {
+    var items = plFiltered().filter(function (it) { return (it.dur || 0) > 0 && it.cid; });
+    if (!items.length) { plNote('当前筛选下没有可播放的歌'); return; }
+    var idx = 0;
+    if (key) {
+      for (var i = 0; i < items.length; i++) {
+        if (plKeyOf(items[i]) === key) { idx = i; break; }
+      }
+    }
+    var segs = [], acc = 0;
+    items.forEach(function (it) {
+      var page = it.page || 1;
+      segs.push({
+        key: plKeyOf(it),
+        bvid: it.bvid, page: page, cid: String(it.cid), t0: 0, duration: it.dur, label: '',
+        // ⚠️ `start` 不能漏：整条引擎（findSeg / drift 定位 / 进度）全靠它。
+        //    漏掉的话位置算出来是 NaN，会落到最后一段且永不换段。
+        start: acc,
+        program: {
+          bvid: it.bvid, title: it.song || it.title, category: '歌单',
+          date: it.date || '', parts: [{ page: page, cid: String(it.cid) }],
+          dm_total: 0, view: it.views || 0, duration: it.dur
+        }
+      });
+      acc += it.dur;
+    });
+    var seg = segs[idx];
+    state.playlistCycle = true;
+    state.cycle = { order: items, segments: segs, total: acc };
+    /* 位置 = (now-epoch+drift) mod total，所以要让它落在目标段开头。
+       ⚠️ 与 playProgram 同理：两个锚点必须清掉，否则 cyclePos() 会优先读它们，
+       画面会先停在上一首再跳。 */
+    state.drift = seg.start - (now() - CFG.epoch) % acc;
+    state.drift = ((state.drift % acc) + acc) % acc;
+    state.mediaBase = null;
+    state.wantPos = null;
+    state.segIndex = -1;
+    state.playingKey = null;
+    applyPlayer(true);
+    renderPlRows();          // 至少立刻把高亮挪过去（后续由 tick 保持）
+    plNote('正在播：' + (seg.program.title || '') + '　·　播完自动下一首，最后一首后回到第一首');
+  }
+
+  /* 一首放完就切下一首（最后一首回到第一首）。
+     ⚠️ 为什么不能只靠时间轴自己推过去：B 站给的时长是**整数**（比如 307 秒），
+     而实际媒体往往短一点（实测 306.7 秒）—— 播放位置永远差那 0.3 秒够不到段边界，
+     表现就是「一首放完卡在结尾不动」。所以用媒体自己的 ended 事件来推进。 */
+  function plAdvance() {
+    if (!state.playlistCycle || state.view === 'broadcast') return;
+    if (!state.cycle || !state.cycle.segments.length) return;
+    var i = state.segIndex >= 0 ? state.segIndex : 0;
+    var seg = state.cycle.segments[(i + 1) % state.cycle.segments.length];
+    if (seg) plPlay(seg.key);      // ⚠️ 用 key 不用 bvid：同 bvid 多分P 时按 bvid 会回到该期第一首
+  }
+
+  function plImport() {
+    var inp = document.getElementById('pl-url');
+    var url = (inp && inp.value || '').trim();
+    if (!url) { plNote('先粘一个 B 站链接'); return; }
+    plNote('正在导入…（合集大的话要几秒）');
+    postJSON('/api/playlist/import', { url: url }).then(function (d) {
+      if (!d || d.error) { plNote((d && d.error) || '导入失败'); return null; }
+      PL.curId = d.id;
+      store.set('xl_pl', d.id);
+      PL.filter = { lang: {}, style: {}, artist: {} };
+      PL.picked = {};
+      if (inp) inp.value = '';
+      plNote('已导入 ' + d.count + ' 首（' + d.source + '）'
+        + (d.truncated ? '，超过上限已截断' : '') + (d.updated ? '，更新了同名歌单' : ''));
+      return renderPlaylist();
+    }).catch(function () { plNote('导入失败（网络问题）'); });
+  }
+
+  function plRename() {
+    if (!PL.data) return;
+    var name = window.prompt('歌单名字', PL.data.name);
+    if (!name || name === PL.data.name) return;
+    postJSON('/api/playlist/rename', { id: PL.curId, name: name }).then(function (d) {
+      if (!d || d.error) { plNote((d && d.error) || '改名失败'); return; }
+      renderPlaylist();
+    });
+  }
+
+  function plDelete() {
+    if (!PL.data) return;
+    if (!window.confirm('删除歌单「' + PL.data.name + '」？\n\n只删这份导入记录，不影响 B 站上的合集。')) return;
+    postJSON('/api/playlist/delete', { id: PL.curId }).then(function () {
+      PL.data = null;
+      renderPlaylist();
+    });
+  }
+
+  function plApplyTags() {
+    var lang = document.getElementById('pl-bulk-lang').value;
+    var style = document.getElementById('pl-bulk-style').value;
+    var keys = Object.keys(PL.picked).filter(function (k) { return PL.picked[k]; });
+    if (!keys.length) { plNote('先勾选要改的歌'); return; }
+    if (!lang && !style) { plNote('选一个要改的语言或风格'); return; }
+    postJSON('/api/playlist/tag', { id: PL.curId, keys: keys, lang: lang, style: style })
+      .then(function (d) {
+        if (!d || d.error) { plNote((d && d.error) || '改分类失败'); return; }
+        PL.picked = {};
+        document.getElementById('pl-bulk-lang').value = '';
+        document.getElementById('pl-bulk-style').value = '';
+        plNote('已改 ' + d.n + ' 首的分类' + (d.songs ? '（' + d.songs + ' 个歌名已记入本地表，跨歌单生效）' : ''));
+        renderPlaylist();
+      });
+  }
+
+  function bindPlaylist() {
+    if (!PL.endedBound) {
+      PL.endedBound = true;
+      el.player.addEventListener('ended', plAdvance);
+    }
+    var imp = document.getElementById('pl-import');
+    if (imp) imp.addEventListener('click', plImport);
+    var urlIn = document.getElementById('pl-url');
+    if (urlIn) urlIn.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); plImport(); }
+    });
+    var sel = document.getElementById('pl-select');
+    if (sel) sel.addEventListener('change', function () {
+      PL.curId = sel.value;
+      store.set('xl_pl', PL.curId);
+      PL.filter = { lang: {}, style: {}, artist: {} };
+      PL.picked = {};
+      renderPlaylist();
+    });
+    var rn = document.getElementById('pl-rename');
+    if (rn) rn.addEventListener('click', plRename);
+    var dl = document.getElementById('pl-delete');
+    if (dl) dl.addEventListener('click', plDelete);
+    var pa = document.getElementById('pl-playall');
+    if (pa) pa.addEventListener('click', function () { plPlay(''); });
+    var ap = document.getElementById('pl-bulk-apply');
+    if (ap) ap.addEventListener('click', plApplyTags);
+    var ca = document.getElementById('pl-check-all');
+    if (ca) ca.addEventListener('change', function () {
+      plFiltered().forEach(function (it) {
+        if (ca.checked) PL.picked[plKeyOf(it)] = true;
+        else delete PL.picked[plKeyOf(it)];
+      });
+      renderPlRows();
+    });
+    var fl = document.getElementById('pl-filters');
+    if (fl) fl.addEventListener('click', function (e) {
+      var b = e.target.closest('.chip[data-plaxis]');
+      if (!b) return;
+      var key = b.getAttribute('data-plaxis');
+      var val = b.getAttribute('data-plval');
+      if (!val) PL.filter[key] = {};
+      else if (PL.filter[key][val]) delete PL.filter[key][val];
+      else PL.filter[key][val] = 1;
+      renderPlFilters();
+      renderPlRows();
+    });
+    var rows = document.getElementById('pl-rows');
+    if (rows) {
+      rows.addEventListener('change', function (e) {
+        var ck = e.target.closest('.pl-ck');
+        if (!ck) return;
+        if (ck.checked) PL.picked[ck.value] = true;
+        else delete PL.picked[ck.value];
+        plSyncPick();
+      });
+      rows.addEventListener('click', function (e) {
+        var b = e.target.closest('.pl-play');
+        if (b) { plPlay(b.getAttribute('data-key')); return; }
+        if (e.target.closest('.pl-ck')) return;
+        var tr = e.target.closest('tr[data-key]');
+        if (tr) plPlay(tr.getAttribute('data-key'));       // 点整行也能播
+      });
+    }
+  }
+
+  /* 进歌单页自动开播（用户要的）。已经在放歌单时不重开 ——
+     否则每次从别的页切回来都会把当前这首重新拉一遍。 */
+  function plAutoStart() {
+    renderPlaylist().then(function () {
+      if (state.playlistCycle) return;      // 已经在放歌单：不重开当前这首
+      if (!PL.data || !plFiltered().length) return;
+      plPlay('');
+    });
+  }
+
   /* ---------------------------------------------------------- 主播动态（B 站空间动态） */
 
   /* 与微博页同构：跟着当前板块走，切板块就换人。区别是**不用登录** ——
@@ -6303,6 +6645,36 @@
      域名（i*.hdslb.com）本来就在服务端白名单里，不用改后端。 */
   function dynImg(u) {
     return '/api/img?u=' + b64url(String(u).replace(/^http:/, 'https:'));
+  }
+
+  /* 头像 <img>：一律走本机代理，并自带「失败换首字母色块」的兜底。
+     ⚠️ 别直连 B 站图床（2026-10-15 用户反馈首屏卡片破图）：
+     ① serve.py 里 `/api/img` 的存在理由就是「浏览器直连 i*.hdslb.com 在部分网络下会失败，
+        而本机服务能取到」—— 卡片/监控室原先直连，等于绕开了这道保险；
+     ② 直连失败时浏览器只会画一个破图图标，观感很糟 —— 这里退回首字母色块（与「没有头像」
+        时的占位同款）。加载失败的兜底统一由 bindFaceFallback() 在插入 DOM 后绑定。 */
+  function faceHtml(url, cls, name) {
+    var ch = String(name || '?').charAt(0);
+    // ⚠️ 占位块必须**同时**带主类与 -ph 类：主类给尺寸与圆形，-ph 给居中与字号。
+    //    只给 -ph 的话兜底后会变成一个没有尺寸的裸字（v1.0.30 实测踩到）。
+    var ph = cls + ' ' + cls + '-ph';
+    if (!url) return '<span class="' + ph + '">' + esc(ch) + '</span>';
+    return '<img class="' + cls + '" src="' + dynImg(url) + '" alt="" loading="lazy"'
+      + ' decoding="async" referrerpolicy="no-referrer"'
+      + ' data-ph="' + esc(ch) + '" data-phcls="' + esc(ph) + '">';
+  }
+
+  /* 给 root 里所有由 faceHtml 生成的 <img> 绑失败兜底（换成首字母占位，不留破图图标）。 */
+  function bindFaceFallback(root) {
+    if (!root) return;
+    Array.prototype.forEach.call(root.querySelectorAll('img[data-phcls]'), function (im) {
+      im.addEventListener('error', function () {
+        var sp = document.createElement('span');
+        sp.className = im.getAttribute('data-phcls');
+        sp.textContent = im.getAttribute('data-ph') || '?';
+        if (im.parentNode) im.parentNode.replaceChild(sp, im);
+      });
+    });
   }
 
   function renderDynamic() {

@@ -91,3 +91,13 @@ data/.main_data_owner.*
 
 # 测试产生的注册表备份（内容 = 改动前的 stations.json）
 data/stations.json.bak_*
+
+# ============================================================
+# 本机运行时数据 —— 本机专属，且**绝不能进分发包**
+# ============================================================
+# follow_cache.json：关注列表落盘缓存（别人的账号关系）。
+# playlists.json / song_tags.json：导入的歌单 + 手动补的歌名分类。
+# 三者都由 build_exe.py 的 DATA_EXCLUDE_FILES 排除出包，这里同步排除出库。
+data/follow_cache.json
+data/playlists.json
+data/song_tags.json

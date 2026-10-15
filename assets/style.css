@@ -326,14 +326,88 @@ body { min-height: 100vh; }
   position: relative;
   z-index: 1;
   display: grid;
-  /* 右栏用「内容的 33%」而不是写死 404px：写死的话窗口一变窄，右栏不变而正文缩水，
-     比例就从 0.52 一路漂到 0.70（实测 1100px 窗口）。33% 在 1280 内容宽下正好 404px，
-     与原来的桌面版式逐像素一致；再往上被 404px 封顶（和 max-width 一起保证大屏构图不变）。 */
-  grid-template-columns: minmax(0, 1fr) clamp(320px, 33%, 404px);
-  gap: 44px;
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 34px 28px 90px;
+  /* 右栏 = 播放器列。2026-10-15 用户要求「占到 60% 左右，左侧不需要占大幅空间」：
+     24%/460px → 30%/720px → **60%，不设上限**（用 minmax 的下限 320px 兜住窄屏）。
+     左侧因此只剩约 40%，**必须**配合下面那组容器查询把次要列收起来（`@container` 块），
+     否则节目单的标题列会被挤成一条缝。
+     实测左列：1024→363 · 1160→412 · 1440→512 · 1920→682 · 2560→917。
+     ⚠️ 直播间（body.view-broadcast）自己覆盖了 grid-template-columns，不受影响。
+     ⚠️ 想要「大屏但不那么夸张」可以把 60% 调小，但**别忘了一起复核左列那几个值**。 */
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 60%);
+  gap: clamp(28px, 2.4vw, 56px);
+  /* ⚠️ 这里**故意不设 max-width**（用户 2026-10-15 反馈「左右空隙太大」）：
+     原来封顶 1280px —— 在 2560 宽的屏幕上正文只占中间一半、左右各空 640px。
+     现在只留边距（随视口 24~64px），窄屏仍由下面的断点接管。
+     想再收窄正文的人请改 padding，别把这个上限加回来。 */
+  max-width: none;
+  padding: 34px clamp(24px, 2.6vw, 64px) 90px;
+}
+
+/* 播放器高度保护：右栏占到 60% 之后，超宽屏上 16:9 的画面会顶破一屏
+   （3440 宽的屏上是 2038px 宽 → 1146px 高）。这里按「可用高度反推最大宽度」，
+   和直播间那条规则同一个思路。注意**排除影院模式**（那里有自己的一屏构图）
+   与直播间（它自己已经限了高度）。 */
+body:not(.theater):not(.view-broadcast) .col-right .player-box {
+  max-width: calc((100vh - 260px) * 16 / 9);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* 左列（正文/列表）按**自己的宽度**收起次要列。
+   阈值是这么定的：列表固定列合计 322px（勾选/类型/时长/弹幕/播放）+ 缩略图 70px，
+   所以左列低于 400px 就必然要开始收。
+   ⚠️ 用容器查询而不是媒体查询：右栏虽然统一占 60%，但**监控室是单列全宽、
+   直播间是「播放器在左列、弹幕在右列」**，同一视口下左列宽度差别很大 ——
+   按视口判会把它们一起误伤。容器查询看的是这一列自己的实际宽度，正好。
+
+   ⚠️⚠️ **收起一列必须用「零宽折叠」，不能用 `display: none`**：
+   `table-layout: fixed` 下，被 `display:none` 的 th 仍会作为**一列「没有宽度」的列**
+   参与平分剩余宽度，于是标题列只能拿到 1/N。实测（左列 508px 的节目单页）：
+   收掉「类型」后标题文字反而从 102px 掉到 86px —— 因为剩余宽度被 3 个 auto 列平分了。
+   零宽折叠（width/max-width 归零 + padding 归零 + 裁掉内容）才真正把宽度让给标题。 */
+.wrap > .views { container-type: inline-size; }
+
+/* 下面各处的"折叠"声明都一样，只是阈值不同，所以逐条列出（便于单独调整）： */
+@container (max-width: 660px) {        /* 「弹幕」 */
+  .list .col-dm {
+    width: 0; max-width: 0; padding: 0;
+    overflow: hidden; white-space: nowrap; font-size: 0; color: transparent;
+  }
+}
+@container (max-width: 620px) {        /* 节目单的「类型」：它比频道页多一列「开始」(96px)，
+                                          同样的左列宽下标题只剩一半，所以要更早收 */
+  #view-schedule .list .col-cat {
+    width: 0; max-width: 0; padding: 0;
+    overflow: hidden; white-space: nowrap; font-size: 0; color: transparent;
+  }
+}
+@container (max-width: 560px) {        /* 「时长」 */
+  .list .col-dur {
+    width: 0; max-width: 0; padding: 0;
+    overflow: hidden; white-space: nowrap; font-size: 0; color: transparent;
+  }
+}
+@container (max-width: 470px) {        /* 「类型」（频道页等没有「开始」列的） */
+  .list .col-cat {
+    width: 0; max-width: 0; padding: 0;
+    overflow: hidden; white-space: nowrap; font-size: 0; color: transparent;
+  }
+}
+@container (max-width: 400px) {        /* 最后连缩略图也省掉，把宽度全留给标题 */
+  .list .cell-title img { display: none; }
+}
+/* 歌单页列更多（固定列合计 576px），更早开始收 */
+@container (max-width: 760px) {
+  #view-playlist .list .pl-style, #view-playlist .list .pl-lang {
+    width: 0; max-width: 0; padding: 0;
+    overflow: hidden; white-space: nowrap; font-size: 0; color: transparent;
+  }
+}
+@container (max-width: 500px) {
+  #view-playlist .list .pl-artist {
+    width: 0; max-width: 0; padding: 0;
+    overflow: hidden; white-space: nowrap; font-size: 0; color: transparent;
+  }
 }
 
 .col-right { position: sticky; top: 76px; align-self: start; }
@@ -598,37 +672,7 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
 .time-cell { color: var(--text); font-variant-numeric: tabular-nums; }
 .time-cell small { display: block; font-size: 11px; color: var(--muted-2); margin-top: 2px; }
 
-/* 分类卡片 */
-.cat-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(184px, 1fr));
-  gap: 12px;
-  margin-bottom: 26px;
-}
-.cat-card {
-  text-align: left;
-  padding: 15px 16px;
-  border-radius: var(--radius);
-  border: 1px solid var(--line);
-  background: var(--panel);
-  color: inherit;
-  font-family: inherit;
-  cursor: pointer;
-  transition: border-color .15s, background .15s;
-}
-.cat-card:hover { border-color: var(--line-2); background: var(--panel-2); }
-.cat-card.active { border-color: var(--red); background: var(--red-soft); }
-.cat-card .cc-n { font-size: 15px; font-weight: 500; margin-bottom: 9px; }
-.cat-card .cc-s { font-size: 12px; line-height: 1.75; color: var(--muted); }
-.cat-card .cc-s b { color: var(--text-2); font-weight: 500; }
-.cat-card .cc-t {
-  margin-top: 3px;
-  font-size: 12px;
-  color: var(--muted-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* 分类卡片（.cat-*）已于 v1.0.33 随「分类」板块一并移除 */
 
 /* 关于 */
 .about-grid { display: grid; gap: 16px; }
@@ -1301,8 +1345,11 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
    一列窄侧栏贴在右边，正文回到主区 —— 翻微博、查节目单的时候回放照常播着，
    不用为了看画面来回切页面。 */
 body.view-other .wrap {
-  grid-template-columns: minmax(0, 1fr) clamp(288px, 26%, 352px);
-  gap: clamp(18px, 2.4%, 34px);
+  /* v1.0.33（用户要求）：除直播间与监控室以外，其余板块**统一用 24 小时频道那套比例**
+     —— 右栏（播放器）也占 60%，不再有「缩小的侧栏」这一档。
+     所以这里不再覆盖 grid-template-columns，直接继承基础 `.wrap` 的列定义。
+     只留 align-items：让长页面（节目单 / 设置）往下滚时右栏不被拉伸。
+     ⚠️ 直播间（body.view-broadcast）与监控室（body.view-multi）各自另有列定义，不受影响。 */
   align-items: start;
 }
 
@@ -1452,9 +1499,22 @@ body.theater .chapters-panel { display: none; }
    顶栏 52→94px 三处同时跳，跨分辨率看起来完全不是同一套版式。
    实测两栏正文到 960px 还有约 540px 可用，所以界限下移到这里。
    注意：顶栏的界限与它不是同一个值，见下面那张表 —— 两件事的临界点本来就不同。 */
+/* 频道页（主视图）退回单列。⚠️ 这个界限是 1100，不是下面的 960 ——
+   右栏改成占 60% 之后，960~1100 这一段的左列只剩 360~400px，两列都排不舒服
+   （当年定 960 是因为右栏只有 404px，那时两列正文还有约 540px 可用）。
+   单列后播放器落到内容上方、占满整个宽度，比挤在窄右栏里反而更大。
+   ⚠️ 选择器必须排除 view-other（分类/歌单/设置…，它们的右栏只有 300~400px，
+   左列一直够宽，继续用下面的 960）与 theater（影院模式有自己的三栏构图）。 */
+@media (max-width: 1100px) {
+  body:not(.view-other):not(.theater) .wrap {
+    grid-template-columns: 1fr;
+    gap: 28px;
+    padding: 24px 18px 70px;
+  }
+  body:not(.view-other):not(.theater) .col-right { position: static; order: -1; }
+}
+
 @media (max-width: 960px) {
-  .wrap { grid-template-columns: 1fr; gap: 28px; padding: 24px 18px 70px; }
-  .col-right { position: static; order: -1; }
   .title { font-size: 32px; }
   .search input { width: 100%; }
   .filters { flex-direction: column; align-items: stretch; }
@@ -1600,6 +1660,18 @@ body.theater .chapters-panel { display: none; }
   border-radius: 50%;
   object-fit: cover;
   background: var(--panel);
+  border: 1px solid var(--line-2);
+}
+
+/* 头像取不到时的首字母占位（与 .ob-face-ph 同款思路，尺寸对齐头像本身） */
+.status-live-face-ph {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 17px; font-weight: 600; color: var(--muted);
+  background: var(--panel-2);
   border: 1px solid var(--line-2);
 }
 
@@ -2939,10 +3011,19 @@ body.view-multi .col-right { display: none; }
    末尾一张加号卡展开添加表单。每次新开页面都先停在这里选人。 */
 #onboard {
   position: fixed; inset: 0; z-index: 1100;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  display: flex; flex-direction: column; align-items: center;
+  /* ⚠️ 低分辨率（如 1080×560 的窗口）下内容比视口高，这里有两个坑一起发作
+     （用户 2026-10-15 截图：卡片互相叠、添加表单浮在卡片上）：
+     ① 子项默认 `flex-shrink: 1` → 卡片墙被压扁，而卡片有 min-height: 216px 不会跟着缩，
+        于是从 .ob-grid 里溢出来压到下面的表单上；
+     ② `justify-content: center` 在内容溢出时上下都超出，顶部被裁切且**滚不回去**。
+     所以：子项一律不收缩（见下一条），居中用 `safe center`（装不下时自动退化为从顶部开始）。 */
+  justify-content: safe center;
   padding: 32px 24px; overflow: auto;
   background: var(--bg);
 }
+/* 卡片墙 / 表单 / 页脚都按自己的自然高度排，绝不为了塞进一屏被压扁 */
+#onboard > * { flex: 0 0 auto; }
 #onboard[hidden] { display: none; }
 
 .ob-head { text-align: center; margin-bottom: 30px; }
@@ -3057,3 +3138,88 @@ body.view-multi .col-right { display: none; }
 @media (max-width: 560px) {
   .ob-card { width: 142px; min-height: 192px; }
 }
+
+/* ---------------------------------------------------------------- 歌单页 */
+
+/* 工具行节奏与其它页一致（都用 .actions），这里只调间距。
+   按钮体系统一走 .btn / .btn.ghost：原先「重命名 / 删除 / 从头连播」用的是**筛选用的
+   .chip** —— 视觉上会和下面的筛选条混成一类，而它们其实是操作，不是筛选条件。 */
+#view-playlist .actions { gap: 10px; margin-bottom: 16px; }
+#view-playlist .search input { width: min(560px, 68vw); }
+
+/* 导入结果的即时提示（跟在按钮右边的一句话）。不参与压缩、不换行成两行。 */
+.pl-note {
+  margin: 0;
+  max-width: none;
+  align-self: center;
+  font-size: 12.5px;
+  color: var(--muted-2);
+}
+
+/* 歌单切换与批量打标共用的下拉外观。
+   ⚠️ 展开后的那一层才是被真正看到的地方：option 必须显式写底色字色（两套主题都靠它），
+   否则深色页面上弹层是白底、文字是浅色，几乎看不清。 */
+#view-playlist select {
+  width: auto;
+  max-width: 100%;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+}
+#view-playlist select:focus { border-color: color-mix(in srgb, var(--red) 55%, transparent); }
+#view-playlist select option { background: var(--panel-2); color: var(--text); }
+
+/* 三排筛选（语言 / 风格 / 演唱者），每排一行 chip；轴上没东西就不渲染这一排 */
+.pl-filters { margin-bottom: 18px; }
+.pl-axis { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pl-axis + .pl-axis { margin-top: 9px; }
+.pl-axis .pl-axis-name {
+  flex: none;
+  min-width: 48px;
+  font-size: 12px;
+  color: var(--muted-2);
+}
+.pl-axis .chip { padding: 5px 13px; font-size: 12.5px; }
+
+/* 批量打标条：勾选若干首后浮出。做成一块有底的操作区，而不是又一行散落的下拉 ——
+   它只在「已选 > 0」时出现，视觉上要一眼看出「接下来改的是选中的这些」。 */
+.pl-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+.pl-bulk[hidden] { display: none; }
+.pl-bulk .sub { margin: 0; max-width: none; color: var(--text-2); }
+.pl-bulk .btn { margin-left: auto; }    /* 主操作靠右，与左边「改什么」分开 */
+
+/* 列宽：内容铺满后表格会被拉到 2000px 上下，固定列不能还按 1280 时代的 78px 给 ——
+   实测「羽啾chu2u」这种 8 字演唱者会被挤成两行。演唱者给足，语言/风格按最长值给。
+   这三列一律**单行 + 省略号**：演唱者是外部数据（有的名字很长），换行会把行高撑乱，
+   省略号配 title 提示更符合表格的习惯。 */
+#view-playlist .list .pl-artist { width: 150px; }
+#view-playlist .list .pl-lang { width: 84px; }
+#view-playlist .list .pl-style { width: 104px; }
+#view-playlist .list .pl-artist,
+#view-playlist .list .pl-lang,
+#view-playlist .list .pl-style {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#view-playlist .list td { padding-top: 14px; padding-bottom: 14px; }
+
+/* 列表里的勾选框：跟行高对齐，别把行撑开 */
+#view-playlist .list .col-act input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--red); }
+#view-playlist .list tr.picked { background: color-mix(in srgb, var(--ink) 4%, transparent); }

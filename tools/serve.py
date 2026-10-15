@@ -1009,6 +1009,10 @@ STATIONLESS_OK = (
     "/api/protocol/register", "/api/protocol/unregister",
     "/api/following/live",     # 只依赖登录态，与有没有注册主播无关
     "/api/live/ws",            # 同上：房间号由 URL 带，跟注册表无关
+    # 歌单：导入的是任意 B 站投稿，与注册表里有没有主播无关（首批用户就是先导歌单）
+    "/api/playlists", "/api/playlist",
+    "/api/playlist/import", "/api/playlist/rename", "/api/playlist/delete",
+    "/api/playlist/tag",
 )
 
 
@@ -2138,6 +2142,396 @@ def api_following_live(force=False):
 
 
 # --- 添加任意直播间（监控室）：房间号 / 直播间链接 / b23.tv 短链 → 可直接播的卡片 ---
+
+# ---------------------------------------------------------------- 歌单（导入的合集 / 多P）
+#
+# 用户粘一个 B 站链接过来：**若该视频属于合集就整张导入**，否则按多P / 单个视频。
+# 分类**不来自 B 站**（实测合集条目只有 title/duration/pic/pubdate/stat，视频标签也只有
+# 「直播切片/授权剪辑/主播名」），所以三类信息各有出处：
+#   · 演唱者 —— 标题开头【米汀nagisa歌】这种前缀里取（实测同一合集 134/138 是同一前缀）；
+#   · 语言   —— 歌名文字判（假名→日文、谚文→韩文、汉字→中文、纯拉丁→英文）；
+#   · 风格   —— 标题里**没有任何**风格线索，只能查表：内置 `assets/song_tags.json`
+#               + 用户补写 `data/song_tags.json`（用户表覆盖内置），查不到就是「未分类」。
+# 手动补的标签按**歌名**写进用户表 —— 同一首歌在别的歌单里也立刻生效，升级也不丢。
+PLAYLISTS_FILE = os.path.join(ROOT, "data", "playlists.json")
+SONG_TAGS_BUILTIN = os.path.join(ROOT, "assets", "song_tags.json")
+SONG_TAGS_USER = os.path.join(ROOT, "data", "song_tags.json")
+PLAYLIST_MAX_ITEMS = 800        # 防呆：超大合集先截断，别把页面拖死
+VIEW_API = "https://api.bilibili.com/x/web-interface/view"
+UNTAGGED = "未分类"
+
+
+def _write_json_file(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+        f.write("\n")
+
+
+def _playlists_doc():
+    doc = _read_json_file(PLAYLISTS_FILE)
+    if not isinstance(doc, dict) or not isinstance(doc.get("lists"), list):
+        doc = {"version": 1, "lists": []}
+    return doc
+
+
+def _tag_key(name):
+    """歌名归一化：去掉所有空白 + 转小写（全角括号等保持原样，宁少合并别错合并）。"""
+    return re.sub(r"\s+", "", (name or "")).lower()
+
+
+def _song_tags():
+    """风格/语言表的合并视图：内置在前、用户表覆盖。键是归一化歌名。"""
+    out = {}
+    for path in (SONG_TAGS_BUILTIN, SONG_TAGS_USER):
+        d = _read_json_file(path)
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if isinstance(v, dict):
+                    out[_tag_key(k)] = v
+    return out
+
+
+def _song_and_artist(title):
+    """标题 → (歌名, 演唱者)。演唱者取开头【…】前缀，去掉结尾的「歌 / 唱歌 / 翻唱」。"""
+    t = (title or "").strip()
+    artist = ""
+    m = re.match(r"^[【\[]([^】\]]+)[】\]]\s*(.*)$", t)
+    if m:
+        artist = re.sub(r"(的?歌|唱歌|翻唱)$", "", m.group(1).strip()).strip()
+        t = m.group(2).strip()
+    return (t or title or "").strip(), artist
+
+
+def _lang_of(name):
+    """歌名文字判语言。顺序要紧：日文歌名常夹汉字，所以先查假名再看汉字。"""
+    s = name or ""
+    if re.search(r"[\u3040-\u309f\u30a0-\u30ff]", s):
+        return "日文"
+    if re.search(r"[\uac00-\ud7af]", s):
+        return "韩文"
+    if re.search(r"[\u4e00-\u9fff]", s):
+        return "中文"
+    if re.search(r"[A-Za-z]", s):
+        return "英文"
+    return "其他"
+
+
+def _pl_item_key(it):
+    """条目唯一键。
+
+    ⚠️ **不能用 bvid 当唯一标识**：合集内部是多P视频时（如「羽啾啾」16 期歌切），
+    同一 bvid 下有十几首不同的歌。只按 bvid 定位会让它们互相串 ——
+    表现为「点第二首却播第一首」「高亮永远在第一行」「勾选一首连带选上一串」。
+    cid 是分P级唯一的，最准；没有 cid 时退回 bvid+pN。
+    """
+    cid = str(it.get("cid") or "")
+    if cid:
+        return "c" + cid
+    return "%sp%s" % (it.get("bvid") or "", it.get("page") or 1)
+
+
+def _pl_decorate(it):
+    """条目出站前补 语言 / 风格（实时查表 → 改表后立刻生效，不必重导）。"""
+    tags = _song_tags().get(_tag_key(it.get("song"))) or {}
+    out = dict(it)
+    out["lang"] = tags.get("lang") or _lang_of(it.get("song"))
+    out["style"] = tags.get("style") or UNTAGGED
+    out["key"] = _pl_item_key(it)        # 前端一律用它定位（见 _pl_item_key 的说明）
+    return out
+
+
+def _pl_resolve_bvid(text):
+    """把用户粘的东西解析成 bvid：完整链接 / b23.tv 短链 / 纯 BV 号。"""
+    text = (text or "").strip()
+    m = re.search(r"(BV[0-9A-Za-z]{10})", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"b23\.tv/([A-Za-z0-9]+)", text)
+    if m:
+        req = urllib.request.Request("https://b23.tv/" + m.group(1),
+                                     headers={"User-Agent": UA})
+        with DIRECT_OPENER.open(req, timeout=15) as r:
+            final = r.geturl()
+        m2 = re.search(r"(BV[0-9A-Za-z]{10})", final)
+        if not m2:
+            raise RuntimeError("短链没跳到视频页（跳到了 %s）" % final[:80])
+        return m2.group(1)
+    raise RuntimeError("认不出链接：请粘 B 站视频链接（bilibili.com/video/BV…）或 b23.tv 短链")
+
+
+def _pl_prefix(title):
+    """取标题开头的【…】/[…] 前缀原文。
+
+    展开合集内层分P时要把外层前缀带上：分P名通常只有歌名（`001_非国民的ヒーロー`），
+    而演唱者信息在外层条目标题里（`【羽啾chu2u】20260810歌切合集`）。
+    """
+    m = re.match(r"^[【\[]([^】\]]+)[】\]]", (title or "").strip())
+    return m.group(1).strip() if m else ""
+
+
+def _pl_strip_index(part):
+    """剥掉分P名常见的序号前缀：`001_歌名` / `01-歌名` / `3. 歌名` → `歌名`。
+
+    ⚠️ 必须**要求分隔符**（_ - . 空白）：否则「01年的夏天」这种正常歌名会被削成「年的夏天」。
+    """
+    s = (part or "").strip()
+    out = re.sub(r"^\d{1,3}\s*[_\-.\u3001]\s*", "", s).strip()
+    return out or s
+
+
+def _pl_entries(data):
+    """条目来源优先级：合集（ugc_season）> 多P（pages）> 单个视频。
+
+    ⚠️ **合集条目自己可能又是一个多P视频** —— 2026-10-15 实测：合集「羽啾啾」16 个条目，
+    每个条目是「某日歌切」，内层 `pages` 才是单曲（6~21 个/期，共 169 首）。
+    这种形状下合集条目的 `page` 只给**第一个分P**、`arc.duration` 是**整期时长**（如 4076 秒），
+    只看它们会把每期压成一首、时长还按整期算 → 表现为「导入后每期只有第一首」。
+    所以：条目带内层 `pages` 且不止 1 个分P 时，**展开到分P级**（一 P = 一首歌）。
+    """
+    items = []
+    ugc = data.get("ugc_season") or {}
+    for sec in ugc.get("sections") or []:
+        for e in sec.get("episodes") or []:
+            arc = e.get("arc") or {}
+            # ⚠️ 合集条目里的 `page` 是**对象**（{cid, page, part, duration, …}），不是数字 ——
+            # 直接 int() 会抛 TypeError（2026-10-15 实测踩到）。两种形状都要认。
+            pg = e.get("page")
+            pgd = pg if isinstance(pg, dict) else {}
+            bvid = e.get("bvid") or ""
+            ep_title = e.get("title") or (arc.get("title") or "")
+            inner = e.get("pages") or []
+
+            if len(inner) > 1:
+                pref = _pl_prefix(ep_title)
+                for p in inner:
+                    cid = p.get("cid")
+                    if not cid:
+                        continue
+                    part = _pl_strip_index(p.get("part") or "")
+                    items.append({
+                        "bvid": bvid,
+                        "cid": str(cid),
+                        "page": int(p.get("page") or 1),
+                        "title": ("【%s】%s" % (pref, part)) if pref else part,
+                        "dur": int(p.get("duration") or 0),
+                        "cover": arc.get("pic") or "",
+                        "pubdate": int(arc.get("pubdate") or 0),
+                        "views": int((arc.get("stat") or {}).get("view") or 0),
+                    })
+                continue
+
+            one = inner[0] if inner else {}
+            items.append({
+                "bvid": bvid,
+                "cid": str(e.get("cid") or pgd.get("cid") or one.get("cid") or ""),
+                "page": int((pgd.get("page") if pgd else pg) or one.get("page") or 1),
+                "title": ep_title or one.get("part") or "",
+                # ⚠️ 分P时长优先，`arc.duration` 垫底：多P条目下 arc 是**整期**时长，
+                #    拿它当单曲时长会让这首永远放不完（也不换段）。
+                "dur": int(pgd.get("duration") or one.get("duration") or arc.get("duration") or 0),
+                "cover": arc.get("pic") or "",
+                "pubdate": int(arc.get("pubdate") or 0),
+                "views": int((arc.get("stat") or {}).get("view") or 0),
+            })
+    if items:
+        return items, "合集「%s」" % (ugc.get("title") or "未命名"), str(ugc.get("id") or "")
+
+    bvid = data.get("bvid") or ""
+    pages = data.get("pages") or []
+    if len(pages) > 1:
+        for p in pages:
+            items.append({
+                "bvid": bvid,
+                "cid": str(p.get("cid") or ""),
+                "page": int(p.get("page") or 1),
+                "title": p.get("part") or data.get("title") or "",
+                "dur": int(p.get("duration") or 0),
+                "cover": data.get("pic") or "",
+                "pubdate": int(data.get("pubdate") or 0),
+                "views": int((data.get("stat") or {}).get("view") or 0),
+            })
+        return items, "多P 视频", ""
+    items.append({
+        "bvid": bvid,
+        "cid": str(data.get("cid") or ""),
+        "page": 1,
+        "title": data.get("title") or "",
+        "dur": int(data.get("duration") or 0),
+        "cover": data.get("pic") or "",
+        "pubdate": int(data.get("pubdate") or 0),
+        "views": int((data.get("stat") or {}).get("view") or 0),
+    })
+    return items, "单个视频", ""
+
+
+def _pl_classify(items):
+    """补 歌名 / 演唱者。
+
+    ⚠️ 不能「逐条取前缀就当歌手名」：实测同一合集里混着【自留】、【米汀nagisa歌 泡沫】
+    这类个别写法，逐条取会把「自留」当成歌手。所以判据是**前缀出现在 ≥60% 条目里**
+    才算这张歌单的「来源前缀」——那时用它统一覆盖，并把它从歌名里剥掉；
+    五花八门（多条各有各的前缀）时，就各自作数，没前缀的留空由用户改。
+    """
+    for it in items:
+        it["song"], it["artist"] = _song_and_artist(it.get("title"))
+    pref = {}
+    for it in items:
+        if it["artist"]:
+            pref[it["artist"]] = pref.get(it["artist"], 0) + 1
+    if pref:
+        top, n = max(pref.items(), key=lambda kv: kv[1])
+        if n > len(items) * 0.6:
+            pat = re.compile(r"^%s\s*歌?\s*" % re.escape(top))
+            for it in items:
+                it["artist"] = top
+                stripped = pat.sub("", it["song"]).strip()
+                if stripped:
+                    it["song"] = stripped
+    return items
+
+
+def _pl_payload(obj):
+    """出站载荷：条目 + 三轴分类统计（前端只负责画 chips，不再自己算一遍）。"""
+    items = [_pl_decorate(it) for it in (obj.get("items") or [])]
+    facets = {"lang": {}, "style": {}, "artist": {}}
+    for it in items:
+        for k in ("lang", "style", "artist"):
+            v = it.get(k) or UNTAGGED
+            facets[k][v] = facets[k].get(v, 0) + 1
+    out = {k: obj.get(k) for k in ("id", "name", "source", "imported_at", "url")}
+    out["items"] = items
+    out["facets"] = facets
+    return out
+
+
+def api_playlists():
+    doc = _playlists_doc()
+    out = [{"id": x.get("id"), "name": x.get("name"), "source": x.get("source"),
+            "imported_at": x.get("imported_at"), "count": len(x.get("items") or [])}
+           for x in doc["lists"]]
+    out.sort(key=lambda x: -(x.get("imported_at") or 0))
+    return 200, {"lists": out}
+
+
+def api_playlist(pid):
+    for x in _playlists_doc()["lists"]:
+        if x.get("id") == pid:
+            return 200, _pl_payload(x)
+    return 404, {"error": "没有这张歌单"}
+
+
+def api_playlist_import(obj):
+    """导入（或重复导入 = 更新）一张歌单。"""
+    try:
+        bvid = _pl_resolve_bvid(obj.get("url"))
+    except Exception as e:
+        return 400, {"error": str(e)}
+    try:
+        d = bili_get("%s?bvid=%s" % (VIEW_API, bvid), "https://www.bilibili.com/video/%s" % bvid)
+    except Exception as e:
+        return 502, {"error": "取视频信息失败：%s" % bili_err(e)}
+    if d.get("code") != 0:
+        return 502, {"error": "B 站返回 code=%s %s" % (d.get("code"), d.get("message"))}
+    data = d.get("data") or {}
+    items, src, season_id = _pl_entries(data)
+    if not items:
+        return 502, {"error": "这个链接里没有可导入的条目"}
+    cut = len(items) > PLAYLIST_MAX_ITEMS
+    if cut:
+        items = items[:PLAYLIST_MAX_ITEMS]
+    _pl_classify(items)
+    # id 用合集 id / bvid 推 —— 重复导入同一张就是更新，不会堆出一堆同名歌单
+    pid = ("s" + season_id) if season_id else ("b" + bvid)
+    doc = _playlists_doc()
+    name = src if season_id else ((data.get("title") or src)[:40])
+    old = [x for x in doc["lists"] if x.get("id") == pid]
+    entry = {"id": pid, "name": name, "source": src, "url": obj.get("url") or "",
+             "imported_at": int(time.time()), "items": items}
+    if old:
+        doc["lists"][doc["lists"].index(old[0])] = entry
+    else:
+        doc["lists"].append(entry)
+    _write_json_file(PLAYLISTS_FILE, doc)
+    print("[playlist] 导入 %s：%d 首（%s%s）"
+          % (bvid, len(items), src, "，超上限已截断" if cut else ""))
+    return 200, {"ok": True, "id": pid, "count": len(items), "source": src,
+                 "truncated": cut, "updated": bool(old)}
+
+
+def api_playlist_rename(obj):
+    pid, name = obj.get("id"), (obj.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "名字不能为空"}
+    doc = _playlists_doc()
+    for x in doc["lists"]:
+        if x.get("id") == pid:
+            x["name"] = name[:60]
+            _write_json_file(PLAYLISTS_FILE, doc)
+            return 200, {"ok": True, "name": x["name"]}
+    return 404, {"error": "没有这张歌单"}
+
+
+def api_playlist_delete(obj):
+    doc = _playlists_doc()
+    keep = [x for x in doc["lists"] if x.get("id") != obj.get("id")]
+    if len(keep) == len(doc["lists"]):
+        return 404, {"error": "没有这张歌单"}
+    doc["lists"] = keep
+    _write_json_file(PLAYLISTS_FILE, doc)
+    return 200, {"ok": True}
+
+
+def api_playlist_tag(obj):
+    """批量改分类。语言/风格按**歌名**写进 `data/song_tags.json`（全局生效、跨歌单）；
+    演唱者只改这张歌单里的那几条（它属于条目自身的属性）。"""
+    pid = obj.get("id")
+    keys = set(obj.get("keys") or obj.get("bvids") or [])   # keys=唯一键（新）；bvids=老字段名
+    lang = (obj.get("lang") or "").strip()
+    style = (obj.get("style") or "").strip()
+    artist = (obj.get("artist") or "").strip()
+    if not keys:
+        return 400, {"error": "先勾选要改的歌曲"}
+    if not (lang or style or artist):
+        return 400, {"error": "没有要改的内容"}
+    doc = _playlists_doc()
+    target = None
+    for x in doc["lists"]:
+        if x.get("id") == pid:
+            target = x
+            break
+    if target is None:
+        return 404, {"error": "没有这张歌单"}
+    hits = [it for it in target["items"]
+            # 前端传唯一键（`c<cid>`）；也兼容按 bvid 传的老调用与老歌单数据
+            if _pl_item_key(it) in keys or str(it.get("bvid") or "") in keys]
+    if not hits:
+        return 400, {"error": "勾选的条目不在这张歌单里"}
+    if artist:
+        for it in hits:
+            it["artist"] = artist
+    res = {"ok": True, "n": len(hits)}
+    if lang or style:
+        tags = _read_json_file(SONG_TAGS_USER)
+        if not isinstance(tags, dict):
+            tags = {}
+        for it in hits:
+            k = _tag_key(it.get("song"))
+            if not k:
+                continue
+            cur = tags.get(k)
+            tags[k] = dict(cur) if isinstance(cur, dict) else {}
+            if lang:
+                tags[k]["lang"] = lang
+            if style:
+                tags[k]["style"] = style
+        _write_json_file(SONG_TAGS_USER, tags)
+        res["songs"] = len({_tag_key(it.get("song")) for it in hits if it.get("song")})
+    _write_json_file(PLAYLISTS_FILE, doc)
+    print("[playlist] 改分类 %d 条（语言=%s 风格=%s 演唱者=%s）"
+          % (len(hits), lang or '-', style or '-', artist or '-'))
+    return 200, res
+
 
 LIVE_ROOM_INFO_API = "https://api.live.bilibili.com/room/v1/Room/get_info"
 
@@ -4280,6 +4674,10 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/following/live":
             # ?refresh=1 = 「刷新开播状态」按钮：跳过缓存同步拿最新的一份
             return self._json(*api_following_live("refresh" in q))
+        if parsed.path == "/api/playlists":
+            return self._json(*api_playlists())
+        if parsed.path == "/api/playlist":
+            return self._json(*api_playlist(q.get("id", [""])[0]))
         if parsed.path == "/api/live/danmu-info":
             return self._json(*api_live_danmu_info())
         if parsed.path == "/api/live/chat/stream":
@@ -4318,6 +4716,14 @@ class Handler(SimpleHTTPRequestHandler):
         if not isinstance(obj, dict):
             return self._json(400, {"error": "请求体必须是 JSON 对象"})
 
+        if parsed.path == "/api/playlist/import":
+            return self._json(*api_playlist_import(obj))
+        if parsed.path == "/api/playlist/rename":
+            return self._json(*api_playlist_rename(obj))
+        if parsed.path == "/api/playlist/delete":
+            return self._json(*api_playlist_delete(obj))
+        if parsed.path == "/api/playlist/tag":
+            return self._json(*api_playlist_tag(obj))
         if parsed.path == "/api/stations/probe":
             return self._json(*api_stations_probe(obj))
         if parsed.path == "/api/stations/save":

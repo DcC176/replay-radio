@@ -201,7 +201,7 @@ window.__BOOT_T0 = Date.now();
     <a class="tab" data-view="live" href="#/live">24 小时频道</a>
     <a class="tab" data-view="broadcast" href="#/broadcast">直播间</a>
     <a class="tab" data-view="schedule" href="#/schedule">节目单</a>
-    <a class="tab" data-view="categories" href="#/categories">分类</a>
+    <a class="tab" data-view="playlist" href="#/playlist">歌单</a>
     <a class="tab" data-view="multi" href="#/multi">监控室</a>
     <a class="tab" data-view="dynamic" href="#/dynamic">动态</a>
     <a class="tab" data-view="weibo" href="#/weibo">微博</a>
@@ -483,26 +483,72 @@ window.__BOOT_T0 = Date.now();
       <div class="wb-foot" id="wb-foot" hidden></div>
     </section>
 
-    <section class="view" id="view-categories">
-      <div class="eyebrow">—— 分类</div>
-      <h1 class="title sm">按类型浏览</h1>
-      <p class="sub">分类同时决定排期池：在「24 小时频道」里取消某一类后，时间轴只会在剩下的类型里循环。</p>
+    <section class="view" id="view-playlist">
+      <div class="eyebrow">—— 歌单</div>
+      <h1 class="title sm">导入的歌单</h1>
+      <p class="sub">粘一个 B 站链接：若该视频属于<b>合集</b>就整张导入，否则按多P / 单个视频。
+        演唱者取标题前缀、语言按歌名文字自动判定；风格查内置表，查不到的显示「未分类」，勾选后可批量补。</p>
 
-      <div class="cat-cards" id="cat-cards"></div>
+      <div class="actions">
+        <label class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 13.4a3.6 3.6 0 005.1 0l2.6-2.6a3.6 3.6 0 00-5.1-5.1l-1 1"/><path d="M13.4 10.6a3.6 3.6 0 00-5.1 0l-2.6 2.6a3.6 3.6 0 005.1 5.1l1-1"/></svg>
+          <input id="pl-url" placeholder="粘贴 B 站视频 / 合集链接（支持 b23.tv 短链）">
+        </label>
+        <button class="btn small" id="pl-import" type="button">导入</button>
+        <span class="sub pl-note" id="pl-note"></span>
+      </div>
 
-      <div class="list-head"><span class="stat" id="cat-stat">—</span></div>
+      <div class="actions">
+        <select id="pl-select" title="切换歌单"></select>
+        <button class="btn small ghost" id="pl-rename" type="button">重命名</button>
+        <button class="btn small ghost" id="pl-delete" type="button">删除</button>
+        <button class="btn small" id="pl-playall" type="button">从头连播</button>
+      </div>
+
+      <div class="pl-filters" id="pl-filters"></div>
+
+      <div class="pl-bulk" id="pl-bulk" hidden>
+        <span class="sub" id="pl-picked">已选 0 首</span>
+        <select id="pl-bulk-lang" title="语言">
+          <option value="">语言不变</option>
+          <option value="中文">中文</option>
+          <option value="日文">日文</option>
+          <option value="英文">英文</option>
+          <option value="韩文">韩文</option>
+          <option value="其他">其他</option>
+        </select>
+        <select id="pl-bulk-style" title="风格">
+          <option value="">风格不变</option>
+          <option value="流行">流行</option>
+          <option value="抒情">抒情</option>
+          <option value="摇滚">摇滚</option>
+          <option value="舞曲">舞曲</option>
+          <option value="民谣">民谣</option>
+          <option value="古风">古风</option>
+          <option value="爵士">爵士</option>
+          <option value="经典">经典</option>
+          <option value="儿歌">儿歌</option>
+          <option value="二次元">二次元</option>
+          <option value="未分类">改回未分类</option>
+        </select>
+        <button class="btn small" id="pl-bulk-apply" type="button">应用</button>
+      </div>
+
+      <div class="list-head"><span class="stat" id="pl-stat">—</span></div>
 
       <table class="list">
         <thead>
           <tr>
-            <th class="col-title">节目</th>
-            <th class="col-cat">类型</th>
+            <th class="col-act"><input type="checkbox" id="pl-check-all" title="全选/取消"></th>
+            <th class="col-title">歌曲</th>
+            <th class="pl-artist">演唱者</th>
+            <th class="pl-lang">语言</th>
+            <th class="pl-style">风格</th>
             <th class="col-dur">时长</th>
-            <th class="col-dm">弹幕</th>
             <th class="col-act">播放</th>
           </tr>
         </thead>
-        <tbody id="cat-rows"></tbody>
+        <tbody id="pl-rows"></tbody>
       </table>
     </section>
 
@@ -630,6 +676,7 @@ window.__BOOT_T0 = Date.now();
           <button class="pv-btn" id="btn-chapters">分段</button>
           <button class="pv-btn" id="btn-mark">标注</button>
           <button class="pv-btn" id="btn-quality">画质</button>
+          <button class="pv-btn" id="btn-qn-hint" hidden></button>
           <button class="pv-btn" id="btn-login"><span id="login-label">登录</span></button>
         </div>
       </div>
