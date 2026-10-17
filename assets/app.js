@@ -5284,21 +5284,23 @@
     if (el.statusFabText) el.statusFabText.textContent = FAB_LABEL;
     if (el.statusPanelTitle) el.statusPanelTitle.textContent = FAB_LABEL;
 
-    /* 主站显示产品名，副站带上这位的短名。
-       注意这里**没有** `if (st.main) return;` —— 原工程主站的品牌文案是 HTML 写死的，
-       本版本不预设主播，主站的站名/署名/空间链接同样要靠这里现场填。 */
+    /* 顶栏「当前」那一格始终显示品牌名；大标题只显示主播名。
+       ⚠️ 这两者原先是同一个 label（副站会拼成「主播名 · 噼里啪啦」），
+       用户 2026-10-17 用红笔标注要去掉标题里重复的品牌名 —— 但顶栏不能跟着改，
+       否则会变成「主播名 / 主播名」。所以拆成两个变量，别图省事再合回去。
+       注意这里**没有** `if (st.main) return;` —— 本版本不预设主播，
+       站名/署名/空间链接都要靠这里现场填。 */
+    var brand = '噼里啪啦';
     /* 标题用完整主播名，不用短名 —— 短名历史上会被截断，
        「名字显示不完全」的投诉就来自这里；数据层的 short 只喂给真正的窄槽。 */
-    var label = st.main ? '噼里啪啦' : ((st.name || short) + ' · 噼里啪啦');
+    var label = st.name || short;
     function setTxt(id, txt) {
       var e = document.getElementById(id);
       if (e) e.textContent = txt;
     }
     setTxt('tb-brand', st.name || short);
-    setTxt('tb-cur', label);
+    setTxt('tb-cur', brand);
     setTxt('live-title', label);
-    setTxt('live-sub', '这里收录了' + short + '全部的直播回放。'
-      + '随时打开都在直播中，自动排期、自动去重，不重复。');
     var sp = document.getElementById('tb-space');
     if (sp && st.mid) sp.setAttribute('href', 'https://space.bilibili.com/' + st.mid);
     setTxt('gbtxt', short + 'B站空间');
@@ -6727,8 +6729,9 @@
       list.innerHTML = '';
       return;
     }
-    dynSetTxt('dyn-sub', '来自 B 站空间的最新动态（space.bilibili.com/'
-      + st.mid + '/dynamic）。');
+    // 正常状态不再显示「来自 B 站空间的…」这类复述标题的说明（用户 2026-10-17 要求）；
+    // 置空是为了清掉上一位主播在「没有 UID」时留下的提示。
+    dynSetTxt('dyn-sub', '');
     loadDynamic();
   }
 
@@ -6860,7 +6863,8 @@
       list.innerHTML = '';
       return;
     }
-    wbSetTxt('wb-sub', '来自微博主页的最新内容（weibo.com/u/' + st.weibo + '）。');
+    // 同上：正常状态不显示冗余说明，只清空（异常提示那条保留在上面）
+    wbSetTxt('wb-sub', '');
     loadWeibo();
   }
 

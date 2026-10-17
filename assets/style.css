@@ -3231,3 +3231,7 @@ body.view-multi .col-right { display: none; }
    这里给个下限固定住（`.live-card input{flex:1}` 不命中 select，但仍显式声明，
    免得将来被别的 input 规则牵连 —— 历史上 .seg-auto 里就踩过这个坑）。 */
 #set-default-view { flex: none; min-width: 160px; }
+
+/* 说明段被清空时不要留出 26px 空白（动态/微博正常状态下现在不带说明，
+   只有「还没配置」这类提示才用得上这段）。 */
+.sub:empty { display: none; }
