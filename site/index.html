@@ -337,7 +337,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
 
     <div class="hero-foot">
       <div class="cta">
-        <a class="btn glow" id="dlBtn" href="https://github.com/DcC176/replay-radio/releases/latest" target="_blank" rel="noopener">
+        <a class="btn glow" id="dlBtn" href="https://github.com/DcC176/replay-radio/releases/latest">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 5 5-5M4 20h16"/></svg>
           下载 <span id="osLabel">Windows</span> 版
         </a>
@@ -478,7 +478,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
           </div>
           <div class="asset-act">
             <a class="btn ghost sm" href="https://github.com/DcC176/replay-radio/releases" target="_blank" rel="noopener">更新日志</a>
-            <a class="btn glow" id="assetBtn" href="https://github.com/DcC176/replay-radio/releases/latest" target="_blank" rel="noopener">
+            <a class="btn glow" id="assetBtn" href="https://github.com/DcC176/replay-radio/releases/latest">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 5 5-5M4 20h16"/></svg>
               <span id="assetBtnLabel">下载</span>
             </a>
@@ -670,6 +670,8 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
           assetInfo.url = exe.browser_download_url;
           assetInfo.size = exe.size;
           assetInfo.sizeText = null;
+          var dl = document.getElementById("dlBtn");
+          if (dl) dl.href = assetInfo.url;
         }
         render(document.querySelector('.dl-tabs button[aria-selected="true"]').dataset.plat);
       })
