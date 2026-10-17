@@ -127,6 +127,23 @@ var ASSET_SIZE_MB = 53;        // 安装包体积（MB）
 截图优先挑主播开播的时段拍（直播间 / 监控室才有画面）；主播不在线时那两个板块只会是空态，
 需要的话临时加 `.gal-tag` 角标注明，不要伪造画面。
 
+## 下载统计（/stats/）
+
+线上：<https://dcc176.github.io/replay-radio/stats/>
+
+- 页面直接读 GitHub Releases 的 `download_count`，**不需要后端**；不放进导航、带 `noindex`。
+- 累计/最新版/各版本条形图随 API 实时变化；趋势线依赖本地快照。
+- 快照命令（在仓库根目录跑）：
+
+```bash
+python tools/site_stats.py            # 追加今天的快照并写入 site/stats/history.json
+python tools/site_stats.py --print    # 顺便打印各版本明细与相对上次的增量
+```
+
+- 同一天重复跑只覆盖当天那行；脚本优先用 `gh auth token` 的令牌（5000/h），否则匿名（60/h）。
+- 只有 ≥2 条不同日期的快照，趋势图才会画出来。
+- ⚠️ GitHub 每 6 小时汇总一次，且**含重复下载**，不等于独立用户数。
+
 ## 已知限制
 
 - 打包版只有 Windows x64，macOS / Linux 页签显示「暂未提供」，属真实状态。
