@@ -165,8 +165,9 @@ h2{font-size:clamp(24px,3.2vw,36px);line-height:1.25;letter-spacing:-.01em;font-
 .pillrow span{font-family:var(--mono);font-size:12px;color:var(--dim);border:1px solid var(--line);
   border-radius:999px;padding:6px 12px;background:color-mix(in srgb,var(--card) 55%,transparent)}
 
-.gallery{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:38px}
+.gallery{columns:2;column-gap:16px;margin-top:38px}
 .gal{position:relative;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--card);
+  break-inside:avoid;margin:0 0 16px;
   transition:border-color .25s,transform .45s cubic-bezier(.2,.7,.2,1),box-shadow .45s}
 .gal:hover{border-color:var(--line-strong);transform:translateY(-4px) scale(1.05);z-index:2;
   box-shadow:0 30px 66px -28px rgba(0,0,0,.92)}
@@ -266,7 +267,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
 }
 @media (max-width:680px){
   .cards{grid-template-columns:1fr}
-  .gallery{grid-template-columns:1fr}
+  .gallery{columns:1}
   .mirror-list{grid-template-columns:1fr}
   .asset{grid-template-columns:1fr;gap:12px}
   .os-ic{display:none}
@@ -325,13 +326,13 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
 
     <div class="hero-stack">
       <figure class="win side left">
-        <img src="assets/app-playlist.webp" alt="歌单：导入整张 B 站歌单并按风格筛选" width="1440" height="860" />
+        <img src="assets/app-playlist.webp" alt="歌单：导入整张 B 站歌单并按语言、风格、演唱者筛选" width="1920" height="953" />
       </figure>
       <figure class="win main">
-        <img src="assets/app-live.webp" alt="频道页：节目单、正在播放与接下来，右侧是播放器与弹幕" width="1440" height="860" fetchpriority="high" />
+        <img src="assets/app-live.webp" alt="24 小时频道：左侧节目单、正在播放与接下来，右侧播放器与弹幕" width="1920" height="953" fetchpriority="high" />
       </figure>
       <figure class="win side right">
-        <img src="assets/app-schedule.webp" alt="节目单：24 小时、72 小时与整个循环的时间表" width="1440" height="860" />
+        <img src="assets/app-dynamic.webp" alt="动态：主播的最新动态聚在页面里" width="1920" height="953" />
       </figure>
     </div>
 
@@ -431,8 +432,8 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
         <figcaption>微博：与播放器同屏<span>WEIBO</span></figcaption>
       </figure>
       <figure class="gal reveal">
-        <img src="assets/app-dynamic.webp" alt="动态：主播的最新动态聚在页面里，右侧仍可继续播放" width="1440" height="860" loading="lazy" />
-        <figcaption>动态：最新动态聚在页面里<span>FEED</span></figcaption>
+        <img src="assets/app-schedule.webp" alt="节目单：24 小时、72 小时与整个循环的时间表，任一场点一下就播" width="1440" height="860" loading="lazy" />
+        <figcaption>节目单：接下来播什么<span>SCHEDULE</span></figcaption>
       </figure>
       <figure class="gal reveal">
         <img src="assets/app-stations.webp" alt="设置里的主播管理：添加主播、改板块颜色、设默认板块" width="1440" height="860" loading="lazy" />
