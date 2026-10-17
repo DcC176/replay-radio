@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>回放电台 · 24 小时直播回放</title>
+<title>噼里啪啦 · 24 小时直播回放</title>
 <link rel="stylesheet" href="assets/style.css">
 <link rel="stylesheet" href="assets/frost.css">
 <script>
@@ -141,7 +141,7 @@ window.__BOOT_T0 = Date.now();
 <div id="onboard" hidden>
   <div class="ob-head">
     <div class="ob-brand">24H RADIO</div>
-    <h1 class="ob-title">回放电台</h1>
+    <h1 class="ob-title">噼里啪啦</h1>
     <p class="ob-sub" id="ob-sub">选择要进入的频道，或添加一位新主播。</p>
   </div>
 
@@ -191,9 +191,9 @@ window.__BOOT_T0 = Date.now();
 
 <header class="topbar">
   <div class="tb-left">
-    <span class="tb-brand" id="tb-brand">回放电台</span>
+    <span class="tb-brand" id="tb-brand">噼里啪啦</span>
     <span class="tb-sep">/</span>
-    <span class="tb-cur" id="tb-cur">回放电台</span>
+    <span class="tb-cur" id="tb-cur">噼里啪啦</span>
   </div>
   <nav class="tb-tabs">
     <!-- 激活标签的那颗红色胶囊：不属于任何标签，而是在标签之间滑过去 -->
@@ -244,7 +244,7 @@ window.__BOOT_T0 = Date.now();
 
     <section class="view active" id="view-live">
       <div class="eyebrow">—— 24 小时频道</div>
-      <h1 class="title" id="live-title">回放电台</h1>
+      <h1 class="title" id="live-title">噼里啪啦</h1>
       <p class="sub" id="live-sub">这里收录了 TA 全部的直播回放。随时打开都在直播中，自动排期、自动去重，不重复。</p>
 
       <div class="actions">
@@ -574,6 +574,16 @@ window.__BOOT_T0 = Date.now();
       </div>
 
       <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">启动</div>
+        <label class="seg-auto">打开软件时先进入
+          <select id="set-default-view" title="启动时默认打开的板块"></select>
+        </label>
+        <p class="live-note">每次打开软件默认进入这个板块（也可以继续用带 <code>#/板块</code> 的链接直接打开某页，
+          链接优先）。<b>第一次使用</b>时仍会先请你选主播，选完进入后按这里的设置。
+          选项只记在本机浏览器里。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
         <div class="live-card-h">快捷键
           <button class="btn small ghost live-wheel-btn" id="keys-reset" type="button">全部清除</button>
         </div>
@@ -646,7 +656,7 @@ window.__BOOT_T0 = Date.now();
         </label>
         <p class="live-note" id="proto-hint"></p>
         <p class="proto-row">
-          <a class="proto-link" id="proto-link" href="#" draggable="true">▶ 打开回放电台</a>
+          <a class="proto-link" id="proto-link" href="#" draggable="true">▶ 打开噼里啪啦</a>
         </p>
         <div class="qp-btns" id="proto-regbtns">
           <button class="btn small primary" id="proto-reg" type="button">注册 / 修复</button>

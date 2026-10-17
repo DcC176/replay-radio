@@ -2014,7 +2014,7 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
   .status-fab { padding: 0 12px; }
   .status-panel { width: calc(100vw - 24px); }
 
-  /* 手机顶栏放不下「主播名 / 回放电台」整串（实测只剩 113px，
+  /* 手机顶栏放不下「主播名 / 噼里啪啦」整串（实测只剩 113px，
      折成 3 行溢出 52px 的栏高）。窄屏只留站名本体，并给个省略号兜底。 */
   .tb-brand, .tb-sep { display: none; }
   .tb-left {
@@ -3223,3 +3223,11 @@ body.view-multi .col-right { display: none; }
 /* 列表里的勾选框：跟行高对齐，别把行撑开 */
 #view-playlist .list .col-act input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--red); }
 #view-playlist .list tr.picked { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+
+/* ---------------------------------------------------------------- 设置页补充 */
+
+/* 「启动时打开的板块」下拉。`.seg-auto` 是 flex 行（label + 控件），
+   select 没有 flex 规则，不显式给宽度时会随选项文字长短来回跳；
+   这里给个下限固定住（`.live-card input{flex:1}` 不命中 select，但仍显式声明，
+   免得将来被别的 input 规则牵连 —— 历史上 .seg-auto 里就踩过这个坑）。 */
+#set-default-view { flex: none; min-width: 160px; }

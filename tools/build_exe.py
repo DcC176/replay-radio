@@ -5,7 +5,7 @@
     python tools/build_exe.py
 
 产物：
-    发布/回放电台.exe
+    发布/噼里啪啦.exe
         单文件，自带 Python 运行时与全部网页文件，双击即用。
         分发时只需要给这一个文件。
 
@@ -31,16 +31,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "发布")
 BUILD = os.path.join(ROOT, "build")
 
-APP_VERSION = "1.0.34"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.0.35"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
 # 所以改名不影响单实例检测与 --stop。
-FINAL_NAME = "回放电台-v%s.exe" % APP_VERSION
+FINAL_NAME = "噼里啪啦-v%s.exe" % APP_VERSION
 WEB = ["index.html", "favicon.ico", "assets", "data"]   # 网页文件，释放到 www\
 README_SRC = "readme.txt"                 # 使用说明，释放到用户目录根
 
-README = """回放电台 · 使用说明
+README = """噼里啪啦 · 使用说明
 ========================================
 
 【怎么用】

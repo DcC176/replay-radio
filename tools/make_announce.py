@@ -103,10 +103,10 @@ for r in rs:
 def local_asset(tag):
     """从本地产物算出（上传名、字节数、SHA-256）。
 
-    本地文件名是中文（`发布/回放电台-vX.Y.Z.exe`，发布约定要求 `发布/` 只放中文名），
+    本地文件名是中文（`发布/噼里啪啦-vX.Y.Z.exe`，发布约定要求 `发布/` 只放中文名），
     而上传到 Release 的资产名固定为 ASCII 的 `ReplayRadio-vX.Y.Z.exe`。
     """
-    p = os.path.join(ROOT, "发布", "回放电台-%s.exe" % tag)
+    p = os.path.join(ROOT, "发布", "噼里啪啦-%s.exe" % tag)
     if not os.path.exists(p):
         return None
     h = hashlib.sha256()

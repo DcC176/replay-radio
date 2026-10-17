@@ -1,4 +1,4 @@
-/* 回放电台
+/* 噼里啪啦
  * 频道位置 = ((now - epoch) + drift) mod cycleLength
  * 节目单是「种子 + 时间」的纯函数，任何时刻打开都会落到同一个位置。
  */
@@ -572,6 +572,38 @@
   function syncThemeUI() {
     var box = document.getElementById('theme-light');
     if (box) box.checked = isLightTheme();
+  }
+
+  /* 「启动时打开的板块」：选项就是顶栏那排标签（VIEWS），文案直接取标签文字 ——
+     以后增删板块不用再维护第二份名单。值存 localStorage 的 xl_default_view，
+     启动时 setView 的后备值就是它（见 boot 末尾那行）。 */
+  function syncDefaultViewUI() {
+    var sel = document.getElementById('set-default-view');
+    if (!sel || sel.options.length) return;          // 只填一次
+    // 顺序按**顶栏标签的 DOM 顺序**（用户看到的顺序）来 —— VIEWS 数组的次序与标签不一致
+    // （multi 在 VIEWS 里排第二、在标签里排第五），照 VIEWS 排会跟界面对不上。
+    // 文案也直接取标签文字，以后增删或改名板块都不用再维护第二份名单。
+    Array.prototype.forEach.call(document.querySelectorAll('.tab[data-view]'), function (tab) {
+      var v = tab.getAttribute('data-view');
+      if (!v) return;
+      var o = document.createElement('option');
+      o.value = v;
+      o.textContent = (tab.textContent || v).trim();
+      sel.appendChild(o);
+    });
+    sel.value = store.get('xl_default_view', 'live');
+  }
+
+  /* 只绑事件、不填选项：填充交给 renderSettings() 里的 syncDefaultViewUI()，
+     因为它必须在**每次**进入设置页时都跑一遍 —— 之前把填充塞在这里，
+     靠 bindSettings() 的「只绑一次」守卫顺带执行，结果只要有一次抢在前面
+     （元素还没就绪 / 标签还没渲染），下拉就永远空着（打包版实测踩到）。 */
+  function bindDefaultView() {
+    var sel = document.getElementById('set-default-view');
+    if (!sel) return;
+    sel.addEventListener('change', function () {
+      store.set('xl_default_view', sel.value || 'live');
+    });
   }
 
   function bindThemeToggle() {
@@ -2005,6 +2037,7 @@
   function bindSettings() {
     if (keysBound) return;
     keysBound = true;
+    bindDefaultView();
 
     // 主播管理：填 UID → 检测 → 选来源 → 保存 / 删除
     var stProbeBtn = document.getElementById('st-probe');
@@ -2624,6 +2657,7 @@
 
   function renderSettings() {
     bindSettings();
+    syncDefaultViewUI();        // 幂等：已经填过就直接返回（见 syncDefaultViewUI 里的守卫）
     renderStationsCard();
     el.keysList.innerHTML = KEY_ACTIONS.map(function (a) {
       var c = keyMap[a.id];
@@ -2647,7 +2681,7 @@
   //           技术上无法关联到本地 EXE（否则恶意网页就能拉起任意本地程序），
   //           所以「直连 + 能启动」在浏览器里不可能同时成立 —— 这是安全边界，不是实现问题。
   //   协议 —— 书签指向 replayradio://open，程序没在跑也能一点拉起；代价是浏览器会先问一次
-  //           「要打开回放电台吗」。那是浏览器给出的确认框，网页关不掉。
+  //           「要打开噼里啪啦吗」。那是浏览器给出的确认框，网页关不掉。
   // 想要「一点就进 + 完全没有任何提示」，正解是**桌面快捷方式**（见设置页）：
   // 它直接指向 EXE、不经过浏览器，因此不存在授权那一层。
   /* 键名带 _v2：旧的 `xl_proto_direct`（默认直连那版）在用户浏览器里可能已经存了 true
@@ -2665,16 +2699,16 @@
   function renderProtoLink(url) {
     if (protoDirect) {
       el.protoLink.setAttribute('href', location.origin + '/');
-      el.protoLink.textContent = '▶ 打开回放电台（直连）';
+      el.protoLink.textContent = '▶ 打开噼里啪啦（直连）';
       el.protoHint.innerHTML = '直连：点书签直接进网页、没有任何提示。'
         + '但它<b>只能打开已经在运行的电台，不能把程序启动起来</b> —— '
         + '程序没在跑（比如刚开机）时点它会提示打不开。'
         + '要让书签也能启动程序，请关掉上面这个开关。';
     } else {
       el.protoLink.setAttribute('href', url || PROTO_URL);
-      el.protoLink.textContent = '▶ 启动回放电台';
+      el.protoLink.textContent = '▶ 启动噼里啪啦';
       el.protoHint.innerHTML = '协议模式：程序没在跑时，点书签也能把它<b>启动起来</b>。'
-        + '代价是浏览器会先问一次「要打开回放电台吗」——'
+        + '代价是浏览器会先问一次「要打开噼里啪啦吗」——'
         + '弹窗里若有「<b>始终允许</b>」就勾上，多数情况下以后不再问。'
         + '（这个确认框是浏览器的安全边界，网页关不掉；若你的浏览器每次都问，'
         + '就用下面的<b>桌面快捷方式</b> —— 那条路完全没有任何提示。）';
@@ -3076,7 +3110,10 @@
   }
 
   function route() {
-    setView((location.hash || '').replace(/^#\/?/, '') || 'live');
+    // 没有 hash 时用设置里「启动时打开的板块」（v1.0.35 新增）；没设过仍默认 live。
+    // ⚠️ 值非法（比如某个板块以后被删掉）时 setView 里会兜底到 live，不会白屏。
+    setView((location.hash || '').replace(/^#\/?/, '')
+            || store.get('xl_default_view', 'live'));
   }
 
   /* ---------------------------------------------------------- 交互 */
@@ -5252,7 +5289,7 @@
        本版本不预设主播，主站的站名/署名/空间链接同样要靠这里现场填。 */
     /* 标题用完整主播名，不用短名 —— 短名历史上会被截断，
        「名字显示不完全」的投诉就来自这里；数据层的 short 只喂给真正的窄槽。 */
-    var label = st.main ? '回放电台' : ((st.name || short) + ' · 回放电台');
+    var label = st.main ? '噼里啪啦' : ((st.name || short) + ' · 噼里啪啦');
     function setTxt(id, txt) {
       var e = document.getElementById(id);
       if (e) e.textContent = txt;

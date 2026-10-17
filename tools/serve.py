@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""回放电台 · 本地服务（静态文件 + B 站代理）
+"""噼里啪啦 · 本地服务（静态文件 + B 站代理）
 
 为什么需要它
     浏览器不能直接播放 B 站的视频流：CDN 校验 Referer（缺了返回 403），
@@ -4131,7 +4131,7 @@ def protocol_register():
         exe = os.path.abspath(sys.executable)
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
                               r"Software\Classes\%s" % PROTOCOL) as k:
-            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "URL:回放电台")
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "URL:噼里啪啦")
             winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
                               r"Software\Classes\%s\shell\open\command" % PROTOCOL) as k:
@@ -4189,7 +4189,7 @@ def api_shortcut_create(where=""):
     d = where or _desktop_dir()
     if not os.path.isdir(d):
         return 500, {"error": "目标目录不存在：%s" % d}
-    lnk = os.path.join(d, "回放电台.lnk")
+    lnk = os.path.join(d, "噼里啪啦.lnk")
 
     def q(s):
         return str(s).replace("'", "''")
@@ -4199,7 +4199,7 @@ def api_shortcut_create(where=""):
           "$s.TargetPath = '%s'; "
           "$s.WorkingDirectory = '%s'; "
           "$s.IconLocation = '%s,0'; "
-          "$s.Description = '回放电台 · 一点直接进直播间'; "
+          "$s.Description = '噼里啪啦 · 一点直接进直播间'; "
           "$s.Save()") % (q(lnk), q(exe), q(os.path.dirname(exe)), q(exe))
     try:
         r = subprocess.run(
@@ -4212,6 +4212,14 @@ def api_shortcut_create(where=""):
     if r.returncode != 0 or not os.path.isfile(lnk):
         err = (r.stderr or b"").decode("utf-8", "replace").strip()[:200]
         return 500, {"error": "创建快捷方式失败：%s" % (err or "未知错误")}
+    # 改名后顺手把旧名字的快捷方式清掉，免得桌面上留两个图标（本来没有就跳过）。
+    # ⚠️ 这里出现旧名是**有意的**，别当残留删掉。
+    legacy = os.path.join(d, "回放电台.lnk")
+    if os.path.isfile(legacy):
+        try:
+            os.remove(legacy)
+        except OSError:
+            pass
     return 200, {"ok": True, "path": lnk, "target": exe}
 
 
@@ -4819,7 +4827,7 @@ def notify(msg, error=False):
         return
     try:
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, msg, "回放电台",
+        ctypes.windll.user32.MessageBoxW(None, msg, "噼里啪啦",
                                          0x10 if error else 0x40)
     except Exception:
         pass
@@ -5759,7 +5767,7 @@ def main():
         url = "http://%s:%d/" % (args.bind, port)
 
     s = sessdata()
-    print("回放电台 · 本地服务")
+    print("噼里啪啦 · 本地服务")
     print("  目录：%s" % ROOT)
     print("  凭据：%s" % (SESS_FILE if s else
                         "未登录（最高 480P）。如需 1080P，点播放器右上角「登录」扫码"))
