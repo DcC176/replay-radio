@@ -34,8 +34,11 @@
 ```bash
 tree=$(git rev-parse HEAD:site)
 commit=$(git commit-tree "$tree" -m "site: publish $(git rev-parse --short HEAD)")
-git push origin "$commit:refs/heads/gh-pages"
+git push --force origin "$commit:refs/heads/gh-pages"   # ⚠️ 必须 --force：根提交对已有历史必然 non-ff
 ```
+
+> ⚠️ `--force` 不能省（2026-10-17 实测：不带会被拒，远端停在旧提交上，页面不更新）。
+> 根提交是故意的 —— 让 `gh-pages` 只有一条「当前 site/ 快照」提交，不背 main 的历史。
 
 > **想升级成 push 即发布的 Actions 流水线**（不用手动跑上面两行）：
 > 1. `gh auth refresh -s workflow` 给 gh 令牌补上 `workflow` 权限（当前只有 `repo`，GitHub 会拒收 workflow 文件）；
