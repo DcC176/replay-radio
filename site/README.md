@@ -90,14 +90,30 @@ python -m http.server 8791 --bind 127.0.0.1 --directory site
 ```
 site/
   index.html   单文件页面：内联 CSS + JS，无构建链、无第三方依赖
-  assets/      七张实机截图（1440×860，WebP，合计约 580 KB）
+  assets/      九张实机截图（1440×860，WebP，合计约 690 KB）
 ```
+
+## 发版时改哪里（重要）
+
+版本号与体积**写死在页面里**，不走接口。发新版时改 `index.html` 里 `<script>` 开头这三行：
+
+```js
+var VERSION = "1.0.35";        // 版本号
+var ASSET_SIZE_MB = 53;        // 安装包体积（MB）
+// ASSET_NAME / ASSET_URL 由上面两行拼出：
+//   ReplayRadio-v{VERSION}.exe
+//   https://github.com/DcC176/replay-radio/releases/download/v{VERSION}/ReplayRadio-v{VERSION}.exe
+```
+
+下载按钮的地址、文件名、下载区显示的版本与体积全部由它派生，改一处即可。
+另外页面顶部静态文案里还有一处 `v1.0.35`（禁用 JS 时显示），一并改掉。
+**改完必须确认该版本的 Release 已发布**，否则按钮会 404。
 
 ## 页面里哪些是「活」的
 
 | 能力 | 实现 | 说明 |
 |---|---|---|
-| 版本号 / 安装包名 / 体积 | `GET api.github.com/repos/DcC176/replay-radio/releases/latest` | 失败时回退到常量 `FALLBACK`，不报错 |
+| 下载地址 / 版本 / 体积 | 页面内常量 `VERSION` / `ASSET_SIZE_MB` | 直链 `releases/download/v{VERSION}/ReplayRadio-v{VERSION}.exe`，不跳版本页 |
 | 平台与架构检测 | `navigator.userAgentData.platform` + UA 兜底 | 非 Windows 显示「暂无打包版」并切到对应页签 |
 | 连通性测速 | 接口用 CORS GET，Release 页用 `no-cors` HEAD | 量的是接口往返耗时，不是下载速度 |
 | 深浅主题 | `data-theme` + localStorage | 默认深色，与桌面端一致 |
@@ -107,6 +123,7 @@ site/
 
 截图取自本机运行中的实例（1440×860 视口，无头 Chrome 直接抓，不做后期）。
 换图时保持 1440×860，同名覆盖 `assets/` 下对应文件即可，页面用 `width/height` 占位，不会跳版。
+主播未开播的板块（直播间 / 监控室）用 `.gal-tag` 角标注明空态，不伪造画面。
 
 ## 已知限制
 

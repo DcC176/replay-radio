@@ -172,6 +172,9 @@ h2{font-size:clamp(24px,3.2vw,36px);line-height:1.25;letter-spacing:-.01em;font-
   box-shadow:0 30px 66px -28px rgba(0,0,0,.92)}
 html[data-theme="light"] .gal:hover{box-shadow:0 30px 66px -30px rgba(20,20,40,.35)}
 .gal img{width:100%;height:auto}
+.gal-tag{position:absolute;top:10px;left:10px;z-index:2;font-family:var(--mono);font-size:11px;
+  color:#dedee6;background:rgba(10,10,14,.72);border:1px solid rgba(255,255,255,.18);
+  border-radius:999px;padding:3px 9px;backdrop-filter:blur(6px)}
 .gal figcaption{position:absolute;left:0;right:0;bottom:0;padding:26px 16px 12px;font-size:13px;color:#e8e8ee;
   background:linear-gradient(transparent,rgba(6,6,9,.88));display:flex;justify-content:space-between;gap:12px}
 .gal figcaption span{color:#9a9aa6;font-family:var(--mono);font-size:11px}
@@ -415,16 +418,26 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
     <div class="reveal">
       <p class="eyebrow">SCREENSHOTS</p>
       <h2>真实运行界面</h2>
-      <p class="sub">以下均为本机运行时的实拍，未做视觉修饰。</p>
+      <p class="sub">以下均为本机运行时的实拍，未做视觉修饰；主播未开播的板块按空态展示，角标已注明。</p>
     </div>
     <div class="gallery">
       <figure class="gal reveal">
-        <img src="assets/app-dynamic.webp" alt="动态：主播的最新动态聚在页面里，右侧仍可继续播放" width="1440" height="860" loading="lazy" />
-        <figcaption>动态：最新动态聚在页面里<span>FEED</span></figcaption>
+        <span class="gal-tag">主播未开播 · 右侧弹幕面板照常</span>
+        <img src="assets/app-broadcast.webp" alt="直播间：左侧直播画面，右侧直播状态、实时弹幕与发弹幕框" width="1440" height="860" loading="lazy" />
+        <figcaption>直播间：画面、弹幕、发弹幕<span>BROADCAST</span></figcaption>
       </figure>
       <figure class="gal reveal">
+        <span class="gal-tag">两路均未开播</span>
         <img src="assets/app-monitor.webp" alt="监控室：同时看多路直播，布局与音量可分别设置" width="1440" height="860" loading="lazy" />
         <figcaption>监控室：多路同时看<span>MONITOR</span></figcaption>
+      </figure>
+      <figure class="gal reveal">
+        <img src="assets/app-weibo.webp" alt="微博板块：左侧为板块配置，右侧仍可继续播放当前节目" width="1440" height="860" loading="lazy" />
+        <figcaption>微博：与播放器同屏<span>WEIBO</span></figcaption>
+      </figure>
+      <figure class="gal reveal">
+        <img src="assets/app-dynamic.webp" alt="动态：主播的最新动态聚在页面里，右侧仍可继续播放" width="1440" height="860" loading="lazy" />
+        <figcaption>动态：最新动态聚在页面里<span>FEED</span></figcaption>
       </figure>
       <figure class="gal reveal">
         <img src="assets/app-stations.webp" alt="设置里的主播管理：添加主播、改板块颜色、设默认板块" width="1440" height="860" loading="lazy" />
@@ -566,7 +579,21 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
 (function(){
   "use strict";
   var REPO = "DcC176/replay-radio";
-  var FALLBACK = { version: "1.0.35", size: 130 * 1024 * 1024, url: "https://github.com/" + REPO + "/releases/latest", name: "ReplayRadio-v1.0.35.exe" };
+
+  /* ⚠️ 发版时只改这三行：版本号 / 安装包体积。下载地址与文件名会自动拼出来。
+     改完记得同步 index.html 顶部静态文案里的 v1.0.35（无 JS 时显示）。 */
+  var VERSION = "1.0.35";
+  var ASSET_SIZE_MB = 53;
+  var ASSET_NAME = "ReplayRadio-v" + VERSION + ".exe";
+  var ASSET_URL = "https://github.com/" + REPO + "/releases/download/v" + VERSION + "/" + ASSET_NAME;
+
+  function applyVersion(){
+    document.getElementById("verChip").textContent = VERSION;
+    document.getElementById("assetName").firstChild.nodeValue = ASSET_NAME + " ";
+    document.getElementById("assetVer").textContent = "版本 v" + VERSION;
+    document.getElementById("assetSize").textContent = "体积约 " + ASSET_SIZE_MB + " MB";
+    document.getElementById("dlBtn").href = ASSET_URL;
+  }
 
   /* ---------- theme ---------- */
   var root = document.documentElement;
@@ -615,27 +642,19 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
   var platBtns = Array.prototype.slice.call(document.querySelectorAll(".dl-tabs button"));
   var osLabel = document.getElementById("osLabel");
 
-  function fmtSize(bytes){
-    if (!bytes) return FALLBACK.size / 1048576 + " MB";
-    var mb = bytes / 1048576;
-    return (mb >= 1000 ? (mb / 1024).toFixed(2) + " GB" : Math.round(mb) + " MB");
-  }
-
-  var assetInfo = { version: FALLBACK.version, size: FALLBACK.size, url: FALLBACK.url, name: FALLBACK.name };
-
   function render(plat){
     platBtns.forEach(function(b){ b.setAttribute("aria-selected", String(b.dataset.plat === plat)); });
-    var ok = plat === "win" && assetInfo.url;
+    var ok = plat === "win";
     var tabIcon = document.querySelector('.dl-tabs button[data-plat="' + plat + '"] svg');
     if (tabIcon) document.getElementById("assetIcon").innerHTML = tabIcon.outerHTML;
     document.getElementById("assetName").firstChild.nodeValue =
-      (plat === "win" ? assetInfo.name : (plat === "mac" ? "macOS 版尚未提供" : "Linux 版尚未提供")) + " ";
+      (plat === "win" ? ASSET_NAME : (plat === "mac" ? "macOS 版尚未提供" : "Linux 版尚未提供")) + " ";
     document.getElementById("assetArch").textContent = plat === "win" ? "x64" : "—";
-    document.getElementById("assetVer").textContent = "版本 v" + assetInfo.version;
-    document.getElementById("assetSize").textContent = plat === "win" ? "体积约 " + (assetInfo.sizeText || fmtSize(assetInfo.size)) : "需从源码运行";
+    document.getElementById("assetVer").textContent = "版本 v" + VERSION;
+    document.getElementById("assetSize").textContent = plat === "win" ? "体积约 " + ASSET_SIZE_MB + " MB" : "需从源码运行";
     document.getElementById("platWarn").classList.toggle("on", !ok);
     var btn = document.getElementById("assetBtn");
-    btn.href = ok ? assetInfo.url : "https://github.com/" + REPO;
+    btn.href = ok ? ASSET_URL : "https://github.com/" + REPO;
     document.getElementById("assetBtnLabel").textContent = ok ? "下载" : "查看源码说明";
   }
 
@@ -649,35 +668,8 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
     detectEl.innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:#f2a63b;display:inline-block"></span>当前系统 <b>' + sys.label + " · " + sys.arch + "</b> 暂无打包版";
     osLabel.textContent = "Windows";
   }
+  applyVersion();
   render(sys.plat === "win" ? "win" : sys.plat);
-
-  /* ---------- release info ---------- */
-  function fetchRelease(){
-    var ctrl = new AbortController();
-    var timer = setTimeout(function(){ ctrl.abort(); }, 7000);
-    fetch("https://api.github.com/repos/" + REPO + "/releases/latest", { signal: ctrl.signal, headers: { "Accept": "application/vnd.github+json" } })
-      .then(function(r){ if (!r.ok) throw new Error("http " + r.status); return r.json(); })
-      .then(function(d){
-        clearTimeout(timer);
-        if (!d || !d.tag_name) return;
-        var ver = String(d.tag_name).replace(/^v/i, "");
-        assetInfo.version = ver;
-        document.getElementById("verChip").textContent = ver;
-        var assets = d.assets || [];
-        var exe = assets.filter(function(a){ return /\.exe$/i.test(a.name); })[0] || assets[0];
-        if (exe) {
-          assetInfo.name = exe.name;
-          assetInfo.url = exe.browser_download_url;
-          assetInfo.size = exe.size;
-          assetInfo.sizeText = null;
-          var dl = document.getElementById("dlBtn");
-          if (dl) dl.href = assetInfo.url;
-        }
-        render(document.querySelector('.dl-tabs button[aria-selected="true"]').dataset.plat);
-      })
-      .catch(function(){ clearTimeout(timer); /* 保留回退信息，不打扰用户 */ });
-  }
-  fetchRelease();
 
   /* ---------- mirror latency ---------- */
   function testOne(el){
