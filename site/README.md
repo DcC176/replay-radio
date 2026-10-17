@@ -68,7 +68,7 @@ python -m http.server 8791 --bind 127.0.0.1 --directory site
 ```
 site/
   index.html   单文件页面：内联 CSS + JS，无构建链、无第三方依赖
-  assets/      五张实机截图（1440×860，深色 / 浅色）
+  assets/      五张实机截图（1440×860，WebP，合计约 400 KB）
 ```
 
 ## 页面里哪些是「活」的
