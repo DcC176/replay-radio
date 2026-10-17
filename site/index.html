@@ -59,7 +59,8 @@ html[data-theme="dark"] .i-sun{display:block} html[data-theme="dark"] .i-moon{di
 html[data-theme="light"] .i-sun{display:none} html[data-theme="light"] .i-moon{display:block}
 
 /* ---------- hero ---------- */
-.hero{position:relative;overflow:hidden;padding:clamp(56px,8vw,104px) 0 clamp(48px,6vw,80px)}
+.hero{position:relative;overflow:hidden;min-height:calc(100svh - 64px);display:flex;align-items:center;
+  padding:clamp(24px,3.6vh,48px) 0 clamp(44px,5.6vh,64px)}
 .blobs{position:absolute;inset:-20% -10% auto -10%;height:760px;pointer-events:none;z-index:0;filter:blur(70px);
   opacity:.55;transition:opacity .4s}
 html[data-theme="light"] .blobs{opacity:.35}
@@ -78,19 +79,20 @@ html[data-theme="light"] .blobs{opacity:.35}
   transition:opacity .4s}
 html[data-theme="light"] .spot{background:radial-gradient(circle,rgba(245,71,91,.1),transparent 62%)}
 
-.hero-grid{position:relative;z-index:2;display:grid;grid-template-columns:1.02fr .98fr;gap:clamp(28px,4vw,60px);
-  align-items:center}
+.hero-wrap{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;
+  text-align:center;width:100%}
+.hero-head{max-width:800px}
 .chip{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;
   color:var(--muted);border:1px solid var(--line-strong);background:color-mix(in srgb,var(--card) 70%,transparent);
   border-radius:999px;padding:5px 12px 5px 8px}
 .chip .dot{width:6px;height:6px;border-radius:50%;background:var(--red);box-shadow:0 0 0 4px var(--red-soft);
   animation:pulse 2.4s ease-in-out infinite}
 @keyframes pulse{50%{box-shadow:0 0 0 7px transparent}}
-h1{font-size:clamp(34px,4.6vw,56px);line-height:1.12;letter-spacing:-.02em;font-weight:700;margin:20px 0 0}
+h1{font-size:clamp(30px,4.2vw,50px);line-height:1.14;letter-spacing:-.02em;font-weight:700;margin:18px 0 0}
 h1 em{font-style:normal;background:linear-gradient(96deg,var(--red) 8%,var(--amber) 82%);
   -webkit-background-clip:text;background-clip:text;color:transparent}
-.lede{margin-top:18px;font-size:clamp(15px,1.35vw,17px);color:var(--muted);max-width:33em;line-height:1.75}
-.cta{display:flex;flex-wrap:wrap;gap:12px;margin-top:30px}
+.lede{margin:16px auto 0;font-size:clamp(14px,1.3vw,16.5px);color:var(--muted);max-width:36em;line-height:1.72}
+.cta{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:10px}
 .btn{display:inline-flex;align-items:center;gap:9px;height:50px;padding:0 24px;border-radius:12px;
   font-size:15px;font-weight:600;border:1px solid transparent;cursor:pointer;transition:transform .18s,box-shadow .25s,background .25s,border-color .25s}
 .btn svg{width:17px;height:17px}
@@ -103,28 +105,42 @@ h1 em{font-style:normal;background:linear-gradient(96deg,var(--red) 8%,var(--amb
 .btn.glow:hover::after{transform:translateX(120%)}
 .btn.ghost{background:color-mix(in srgb,var(--card) 80%,transparent);border-color:var(--line-strong);color:var(--fg)}
 .btn.ghost:hover{background:var(--card-2);border-color:color-mix(in srgb,var(--fg) 26%,transparent);transform:translateY(-2px)}
-.meta-row{display:flex;flex-wrap:wrap;gap:18px;margin:22px 0 0;padding:0;list-style:none;
+.meta-row{display:flex;flex-wrap:wrap;justify-content:center;gap:18px;margin:0;padding:0;list-style:none;
   font-size:13px;color:var(--dim);font-family:var(--mono)}
 .meta-row li{display:flex;align-items:center;gap:6px}
 .meta-row li::before{content:"";width:4px;height:4px;border-radius:50%;background:var(--dim)}
 
-.shot-wrap{position:relative;perspective:1400px}
-.shot-wrap::before{content:"";position:absolute;inset:-10% -8%;z-index:0;pointer-events:none;filter:blur(46px);
-  background:radial-gradient(58% 58% at 62% 42%,rgba(245,71,91,.28),transparent 72%)}
-html[data-theme="light"] .shot-wrap::before{background:radial-gradient(58% 58% at 62% 42%,rgba(245,71,91,.16),transparent 72%)}
-.frame{position:relative;z-index:1;border-radius:14px;overflow:hidden;border:1px solid var(--line-strong);
-  background:var(--card);box-shadow:0 40px 80px -32px rgba(0,0,0,.85),0 0 0 1px rgba(255,255,255,.03);
-  transform:rotateY(-9deg) rotateX(2.5deg);transition:transform .6s cubic-bezier(.2,.7,.2,1)}
-html[data-theme="light"] .frame{box-shadow:0 40px 80px -34px rgba(20,20,40,.35),0 0 0 1px rgba(0,0,0,.04)}
-.frame:hover{transform:rotateY(0) rotateX(0) translateY(-4px)}
-.frame::before{content:"";position:absolute;inset:0;z-index:3;pointer-events:none;border-radius:14px;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.14)}
-.frame-bar{display:flex;align-items:center;gap:6px;height:32px;padding:0 12px;background:var(--card-2);
-  border-bottom:1px solid var(--line)}
-.frame-bar span{width:8px;height:8px;border-radius:50%;background:#3a3a44}
-.frame-bar span:nth-child(1){background:#f5475b}.frame-bar span:nth-child(2){background:#f2a63b}.frame-bar span:nth-child(3){background:#4caf7d}
-.frame-bar em{margin-left:8px;font-style:normal;font-size:11px;color:var(--dim);font-family:var(--mono)}
-.frame img{width:100%;height:auto;display:block}
+.hero-stack{position:relative;display:flex;align-items:center;justify-content:center;width:100%;
+  margin-top:clamp(18px,3.2vh,38px);perspective:1800px}
+.win{position:relative;flex:0 0 auto;border-radius:12px;overflow:hidden;border:1px solid var(--line-strong);
+  background:var(--card);box-shadow:0 30px 64px -30px rgba(0,0,0,.9);
+  transition:transform .5s cubic-bezier(.2,.7,.2,1),opacity .35s,box-shadow .5s}
+html[data-theme="light"] .win{box-shadow:0 30px 64px -34px rgba(20,20,40,.4)}
+.win img{display:block;width:100%;height:auto}
+.win.main{width:min(clamp(240px,34vw,530px),56vh);z-index:3;
+  box-shadow:0 44px 90px -34px rgba(0,0,0,.95),0 0 0 1px rgba(255,255,255,.04)}
+.win.side{width:min(clamp(150px,24vw,375px),40vh);z-index:1;opacity:.95}
+.win.left{margin-right:-4%;transform:translateY(3%) rotateY(16deg) scale(.94);transform-origin:right center}
+.win.right{margin-left:-4%;transform:translateY(3%) rotateY(-16deg) scale(.94);transform-origin:left center}
+.win.main:hover{transform:translateY(-5px)}
+.win.left:hover{opacity:1;transform:translateY(1%) rotateY(11deg) scale(.97)}
+.win.right:hover{opacity:1;transform:translateY(1%) rotateY(-11deg) scale(.97)}
+
+.hero-foot{margin-top:clamp(18px,3vh,32px);display:flex;flex-direction:column;align-items:center;gap:12px}
+.linkchips{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
+.linkchip{display:inline-flex;align-items:center;gap:7px;height:42px;padding:0 16px;border-radius:10px;
+  border:1px solid var(--line-strong);color:var(--muted);font-size:13.5px;font-weight:500;
+  background:color-mix(in srgb,var(--card) 70%,transparent);
+  transition:transform .2s,color .2s,border-color .2s,background .2s}
+.linkchip svg{width:16px;height:16px;flex:none}
+.linkchip:hover{color:var(--fg);border-color:color-mix(in srgb,var(--fg) 26%,transparent);
+  background:var(--card-2);transform:translateY(-1px)}
+
+.scroll-hint{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);z-index:3;
+  display:inline-flex;justify-content:center;padding:4px 10px}
+.scroll-hint i{display:block;width:1px;height:14px;background:linear-gradient(var(--dim),transparent);
+  animation:hintDrop 2.2s ease-in-out infinite}
+@keyframes hintDrop{0%,100%{opacity:.35;transform:translateY(-2px)}50%{opacity:1;transform:translateY(2px)}}
 
 /* ---------- sections ---------- */
 .section{position:relative;padding:clamp(52px,7vw,92px) 0;border-top:1px solid var(--line);scroll-margin-top:76px}
@@ -150,8 +166,8 @@ h2{font-size:clamp(24px,3.2vw,36px);line-height:1.25;letter-spacing:-.01em;font-
 .gal{position:relative;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--card);
   transition:border-color .25s,transform .25s}
 .gal:hover{border-color:var(--line-strong);transform:translateY(-3px)}
-.gal img{width:100%;height:auto;transition:transform .5s ease}
-.gal:hover img{transform:scale(1.02)}
+.gal img{width:100%;height:auto;transition:transform .55s cubic-bezier(.2,.7,.2,1)}
+.gal:hover img{transform:scale(1.07)}
 .gal figcaption{position:absolute;left:0;right:0;bottom:0;padding:26px 16px 12px;font-size:13px;color:#e8e8ee;
   background:linear-gradient(transparent,rgba(6,6,9,.88));display:flex;justify-content:space-between;gap:12px}
 .gal figcaption span{color:#9a9aa6;font-family:var(--mono);font-size:11px}
@@ -225,13 +241,24 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
   *{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
   .reveal{opacity:1;transform:none}
 }
+@media (max-height:820px){
+  h1{font-size:clamp(28px,3.4vw,40px)}
+  .lede{font-size:14px;margin-top:12px}
+  .hero-stack{margin-top:16px}
+  .hero-foot{margin-top:16px;gap:10px}
+  .meta-row{display:none}
+}
 @media (max-width:980px){
-  .hero-grid{grid-template-columns:1fr;gap:36px}
-  .frame{transform:none}
+  .win.side{display:none}
+  .win.main{width:min(92vw,560px)}
+  .scroll-hint{display:none}
   .cards{grid-template-columns:repeat(2,1fr)}
   .faq{grid-template-columns:1fr}
   .nav-links{display:none}
   .blobs{height:520px}
+}
+@media (max-height:760px){
+  .scroll-hint{display:none}
 }
 @media (max-width:680px){
   .cards{grid-template-columns:1fr}
@@ -245,6 +272,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
   .cta .btn{flex:1 1 100%;justify-content:center}
   .dl-body{padding:18px}
   .meta-row{gap:8px 14px;font-size:12px}
+  .meta-row li:last-child{display:none}
   .frame-bar{height:28px}
 }
 </style>
@@ -262,12 +290,16 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
       <a href="#shots">界面</a>
       <a href="#download">下载</a>
       <a href="#faq">常见问题</a>
+      <a href="https://github.com/DcC176/replay-radio#readme" target="_blank" rel="noopener">文档</a>
     </nav>
     <div class="nav-act">
       <button class="icon-btn" id="themeBtn" aria-label="切换深浅主题" title="切换主题">
         <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>
         <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
       </button>
+      <a class="icon-btn" href="https://space.bilibili.com/378582162" target="_blank" rel="noopener" aria-label="B 站主页" title="B 站主页">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="3"/><path d="M7 3l3 4M17 3l-3 4"/></svg>
+      </a>
       <a class="icon-btn" href="https://github.com/DcC176/replay-radio" target="_blank" rel="noopener" aria-label="GitHub 仓库">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.9-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg>
       </a>
@@ -280,34 +312,52 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
 <section class="hero">
   <div class="blobs" aria-hidden="true"><i></i><i></i><i></i></div>
   <div class="spot" id="spot" aria-hidden="true"></div>
-  <div class="wrap">
-    <div class="hero-grid">
-      <div class="hero-copy">
-        <span class="chip"><span class="dot" aria-hidden="true"></span>v<span id="verChip">1.0.33</span> · 最新版</span>
-        <h1>把直播回放<br /><em>编成 24 小时电台</em></h1>
-        <p class="lede">拉取任意 B 站主播的直播回放，按分段长度自动排期成一条永不结束的时间轴。弹幕随片对齐、多主播独立频道、全部在本机运行。</p>
-        <div class="cta">
-          <a class="btn glow" id="dlBtn" href="https://github.com/DcC176/replay-radio/releases/latest" target="_blank" rel="noopener">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 5 5-5M4 20h16"/></svg>
-            下载 <span id="osLabel">Windows</span> 版
-          </a>
-          <a class="btn ghost" href="#features">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5"/></svg>
-            了解功能
-          </a>
-        </div>
-        <ul class="meta-row">
-          <li>免费 · 开源</li><li>单文件 EXE</li><li>数据不出本机</li><li>Windows 10 / 11</li>
-        </ul>
+  <div class="wrap hero-wrap">
+    <div class="hero-head">
+      <span class="chip"><span class="dot" aria-hidden="true"></span>v<span id="verChip">1.0.34</span> · 最新版</span>
+      <h1>把直播回放<br /><em>编成 24 小时电台</em></h1>
+      <p class="lede">拉取任意 B 站主播的直播回放，按分段长度自动排期成一条永不结束的时间轴。弹幕随片对齐、多主播独立频道，全部在本机运行。</p>
+    </div>
+
+    <div class="hero-stack">
+      <figure class="win side left">
+        <img src="assets/app-stations.webp" alt="主播管理：多位主播与配色" width="1440" height="860" />
+      </figure>
+      <figure class="win main">
+        <img src="assets/app-live.webp" alt="24 小时频道：节目单、正在播放与接下来" width="1440" height="860" fetchpriority="high" />
+      </figure>
+      <figure class="win side right">
+        <img src="assets/app-playlist.webp" alt="歌单：导入与风格分类" width="1440" height="860" />
+      </figure>
+    </div>
+
+    <div class="hero-foot">
+      <div class="cta">
+        <a class="btn glow" id="dlBtn" href="https://github.com/DcC176/replay-radio/releases/latest" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 5 5-5M4 20h16"/></svg>
+          下载 <span id="osLabel">Windows</span> 版
+        </a>
       </div>
-      <div class="shot-wrap">
-        <div class="frame">
-          <div class="frame-bar"><span></span><span></span><span></span><em>127.0.0.1:8765 / 24 小时频道</em></div>
-          <img src="assets/app-live.webp" alt="回放电台的 24 小时频道：左侧节目单，右侧播放器与正在播放" width="1440" height="860" />
-        </div>
+      <div class="linkchips">
+        <a class="linkchip" href="https://github.com/DcC176/replay-radio#readme" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-2z"/><path d="M8 7h7M8 11h5"/></svg>
+          使用文档
+        </a>
+        <a class="linkchip" href="https://space.bilibili.com/378582162" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="3"/><path d="M7 3l3 4M17 3l-3 4"/></svg>
+          B 站
+        </a>
+        <a class="linkchip" href="https://github.com/DcC176/replay-radio" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.9-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg>
+          GitHub
+        </a>
       </div>
+      <ul class="meta-row">
+        <li>免费 · 开源</li><li>单文件 EXE</li><li>数据不出本机</li><li>Windows 10 / 11</li>
+      </ul>
     </div>
   </div>
+  <a class="scroll-hint" href="#features" aria-label="向下滚动查看功能"><i></i></a>
 </section>
 
 <section class="section" id="features">
@@ -491,6 +541,8 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
       <p style="margin-top:12px;font-family:var(--mono);font-size:12px">ReplayRadio · 回放电台</p>
     </div>
     <nav class="foot-links" aria-label="页脚导航">
+      <a href="https://github.com/DcC176/replay-radio#readme" target="_blank" rel="noopener">使用文档</a>
+      <a href="https://space.bilibili.com/378582162" target="_blank" rel="noopener">B 站</a>
       <a href="https://github.com/DcC176/replay-radio" target="_blank" rel="noopener">GitHub</a>
       <a href="https://github.com/DcC176/replay-radio/releases" target="_blank" rel="noopener">更新日志</a>
       <a href="https://github.com/DcC176/replay-radio/issues" target="_blank" rel="noopener">反馈</a>

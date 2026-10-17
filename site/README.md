@@ -5,6 +5,25 @@
 
 线上地址：<https://dcc176.github.io/replay-radio/>
 
+## 对外链接
+
+| 入口 | 地址 |
+|---|---|
+| 使用文档 | <https://github.com/DcC176/replay-radio#readme> |
+| B 站 | <https://space.bilibili.com/378582162> |
+| GitHub | <https://github.com/DcC176/replay-radio> |
+
+首屏（100svh，正好一屏）与页脚都有这三个入口；首屏不再放正文，功能详情从第二屏开始。
+
+## 布局要点
+
+- 首屏 `min-height: calc(100svh - 64px)`，内容垂直居中，底部一条 1px 渐隐线提示下滑；
+  1440×900 / 1366×768 / 390×844 三档实测「首屏高度 = 可视高度」，下一节正好从折线开始。
+- 首屏三张窗口按 `left / main / right` 扇形排布；主窗口宽度带 `min(..., 56vh)` 上限，
+  矮屏（≤820px 高）另有收紧规则，避免把下载按钮挤出首屏。
+- 功能介绍区的四张截图悬停放大 1.07（`transform: scale()` + `overflow: hidden`），
+  过渡 550ms；截图本身是 1440×860，放大后仍不模糊。
+
 ## 部署
 
 线上由 **GitHub Pages 的 `gh-pages` 分支**发布（仓库 Settings → Pages → Deploy from a branch：`gh-pages` / `/`）。
