@@ -3,11 +3,11 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>噼里啪啦 ReplayRadio — 把直播回放编成 24 小时频道</title>
-<meta name="description" content="噼里啪啦把任意 B 站主播的直播回放自动排期成 24 小时频道：弹幕对齐回放、自动分段、多主播切换，全部在本机运行。" />
+<title>噼里啪啦 — 简洁全能的第三方 B 站客户端</title>
+<meta name="description" content="噼里啪啦把直播、回放、节目单、歌单、监控室与动态收进同一个页面：一个 EXE 打开即用，不用装插件，数据只留在本机。" />
 <meta name="theme-color" content="#08080a" />
-<meta property="og:title" content="噼里啪啦 ReplayRadio" />
-<meta property="og:description" content="把直播回放编成 24 小时的电台。随时打开，都是正在播出。" />
+<meta property="og:title" content="噼里啪啦 · 第三方 B 站客户端" />
+<meta property="og:description" content="简洁全能，让你畅享全新的 B 站体验。六个板块，一个页面。" />
 <meta property="og:type" content="website" />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d0d10'/%3E%3Cpath d='M9 20V12M13 23V9M17 19v-6M21 22V10' stroke='%23f5475b' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E" />
 <style>
@@ -161,6 +161,9 @@ h2{font-size:clamp(24px,3.2vw,36px);line-height:1.25;letter-spacing:-.01em;font-
 .card h3{font-size:16px;font-weight:600;letter-spacing:.01em}
 .card p{margin-top:8px;font-size:14px;color:var(--muted);line-height:1.7}
 .card:hover .ic{color:var(--amber);background:rgba(242,166,59,.12);border-color:rgba(242,166,59,.26)}
+.pillrow{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+.pillrow span{font-family:var(--mono);font-size:12px;color:var(--dim);border:1px solid var(--line);
+  border-radius:999px;padding:6px 12px;background:color-mix(in srgb,var(--card) 55%,transparent)}
 
 .gallery{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:38px}
 .gal{position:relative;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--card);
@@ -284,7 +287,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
   <div class="nav-in">
     <a class="brand" href="#top" aria-label="噼里啪啦 首页">
       <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="#16161b"/><rect x="0.5" y="0.5" width="31" height="31" rx="8.5" fill="none" stroke="rgba(255,255,255,.12)"/><path d="M9 20V12M13 23V9M17 19v-6M21 22V10" stroke="#f5475b" stroke-width="2.4" stroke-linecap="round"/></svg>
-      <b>噼里啪啦</b><span>24H</span>
+      <b>噼里啪啦</b><span>CLIENT</span>
     </a>
     <nav class="nav-links" aria-label="主导航">
       <a href="#features">功能</a>
@@ -315,20 +318,20 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
   <div class="spot" id="spot" aria-hidden="true"></div>
   <div class="wrap hero-wrap">
     <div class="hero-head">
-      <span class="chip"><span class="dot" aria-hidden="true"></span>v<span id="verChip">1.0.35</span> · 最新版</span>
-      <h1>把直播回放<br /><em>编成 24 小时电台</em></h1>
-      <p class="lede">拉取任意 B 站主播的直播回放，按分段长度自动排期成一条永不结束的时间轴。弹幕随片对齐、多主播独立频道，全部在本机运行。</p>
+      <span class="chip"><span class="dot" aria-hidden="true"></span>v<span id="verChip">1.0.34</span> · 最新版</span>
+      <h1>简洁全能的<br /><em>第三方 B 站客户端</em></h1>
+      <p class="lede">直播、回放、节目单、歌单、监控室、动态，全都收在同一个页面。<span style="white-space:nowrap">一个 EXE</span> 打开就用，数据只留在本机。</p>
     </div>
 
     <div class="hero-stack">
       <figure class="win side left">
-        <img src="assets/app-stations.webp" alt="主播管理：多位主播与配色" width="1440" height="860" />
+        <img src="assets/app-playlist.webp" alt="歌单：导入整张 B 站歌单并按风格筛选" width="1440" height="860" />
       </figure>
       <figure class="win main">
-        <img src="assets/app-live.webp" alt="24 小时频道：节目单、正在播放与接下来" width="1440" height="860" fetchpriority="high" />
+        <img src="assets/app-live.webp" alt="频道页：节目单、正在播放与接下来，右侧是播放器与弹幕" width="1440" height="860" fetchpriority="high" />
       </figure>
       <figure class="win side right">
-        <img src="assets/app-playlist.webp" alt="歌单：导入与风格分类" width="1440" height="860" />
+        <img src="assets/app-dynamic.webp" alt="动态：主播的最新动态聚在页面里" width="1440" height="860" />
       </figure>
     </div>
 
@@ -365,40 +368,44 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
   <div class="wrap">
     <div class="reveal">
       <p class="eyebrow">FEATURES</p>
-      <h2>六个让回放「像直播」的设计</h2>
-      <p class="sub">不是把录像按顺序放完，而是把回放当成一条持续播出的节目单来编排。</p>
+      <h2>六个板块，一个页面</h2>
+      <p class="sub">不用在标签页之间来回跳：想看的都收在同一个窗口里，切一下就到。</p>
     </div>
     <div class="cards">
       <article class="card reveal">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="13" rx="2.5"/><path d="M8 2.5L12 6l4-3.5"/></svg></div>
+        <h3>直播间</h3>
+        <p>主播正在播就直接进去看，右侧是实时弹幕，登录后能直接发。画质可切到 1080P 原画。</p>
+      </article>
+      <article class="card reveal">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg></div>
-        <h3>24 小时自动排期</h3>
-        <p>按分段时长把回放铺满整条时间轴，循环播出且不重复。打开页面时，播放器总在「正在播出」的位置。</p>
+        <h3>24 小时频道</h3>
+        <p>回放按固定顺序排成一条循环时间轴，打开就对齐到「现在该播第几场」，全天不空场。</p>
       </article>
       <article class="card reveal">
-        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/></svg></div>
-        <h3>弹幕随片回放</h3>
-        <p>按时间轴对齐还原原始弹幕，轮播、屏蔽词、发送框都在。登录态只存在本机，不经过任何服务器。</p>
-      </article>
-      <article class="card reveal">
-        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 6v12M12 4v16M19 8v8"/><path d="M3 10h4M10 8h4M17 12h4" opacity=".5"/></svg></div>
-        <h3>自动分段</h3>
-        <p>识别多 P 结构与静音间隙，把一晚上的直播切成上百段，跳转、抽签、插播都以段为单位。</p>
-      </article>
-      <article class="card reveal">
-        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="8" height="14" rx="2"/><rect x="13" y="5" width="8" height="14" rx="2"/></svg></div>
-        <h3>多主播频道</h3>
-        <p>每位主播一个独立频道、一套取自主站封面的配色，顶部一键切换，互不干扰。</p>
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1.1" fill="currentColor"/><circle cx="4" cy="12" r="1.1" fill="currentColor"/><circle cx="4" cy="18" r="1.1" fill="currentColor"/></svg></div>
+        <h3>节目单</h3>
+        <p>24 小时 / 72 小时 / 整个循环三种时间表，任一场点一下就播，不用自己找位置。</p>
       </article>
       <article class="card reveal">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg></div>
-        <h3>歌单与标签</h3>
-        <p>从合集或收藏夹导入 B 站歌单并自动按风格归类；节目单里的歌回、杂谈、游戏、联动标签也可一键筛选。</p>
+        <h3>歌单</h3>
+        <p>粘一个 B 站链接导入整张歌单，按语言、风格、演唱者筛选，支持从头一路连播。</p>
       </article>
       <article class="card reveal">
-        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg></div>
-        <h3>本机中转取流</h3>
-        <p>接口与媒体流全部由本机服务代取，服务只监听 127.0.0.1，不向外部上报任何使用数据。</p>
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3" y="4" width="7.5" height="7" rx="1.5"/><rect x="13.5" y="4" width="7.5" height="7" rx="1.5"/><rect x="3" y="13" width="7.5" height="7" rx="1.5"/><rect x="13.5" y="13" width="7.5" height="7" rx="1.5"/></svg></div>
+        <h3>监控室</h3>
+        <p>同时看多路直播，1~9 路 / 自适应 / 自由拖动随便切，每路独立音量与画质。</p>
       </article>
+      <article class="card reveal">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/></svg></div>
+        <h3>动态与微博</h3>
+        <p>主播的最新动态和微博直接聚在页面里，顺手还能继续看正在播的那一场。</p>
+      </article>
+    </div>
+    <div class="pillrow reveal">
+      <span>剧场模式</span><span>跳过空白</span><span>分段导航</span><span>多主播</span>
+      <span>板块配色</span><span>深浅主题</span><span>简繁切换</span><span>启动板块自选</span>
     </div>
   </div>
 </section>
@@ -412,19 +419,19 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
     </div>
     <div class="gallery">
       <figure class="gal reveal">
-        <img src="assets/app-schedule.webp" alt="节目单页面：接下来播什么，按 24 小时时间轴排期" width="1440" height="860" loading="lazy" />
+        <img src="assets/app-schedule.webp" alt="节目单：24 小时、72 小时与整个循环的时间表，任一场点一下就播" width="1440" height="860" loading="lazy" />
         <figcaption>节目单：接下来播什么<span>SCHEDULE</span></figcaption>
       </figure>
       <figure class="gal reveal">
-        <img src="assets/app-playlist.webp" alt="歌单页面：从合集导入歌曲并按风格分类" width="1440" height="860" loading="lazy" />
-        <figcaption>歌单：导入与风格分类<span>PLAYLIST</span></figcaption>
+        <img src="assets/app-monitor.webp" alt="监控室：同时看多路直播，布局与音量可分别设置" width="1440" height="860" loading="lazy" />
+        <figcaption>监控室：多路同时看<span>MONITOR</span></figcaption>
       </figure>
       <figure class="gal reveal">
-        <img src="assets/app-stations.webp" alt="设置里的主播管理：多位主播、UID 与主站标记" width="1440" height="860" loading="lazy" />
-        <figcaption>主播管理：多主播与主站<span>STATIONS</span></figcaption>
+        <img src="assets/app-stations.webp" alt="设置里的主播管理：添加主播、改板块颜色、设默认板块" width="1440" height="860" loading="lazy" />
+        <figcaption>主播管理：加人、改色、设主站<span>STATIONS</span></figcaption>
       </figure>
       <figure class="gal reveal">
-        <img src="assets/app-light.webp" alt="同一个 24 小时频道的浅色主题配色" width="1440" height="860" loading="lazy" />
+        <img src="assets/app-light.webp" alt="同一个板块在浅色主题下的配色" width="1440" height="860" loading="lazy" />
         <figcaption>浅色主题（同一页面）<span>LIGHT</span></figcaption>
       </figure>
     </div>
@@ -436,7 +443,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
     <div class="reveal">
       <p class="eyebrow">DOWNLOAD</p>
       <h2>下载噼里啪啦</h2>
-      <p class="sub">单文件 EXE，解压即用。首次启动会引导你添加一位主播的 UID。</p>
+      <p class="sub">单文件 EXE，解压即用。首次启动会让你填一位主播的 UID，之后随时可以再加。</p>
     </div>
 
     <div class="dl reveal">
@@ -510,12 +517,16 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
     </div>
     <div class="faq-list reveal">
       <details open>
+        <summary>和官方客户端有什么区别？</summary>
+        <p>这是第三方客户端，与哔哩哔哩无关联。它不修改官方协议、不回传使用数据，只把 B 站公开的直播与投稿接口重新组织成一个本地页面。</p>
+      </details>
+      <details>
         <summary>需要登录 B 站吗？</summary>
-        <p>弹幕与部分清晰度的流需要登录态。你可以在设置页粘贴 Cookie 或扫码登录，凭据只写入本机数据目录，不会上传到任何地方。</p>
+        <p>登录后才能取到 1080P 并发弹幕。可以在页内扫码登录，凭据只写入本机数据目录，不会上传到任何地方。</p>
       </details>
       <details>
         <summary>数据会被上传吗？</summary>
-        <p>不会。服务只监听 127.0.0.1，所有接口请求与媒体流都由本机进程代取。卸载时删除数据目录即可清理干净。</p>
+        <p>不会。程序只在本机起一个服务（127.0.0.1），接口请求与媒体流都由它代取再转给页面。卸载时删掉数据目录即可清理干净。</p>
       </details>
       <details>
         <summary>第一次打开为什么要等一会儿？</summary>
@@ -523,11 +534,11 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
       </details>
       <details>
         <summary>支持哪些系统？</summary>
-        <p>打包版提供 Windows 10 / 11 x64。macOS 与 Linux 目前需要用源码运行（依赖 Python 3.11+），尚未提供预编译包。</p>
+        <p>打包版提供 Windows 10 / 11 x64。macOS 与 Linux 可以用源码运行（只需 Python 3.9+，无第三方依赖），尚未提供预编译包。</p>
       </details>
       <details>
         <summary>节目版权归谁？</summary>
-        <p>所有回放内容版权归对应 UP 主与平台所有。本项目只是把公开可访问的回放重新编排播放，不存储、不分发视频文件。</p>
+        <p>所有内容版权归对应 UP 主与平台所有。本项目只是把公开可访问的内容重新编排播放，不存储、不分发视频文件。</p>
       </details>
     </div>
   </div>
@@ -538,8 +549,8 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
 <footer>
   <div class="wrap foot">
     <div>
-      <p class="foot-note">非官方粉丝项目，与哔哩哔哩无关联。视频流来自 B 站，版权归各 UP 主所有。本项目仅供学习交流，请勿用于商业用途。</p>
-      <p style="margin-top:12px;font-family:var(--mono);font-size:12px">ReplayRadio · 噼里啪啦</p>
+      <p class="foot-note">非官方第三方客户端，与哔哩哔哩无关联。所有内容版权归对应 UP 主与平台所有。本项目仅供学习交流，请勿用于商业用途。</p>
+      <p style="margin-top:12px;font-family:var(--mono);font-size:12px">噼里啪啦 · ReplayRadio</p>
     </div>
     <nav class="foot-links" aria-label="页脚导航">
       <a href="https://github.com/DcC176/replay-radio#readme" target="_blank" rel="noopener">使用文档</a>
@@ -555,7 +566,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
 (function(){
   "use strict";
   var REPO = "DcC176/replay-radio";
-  var FALLBACK = { version: "1.0.35", size: 55 * 1024 * 1024, url: "https://github.com/" + REPO + "/releases/latest", name: "ReplayRadio-v1.0.35.exe" };
+  var FALLBACK = { version: "1.0.35", size: 130 * 1024 * 1024, url: "https://github.com/" + REPO + "/releases/latest", name: "ReplayRadio-v1.0.35.exe" };
 
   /* ---------- theme ---------- */
   var root = document.documentElement;
