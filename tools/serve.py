@@ -1013,6 +1013,8 @@ STATIONLESS_OK = (
     "/api/playlists", "/api/playlist",
     "/api/playlist/import", "/api/playlist/rename", "/api/playlist/delete",
     "/api/playlist/tag",
+    "/api/playlist/create", "/api/playlist/move",
+    "/api/playlist/like", "/api/lyrics",
 )
 
 
@@ -2217,6 +2219,57 @@ def _lang_of(name):
     return "其他"
 
 
+_ARTIST_LANG_CACHE = {"mtime": None, "map": {}}
+
+
+def _artist_lang(artist):
+    """按演唱者外推语种：这位歌手已有 **≥2 首**被文字判定为日文/英文，其余纯汉字的也算同语种。
+
+    为什么需要：`_lang_of` 只能看文字 —— **纯汉字写的日文歌名**（如「点火」「夜」）会被判成中文。
+    这类无法从文字区分，只能借同歌手其它歌的判定来外推。
+    门槛设 2 首，避免一首误判带偏整个歌手。
+
+    ⚠️ 与 `_artist_style` 一样按 playlists.json 的 mtime 缓存：每个条目都会调它。
+    """
+    a = (artist or "").strip()
+    if not a:
+        return ""
+    try:
+        mtime = os.path.getmtime(PLAYLISTS_FILE) if os.path.exists(PLAYLISTS_FILE) else 0
+    except OSError:
+        mtime = 0
+    if _ARTIST_LANG_CACHE["mtime"] != mtime:
+        hits = {}
+        for pl in (_playlists_doc().get("lists") or []):
+            for it in (pl.get("items") or []):
+                who = (it.get("artist") or "").strip()
+                if not who:
+                    continue
+                lg = _lang_of(it.get("song"))
+                # ⚠️ 只统计日文/韩文，**不统计英文**：纯汉字歌名只能是中文或日文，
+                #    英文歌名一定含拉丁字母、文字判定本来就不会错。把英文也纳入会让
+                #    「2 首英文歌」把同歌手 170 多首中文歌全推成英文（实测踩到）。
+                if lg in ("日文", "韩文"):
+                    d = hits.setdefault(who, {})
+                    d[lg] = d.get(lg, 0) + 1
+        # 占比也要过线：某歌手只有 2 首日文、却有 30 首中文时不该外推
+        totals = {}
+        for pl in (_playlists_doc().get("lists") or []):
+            for it in (pl.get("items") or []):
+                who = (it.get("artist") or "").strip()
+                if who:
+                    totals[who] = totals.get(who, 0) + 1
+        out = {}
+        for who, d in hits.items():
+            lg, n = max(d.items(), key=lambda kv: kv[1])
+            tot = totals.get(who) or n
+            if n >= 2 and n / float(tot) >= 0.5:
+                out[who] = lg
+        _ARTIST_LANG_CACHE["map"] = out
+        _ARTIST_LANG_CACHE["mtime"] = mtime
+    return _ARTIST_LANG_CACHE["map"].get(a, "")
+
+
 def _pl_item_key(it):
     """条目唯一键。
 
@@ -2231,12 +2284,60 @@ def _pl_item_key(it):
     return "%sp%s" % (it.get("bvid") or "", it.get("page") or 1)
 
 
+_ARTIST_STYLE_CACHE = {"mtime": None, "map": {}}
+
+
+def _artist_style(artist):
+    """按演唱者外推风格：这位歌手在现有歌单里**至少两首**标了同一风格，才敢套给其余的歌。
+
+    为什么要这层：歌名表永远补不全（新歌、翻唱、标题写法略有出入），只按歌名查会让
+    「风格」大面积停在「未分类」，而用户要的是能筛选。同一歌手的作品风格通常接近，
+    用它兜一层比留空有用；要求「≥2 首且一致」是为了避免一首标错就带偏这位歌手全部的歌。
+
+    ⚠️ 结果按 playlists.json 的 mtime 缓存：`_pl_decorate` 对每个条目都会调我，
+    不缓存的话一页 182 首就要把 120KB 的 JSON 读 182 遍。
+    """
+    a = (artist or "").strip()
+    if not a:
+        return ""
+    try:
+        mtime = os.path.getmtime(PLAYLISTS_FILE) if os.path.exists(PLAYLISTS_FILE) else 0
+    except OSError:
+        mtime = 0
+    if _ARTIST_STYLE_CACHE["mtime"] != mtime:
+        tags = _song_tags()
+        hits = {}                      # artist -> {style: 次数}
+        for pl in (_playlists_doc().get("lists") or []):
+            for it in (pl.get("items") or []):
+                who = (it.get("artist") or "").strip()
+                if not who:
+                    continue
+                st = (tags.get(_tag_key(it.get("song"))) or {}).get("style")
+                if st and st != UNTAGGED:
+                    d = hits.setdefault(who, {})
+                    d[st] = d.get(st, 0) + 1
+        out = {}
+        for who, d in hits.items():
+            st, n = max(d.items(), key=lambda kv: kv[1])
+            if n >= 2:
+                out[who] = st
+        _ARTIST_STYLE_CACHE["map"] = out
+        _ARTIST_STYLE_CACHE["mtime"] = mtime
+    return _ARTIST_STYLE_CACHE["map"].get(a, "")
+
+
 def _pl_decorate(it):
     """条目出站前补 语言 / 风格（实时查表 → 改表后立刻生效，不必重导）。"""
     tags = _song_tags().get(_tag_key(it.get("song"))) or {}
     out = dict(it)
-    out["lang"] = tags.get("lang") or _lang_of(it.get("song"))
-    out["style"] = tags.get("style") or UNTAGGED
+    _lg = tags.get("lang") or _lang_of(it.get("song"))
+    out["lang"] = _lg
+    if _lg == "中文":
+        # 纯汉字歌名分不出中日 —— 借同歌手的判定兜一层（见 _artist_lang）
+        _alt = _artist_lang(it.get("artist"))
+        if _alt:
+            out["lang"] = _alt
+    out["style"] = tags.get("style") or _artist_style(it.get("artist")) or UNTAGGED
     out["key"] = _pl_item_key(it)        # 前端一律用它定位（见 _pl_item_key 的说明）
     return out
 
@@ -2457,6 +2558,173 @@ def api_playlist_import(obj):
           % (bvid, len(items), src, "，超上限已截断" if cut else ""))
     return 200, {"ok": True, "id": pid, "count": len(items), "source": src,
                  "truncated": cut, "updated": bool(old)}
+
+
+def _parse_lrc(text):
+    """LRC 文本 → [{"t": 秒, "text": 行}]。一行可以带多个时间戳（[00:12.5][01:20.0]副歌）。"""
+    out = []
+    for raw in (text or "").splitlines():
+        stamps = re.findall(r"\[(\d{1,2}):(\d{2}(?:\.\d{1,3})?)\]", raw)
+        if not stamps:
+            continue
+        body = re.sub(r"\[[^\]]*\]", "", raw).strip()
+        for m, sec in stamps:
+            try:
+                out.append({"t": round(int(m) * 60 + float(sec), 2), "text": body})
+            except ValueError:
+                continue
+    out.sort(key=lambda x: x["t"])
+    return out
+
+
+def _clean_song_name(q):
+    """把歌单里的歌名剥成"纯歌名"再去搜歌词。
+
+    ⚠️ 歌单条目的 song 字段长这样：`《爱殇》（2026.7.19）` —— 带书名号和日期。
+       直接拿整串去搜一定查不到（实测：显示「歌词加载失败」）。
+       这里剥掉《》、以及（2026.7.19）这类日期后缀，只留纯歌名。
+    """
+    s = (q or "").strip()
+    s = re.sub(r"[（(]\s*\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}\s*[)）]", "", s)
+    s = s.strip("《》〈〉\"\' \t")
+    return s.strip()
+
+
+def api_lyrics(q, artist):
+    """按歌名查歌词（LRCLIB 公开接口，免密钥）。
+
+    ⚠️ 必须在**服务端**发请求：浏览器直连会被 CORS 拦，而且 EXE 的 webview 没有代理配置。
+       服务端直连实测 HTTP 200 可用（日文/中文常见歌都能拿到逐行时间轴）。
+    ⚠️ 查不到、超时、服务忙都返回空歌词（前端显示「暂无歌词」）—— 歌词是附加信息，
+       不该让它把整页拖成报错。
+    """
+    q = _clean_song_name(q)
+    if not q:
+        return 400, {"error": "缺歌名"}
+    import urllib.parse as _up
+    import urllib.request as _ur
+    import urllib.parse as _up
+    import urllib.request as _ur
+
+    # ⚠️ 代理必须显式禁用：`urlopen` 默认读系统的 IE/注册表代理，
+    #    用户机器上若配了代理而代理不通，会表现成"歌词完全不可用"，
+    #    但浏览器里手动打开 lrclib 却正常。
+    _opener = _ur.build_opener(_ur.ProxyHandler({}))
+
+    def _search(params):
+        url = "https://lrclib.net/api/search?" + _up.urlencode(params)
+        req = _ur.Request(url, headers={"User-Agent": "ReplayRadio/1.0 (local)"})
+        try:
+            with _opener.open(req, timeout=10) as r:
+                got = json.loads(r.read().decode("utf-8"))
+            return got if isinstance(got, list) else []
+        except Exception as e:
+            return e
+
+    # 第一次带歌手名；**查不到再去掉歌手查一次** ——
+    # 歌单里的歌手是 B 站 UP 名（如「阿梓」），和 lrclib 里登记的歌手往往对不上，
+    # 只按歌名反而更容易命中（实测「爱殇」带「阿梓」0 条、不带 35 条）。
+    a = (artist or "").strip()
+    hits = err = None
+    if a:
+        # ⚠️ artist 为空时不要传这个参数（传空串会让接口几乎搜不到东西）
+        hits = _search({"track_name": q, "artist_name": a})
+        if isinstance(hits, Exception):
+            err, hits = hits, []
+    if not hits:
+        hits = _search({"track_name": q})
+        if isinstance(hits, Exception):
+            err = err or hits
+            hits = []
+    if not hits and err is not None and not isinstance(err, list):
+        return 200, {"lines": [], "synced": False,
+                     "error": "%s: %s" % (type(err).__name__, str(err)[:80])}
+    if not hits:
+        return 200, {"lines": [], "synced": False}
+    # 优先挑带逐行时间轴的；都没有就用纯文本
+    best = next((h for h in hits if h.get("syncedLyrics")), hits[0])
+    synced = bool(best.get("syncedLyrics"))
+    if synced:
+        lines = _parse_lrc(best["syncedLyrics"])
+    else:
+        lines = [{"t": None, "text": ln.strip()}
+                 for ln in (best.get("plainLyrics") or "").splitlines() if ln.strip()]
+    return 200, {"lines": lines, "synced": synced,
+                 "title": best.get("trackName"), "artist": best.get("artistName"),
+                 "album": best.get("albumName")}
+
+
+def api_playlist_like(obj):
+    """红心：在歌单条目上写 `liked`。
+
+    存在歌单里而不是 localStorage —— 这样换版本、换浏览器都还在（歌单本来就是后端存的）。
+    """
+    o = obj or {}
+    pid, key, on = str(o.get("id") or ""), str(o.get("key") or ""), bool(o.get("on"))
+    if not pid or not key:
+        return 400, {"error": "参数不完整"}
+    doc = _playlists_doc()
+    pl = next((x for x in (doc.get("lists") or []) if x.get("id") == pid), None)
+    if not pl:
+        return 404, {"error": "歌单不存在"}
+    for it in (pl.get("items") or []):
+        if _pl_item_key(it) == key:
+            if on:
+                it["liked"] = True
+            else:
+                it.pop("liked", None)
+            _write_json_file(PLAYLISTS_FILE, doc)
+            return 200, {"ok": True, "liked": on}
+    return 404, {"error": "歌不存在"}
+
+
+def api_playlist_create(obj):
+    """新建一张空歌单。重名时自动加「 2」「 3」后缀，不报错（用户只是想要一张新表）。"""
+    name = str((obj or {}).get("name") or "").strip()[:60] or "新歌单"
+    doc = _playlists_doc()
+    lists = doc.setdefault("lists", [])
+    existing = {x.get("name") for x in lists}
+    base, i = name, 2
+    while name in existing:
+        name = "%s %d" % (base, i)
+        i += 1
+    pid = "pl%d" % int(time.time() * 1000)
+    lists.append({"id": pid, "name": name, "items": [], "created": int(time.time())})
+    _write_json_file(PLAYLISTS_FILE, doc)
+    return 200, {"ok": True, "id": pid, "name": name}
+
+
+def api_playlist_move(obj):
+    """把 keys 从 from 歌单移到 to 歌单。
+
+    目标里已存在同一首（按 _pl_item_key 比）就跳过，不重复加 ——
+    否则来回拖两次会攒出一堆重复行。源歌单里被移走的项按原顺序删掉。
+    """
+    o = obj or {}
+    src_id, dst_id = str(o.get("from") or ""), str(o.get("to") or "")
+    keys = [str(k) for k in (o.get("keys") or []) if k]
+    if not src_id or not dst_id or not keys:
+        return 400, {"error": "参数不完整"}
+    if src_id == dst_id:
+        return 400, {"error": "源和目标是同一张歌单"}
+    doc = _playlists_doc()
+    lists = doc.get("lists") or []
+    src = next((x for x in lists if x.get("id") == src_id), None)
+    dst = next((x for x in lists if x.get("id") == dst_id), None)
+    if not src or not dst:
+        return 404, {"error": "歌单不存在"}
+    want = set(keys)
+    moved, keep = [], []
+    for it in (src.get("items") or []):
+        (moved if _pl_item_key(it) in want else keep).append(it)
+    if not moved:
+        return 400, {"error": "这些歌不在源歌单里"}
+    have = {_pl_item_key(it) for it in (dst.get("items") or [])}
+    added = [it for it in moved if _pl_item_key(it) not in have]
+    dst["items"] = list(dst.get("items") or []) + added
+    src["items"] = keep
+    _write_json_file(PLAYLISTS_FILE, doc)
+    return 200, {"ok": True, "moved": len(moved), "skipped": len(moved) - len(added)}
 
 
 def api_playlist_rename(obj):
@@ -4123,6 +4391,32 @@ def protocol_registered():
         return ""
 
 
+def protocol_refresh():
+    """启动时把协议注册校正到当前 EXE（**只校正已注册的，不擅自新增**）。
+
+    ⚠️ 为什么需要：EXE 文件名带版本号（噼里啪啦-vX.Y.Z.exe），升级一次就是另一个路径。
+    而注册只在用户点「注册协议」时写过那一次，之后换版本不会更新 ——
+    于是 replayradio:// 链接一直拉起老版本（用户实测「还停在 1.0.44」）。
+    这里在每次启动时比一下：已经指向本程序就什么都不做，指向别处就改回来。
+    """
+    if not FROZEN:
+        return
+    cur = protocol_registered()
+    if not cur:
+        return                                  # 没注册过就别管，不替用户做决定
+    exe = os.path.abspath(sys.executable)
+    if exe.lower() in cur.lower():
+        return                                  # 已经指向本程序
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                              r"Software\Classes\%s\shell\open\command" % PROTOCOL) as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, '"%s" "%%1"' % exe)
+        print("[protocol] 已把 replayradio:// 从旧路径校正到当前版本：%s" % exe)
+    except OSError:
+        pass                                    # 注册表写不了不影响程序运行
+
+
 def protocol_register():
     if not FROZEN:
         return 400, {"error": "源码运行时不需要注册（可执行文件路径不是本程序）"}
@@ -4584,7 +4878,9 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/ping":
             # 只回答「我是谁」。给启动时的实例探测用 —— 不能复用 /api/status，
             # 那个要问 B 站接口，慢的时候会把本服务误判成「别的程序」。
-            return self._json(200, {"app": APP_TAG})
+            # lyrics：本版本是否支持 /api/lyrics。前端在歌词失败时用它判断
+            # 「是网络问题」还是「跑着旧版进程」——两者表现都是拿不到歌词。
+            return self._json(200, {"app": APP_TAG, "lyrics": True})
         if parsed.path == "/api/quit":
             # 供「停止」脚本调用。服务只绑 127.0.0.1，外部访问不到。
             # shutdown() 要等 serve_forever 退出，必须另起线程，否则会把当前响应卡死。
@@ -4593,6 +4889,10 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/playurl":
             code, obj = api_playurl(q)
             return self._json(code, obj)
+        if parsed.path == "/api/lyrics":
+            # ⚠️ 这是 **GET** 接口，必须放在 do_GET 里 —— 曾经误放进 do_POST，
+            #    结果请求永远匹配不到、直接落到静态文件兜底返回 404（实测踩到）。
+            return self._json(*api_lyrics(q.get("q", [""])[0], q.get("artist", [""])[0]))
         if parsed.path == "/api/img":
             code, ct, body = api_img(q.get("u", [""])[0])
             if code != 200 or body is None:
@@ -4726,6 +5026,12 @@ class Handler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/playlist/import":
             return self._json(*api_playlist_import(obj))
+        if parsed.path == "/api/playlist/like":
+            return self._json(*api_playlist_like(obj))
+        if parsed.path == "/api/playlist/create":
+            return self._json(*api_playlist_create(obj))
+        if parsed.path == "/api/playlist/move":
+            return self._json(*api_playlist_move(obj))
         if parsed.path == "/api/playlist/rename":
             return self._json(*api_playlist_rename(obj))
         if parsed.path == "/api/playlist/delete":
@@ -5740,6 +6046,9 @@ def main():
     if args.stop:
         notify("已停止。" if stop_running(url) else "没有找到正在运行的实例。")
         return 0
+
+    # 升级后 EXE 换了文件名，协议注册还指着老版本 —— 每次启动顺手校正（详见函数注释）
+    protocol_refresh()
 
     if not os.path.exists(os.path.join(ROOT, "index.html")):
         # 正常情况下走不到这里：单文件模式已从内置资源释放。

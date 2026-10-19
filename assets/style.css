@@ -228,9 +228,8 @@ body { min-height: 100vh; }
   align-items: center;
   height: var(--topbar-h);
   padding: 0 22px;
-  background: rgba(8, 8, 10, .86);   /* fallback：老浏览器不支持 color-mix */
-  background: color-mix(in srgb, var(--bg) 86%, transparent);
-  backdrop-filter: blur(14px);
+  /* 去掉磨砂玻璃后必须是实色：半透明 + 无模糊会让滚动内容透上来、糊成一片 */
+  background: var(--bg);
   border-bottom: 1px solid var(--line);
 }
 
@@ -504,13 +503,20 @@ body:not(.theater):not(.view-broadcast) .col-right .player-box {
   font-size: 13px;
   font-family: inherit;
   cursor: pointer;
-  transition: all .15s;
+  /* 参考图 10「选中一项，整行给它空间」：宽度平滑变化；邻项的位移由 JS 的 FLIP 补
+     （flex 重排导致的位置变化，CSS transition 管不到）。 */
+  transition: padding .28s cubic-bezier(.4, 0, .2, 1),
+              background .18s, color .18s, border-color .18s;
 }
 .chip:hover { color: var(--text); border-color: rgba(var(--ink), .3); }
 .chip.active {
+  padding-left: 23px;
+  padding-right: 23px;
   background: var(--red);
   border-color: var(--red);
-  color: var(--text);
+  /* ⚠️ 必须用 --on-red（白）：用 var(--text) 时，浅色主题下是深色字压在深色底上，
+     实测几乎看不见（和 .tab.active / .btn.primary 保持同一套写法）。 */
+  color: var(--on-red);
   font-weight: 500;
 }
 
@@ -795,13 +801,17 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
   margin: 0 12px;
   cursor: pointer;
 }
+/* ⚠️ 播放器进度条与音量条的配色**不能用 --ink / --text**：
+   这两组变量是"页面底色上的前景色"，浅色主题下会变成深色；
+   而播放器底永远是深色视频画面 —— 深色轨道压在深色画面上等于消失
+   （用户实测：浅色模式下音量条只剩下一个看不见的黑点）。所以这里全部固定成白系。 */
 .pv-progress::before {
   content: '';
   position: absolute;
   left: 0; right: 0;
   height: 3px;
   border-radius: 2px;
-  background: rgba(var(--ink), .22);
+  background: rgba(255, 255, 255, .22);
 }
 .pv-buffer, .pv-filled {
   position: absolute;
@@ -810,14 +820,14 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
   height: 3px;
   border-radius: 2px;
 }
-.pv-buffer { background: rgba(var(--ink), .34); }
+.pv-buffer { background: rgba(255, 255, 255, .34); }
 .pv-filled { background: var(--red); }
 .pv-dot {
   position: absolute;
   left: 0;
   width: 11px; height: 11px;
   border-radius: 50%;
-  background: var(--text);
+  background: #fff;
   transform: translateX(-50%) scale(0);
   transition: transform .12s;
 }
@@ -872,7 +882,7 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
   margin-left: 2px;
   opacity: 0;
   border-radius: 2px;
-  background: rgba(var(--ink), .3);
+  background: rgba(255, 255, 255, .3);
   outline: none;
   cursor: pointer;
   -webkit-appearance: none;
@@ -885,7 +895,7 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
   width: 10px; height: 10px;
   border: 0;
   border-radius: 50%;
-  background: var(--text);
+  background: #fff;
   cursor: pointer;
 }
 
@@ -1072,11 +1082,17 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
   bottom: 46px;
   padding: 4px 11px;
   border-radius: 999px;
-  background: rgba(0, 0, 0, .62);
-  color: var(--text-2);
+  /* 它压在视频画面上：去掉模糊后要更实一点，否则视频细节透上来会吃掉字 */
+  background: rgba(0, 0, 0, .86);
+  /* ⚠️ 用固定的浅色，不能用 var(--text-2)：那个变量在浅色主题下是深灰，
+     深灰字压在这条黑胶囊上等于看不见（用户实测截图就是这样）。
+     下一行让它跟随播放器 UI 一起出现/消失，鼠标移开就别挡画面。 */
+  color: rgba(255, 255, 255, .92);
   font-size: 11.5px;
-  backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity .18s;
 }
+.player-box:hover .mute-hint { opacity: 1; }
 .mute-hint[hidden] { display: none; }
 
 
@@ -1556,12 +1572,11 @@ body.theater .chapters-panel { display: none; }
   padding: 0 14px 0 12px;
   border: 1px solid var(--line-2);
   border-radius: 20px;
-  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  background: var(--panel);
   color: var(--text);
   font-size: 13px;
   font-family: inherit;
   cursor: pointer;
-  backdrop-filter: blur(10px);
   box-shadow: 0 6px 22px rgba(0, 0, 0, .45);
   transition: border-color .16s, background .16s, transform .16s;
 }
@@ -1594,8 +1609,7 @@ body.theater .chapters-panel { display: none; }
   max-width: calc(100vw - 40px);
   border: 1px solid var(--line-2);
   border-radius: var(--radius);
-  background: rgba(16, 16, 19, .97);
-  backdrop-filter: blur(14px);
+  background: var(--panel);
   box-shadow: 0 16px 46px rgba(0, 0, 0, .6);
   overflow: hidden;
 }
@@ -3235,3 +3249,519 @@ body.view-multi .col-right { display: none; }
 /* 说明段被清空时不要留出 26px 空白（动态/微博正常状态下现在不带说明，
    只有「还没配置」这类提示才用得上这段）。 */
 .sub:empty { display: none; }
+
+/* ---------------------------------------------------------------- 播放器控件显隐 */
+
+/* 上下两条控件（.pv-top 顶部信息 / .pv-ctrl 底部进度与按钮）平时隐藏，
+   鼠标移到画面上才出现，移开就消失（用户 2026-10-18 要求）。
+   ⚠️ 隐藏时必须同时 pointer-events: none —— 否则那层透明元素会挡住
+      「点画面暂停/播放」。hover 判在 .player-box 上（不是控件自己），
+      所以鼠标一进画面就出现，不会因为要先碰到控件而进不去。
+   ⚠️ 别加「暂停时常显」的例外：用户要的就是移开即消失。 */
+.pv-top,
+.pv-ctrl {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .18s;
+}
+.player-box:hover .pv-top,
+.player-box:hover .pv-ctrl,
+.pv-top:focus-within,
+.pv-ctrl:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ---------------------------------------------------------------- 主题切换过渡 */
+
+/* 用 View Transitions 做「从触点裁切展开」：
+   旧页面快照原地不动，新页面快照按 clip-path 从小放大，**裁切只改变可见区域** ——
+   文字不缩放、两套主题的布局完全一致（这是用户 2026-10-18 明确给的规范）。
+
+   ⚠️ 三件事必须一起做，否则观感全错：
+     1. 关掉浏览器给 root 的默认交叉淡入（`animation: none`），否则会糊成一片灰；
+     2. `mix-blend-mode: normal` —— 默认会让两层发生混合，颜色发脏；
+     3. 明确 old 在下、new 在上（z-index），新的一层才"盖"得住旧的。 */
+::view-transition-group(root),
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-old(root) { z-index: 1; }
+
+/* 「新页面」这一层用 alpha 遮罩而不是 clip-path —— 这样才能有**羽化边缘**：
+   三个偏心椭圆各自从实心渐变到透明（渐变带就是模糊边），并集后轮廓不规则但仍全是弧线。
+   尺寸与位置由 JS 逐帧驱动（见 setThemeAnimated），这里只声明形状与合成方式。
+   ⚠️ mask-composite: add 是并集；给 -webkit- 旧语法兜底，否则 Chrome 会退化成「后一个盖前一个」。 */
+::view-transition-new(root) {
+  z-index: 2;
+  /* 椭圆占比按「遮罩图尺寸的百分比」算，所以必须给足（否则动画结束时铺不满屏）。
+     羽化带留 30% 左右的宽度：从 55% 实心过渡到 88% 全透明，边缘就是一条柔和的色阶。 */
+  mask-image:
+    radial-gradient(ellipse 96% 84% at 50% 50%, #000 0 55%, rgba(0, 0, 0, 0) 88%),
+    radial-gradient(ellipse 82% 98% at 45% 56%, #000 0 52%, rgba(0, 0, 0, 0) 86%),
+    radial-gradient(ellipse 98% 76% at 56% 44%, #000 0 54%, rgba(0, 0, 0, 0) 89%);
+  mask-repeat: no-repeat;
+  mask-composite: add;
+  -webkit-mask-composite: source-over;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 减少动效时不放过渡 —— 直接切主题 */
+  ::view-transition-old(root),
+  ::view-transition-new(root) { animation: none !important; }
+}
+
+/* ---------------------------------------------------------------- 歌单播放图标 */
+
+/* 每行右侧的播放按钮：原来是文字「播放」，改成圆形图标（用户 2026-10-18 要求）。
+   .playing 行（正在播的那首）的按钮反色，一眼能看出「这条是当前」。
+   ⚠️ 别再给它套 .chip：项目里 .chip 只表示筛选条件。 */
+.pl-play {
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.pl-play svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+  margin-left: 2px;          /* 三角形视觉重心偏左，补一点 */
+}
+.pl-play:hover {
+  border-color: var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+}
+tr.playing .pl-play {
+  border-color: var(--red);
+  background: var(--red);
+  color: var(--on-red);
+}
+
+/* 批量栏里的「移动到…」下拉：歌单名长短不一，给个下限，否则被压成一条缝隙 */
+#pl-move-to { min-width: 132px; max-width: 220px; }
+
+/* ---------------------------------------------------------------- 键盘焦点 */
+
+/* 项目里有 15 处 `outline: none`（去掉鼠标点击时的默认虚线），但配套只写了 `:focus`
+   （输入框靠边框变色能看出来，按钮就完全没有提示）。结果：**键盘 Tab 到 77 个按钮上看不出焦点**。
+   这里用 `:focus-visible` 补回来 —— 鼠标点击不出现，键盘操作才出现，不影响观感。
+
+   ⚠️ 用 `:where()` 把优先级压到最低：不覆盖各控件自己的 `:focus` 样式（输入框边框变色等），
+      也压不过 `.lamp:focus-visible` 那种专门定制过的。
+   ⚠️ `color-mix` 跟随主题色（--red），浅色模式下会自动变深，不用另写一套。 */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--red) 72%, transparent);
+  outline-offset: 2px;
+}
+
+/* 补一处遗漏：板块切换的扫光动画在「减少动效」下也应该停（另外 5 处已覆盖）。 */
+@media (prefers-reduced-motion: reduce) {
+  .theme-sweep.on i { animation: none; }
+}
+
+/* ---------------------------------------------------------------- 音乐播放器模式 */
+
+/* 参考网易云那个播放器界面 1:1 复刻：黑胶唱片 + 右侧歌曲信息与歌词 + 底部播放条。
+   ⚠️ 它盖在**视频播放器**上（`.player-box` 内绝对定位），不是替换歌单列表 ——
+      视频仍在后台出声（不能 display:none，否则音频会停），只是被这层挡住。 */
+.mv {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: none;
+  flex-direction: column;
+  /* 半透明 + 高斯模糊：透出下面**正在播放的视频**，像在视频上盖了一层毛玻璃。
+     ⚠️ 这一处是**故意**用玻璃效果的 —— 用户 2026-10-19 明确要求
+     「背景改为半透明的原视频内容」，与之前「全局去磨砂」是两回事。 */
+  background: rgba(20, 22, 25, .52);
+  backdrop-filter: blur(26px) saturate(115%);
+  -webkit-backdrop-filter: blur(26px) saturate(115%);
+  color: #e9eaec;
+  overflow: hidden;
+}
+/* 下方那块信息面板（单集/进度/按钮行）**所有板块都去掉**（用户要求：节省空间）。
+   里面唯一独有的「跳过空白」已收进音乐模式的「更多」菜单；
+   进度条、静音、进入/回到直播在频道页与播放器控制条里本来就有。 */
+.np { display: none; }
+body.music-mode .mv { display: flex; }
+/* 音乐模式下把视频的控件收起来（它们 z-index 只有 3，本来就被盖住，但要防 hover 露出） */
+body.music-mode .pv-top,
+body.music-mode .pv-ctrl,
+body.music-mode .mute-hint { display: none; }
+
+.mv-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;   /* ⌄ 在左、模式标签在右（对齐参考图） */
+  gap: 10px;
+  padding: 8px 16px 0;
+}
+.mv-collapse {
+  width: 30px; height: 30px;
+  border: 0; border-radius: 50%;
+  background: transparent;
+  color: #cfd2d6;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.mv-collapse:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+.mv-head-label { font-size: 12px; color: #8f959c; letter-spacing: .02em; }
+
+.mv-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  /* ⚠️ 必须 stretch（默认）而不是 center：右栏要**撑满**这块高度，
+     歌词才能在自己的容器里滚动。用 center 时右栏高度按内容撑开，
+     35 行歌词会把整栏顶出可视区、顶部歌名被 overflow 裁掉（实测踩到）。 */
+  align-items: stretch;
+  gap: clamp(20px, 4vw, 64px);
+  /* 上内边距收小：参考图里歌名几乎贴着顶部（不是垂直居中） */
+  padding: 0 clamp(18px, 4vw, 56px) 12px;
+}
+
+/* ---------------- 黑胶唱片 ---------------- */
+.mv-disc-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  align-self: center;          /* 主体改成 stretch 后，黑胶自己居中 */
+  width: clamp(180px, 40%, 320px);
+  aspect-ratio: 1;
+}
+.mv-disc {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  /* 黑胶：一圈圈同心暗纹 + 中心略亮 */
+  background:
+    repeating-radial-gradient(circle at 50% 50%,
+      rgba(255, 255, 255, .035) 0 1px, rgba(0, 0, 0, 0) 1px 4px),
+    radial-gradient(circle at 50% 50%, #2a2a2c 0 30%, #141416 62%, #0b0b0d 100%);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(255, 255, 255, .06);
+  display: grid;
+  place-items: center;
+  animation: mvSpin 20s linear infinite;
+  animation-play-state: paused;
+}
+body.mv-playing .mv-disc { animation-play-state: running; }
+@keyframes mvSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .mv-disc { animation: none !important; }
+}
+.mv-art {
+  width: 58%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  overflow: hidden;
+  background: #33363a center/cover no-repeat;
+  display: grid;
+  place-items: center;
+  font-size: 34px;
+  color: #6f757c;
+  box-shadow: 0 0 0 6px rgba(0, 0, 0, .55), 0 0 0 7px rgba(255, 255, 255, .08);
+}
+.mv-art img { width: 100%; height: 100%; object-fit: cover; }
+
+/* 唱臂：一条细白杆 + 末端配重，静止时搭在唱片左侧 */
+.mv-arm {
+  position: absolute;
+  top: -6%;
+  right: -2%;
+  width: 46%;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #d9dce0, #9aa0a6);
+  transform-origin: right center;
+  transform: rotate(38deg);
+  pointer-events: none;
+}
+.mv-arm i {
+  position: absolute;
+  left: -7px; top: -5px;
+  width: 13px; height: 13px;
+  border-radius: 50%;
+  background: #f0f2f4;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .5);
+}
+
+/* ---------------- 右侧信息与歌词 ---------------- */
+.mv-side {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.mv-title {
+  margin: 0 0 6px;
+  font-size: clamp(17px, 2vw, 22px);
+  font-weight: 600;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.mv-sub { color: #9aa0a6; font-size: 12.5px; }
+.mv-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.mv-tags span {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  color: #b9bec4;
+}
+.mv-lyrics {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: clamp(14px, 3vh, 28px);
+  padding-right: 6px;
+  scroll-behavior: smooth;
+  /* 参考图里歌词越靠上越淡，营造"正在唱"的层次 */
+  mask-image: linear-gradient(to bottom, transparent, #000 14%, #000 86%, transparent);
+}
+.mv-lyrics p {
+  margin: 0;
+  padding: 6px 2px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: #7d838a;
+  transition: color .25s, transform .25s;
+}
+.mv-lyrics p.on {
+  color: #f2f4f6;
+  font-weight: 600;
+  transform: scale(1.015);
+  transform-origin: left center;
+}
+.mv-lyrics p.pp-empty {
+  text-align: center;
+  padding-top: 40px;
+  color: #6f757c;
+}
+.mv-lyrics small { display: block; margin-top: 6px; font-size: 11px; opacity: .75; }
+
+/* ---------------- 底部播放条 ---------------- */
+.mv-bar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, .32);
+  border-top: 1px solid rgba(255, 255, 255, .07);
+}
+
+/* 进度条：贴在底部条最上方的一条细线，悬停时手柄才明显 */
+.mv-seek {
+  position: relative;
+  height: 4px;
+  margin: 0 16px;
+  cursor: pointer;
+}
+.mv-seek::before {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, .18);
+}
+.mv-seek-fill {
+  position: absolute;
+  left: 0; top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 2px;
+  background: #dfe3e7;
+  width: 0;
+}
+.mv-seek-dot {
+  position: absolute;
+  top: 50%;
+  width: 9px; height: 9px;
+  margin: -4.5px 0 0 -4.5px;
+  border-radius: 50%;
+  background: #fff;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.mv-seek:hover .mv-seek-dot { opacity: 1; }
+
+.mv-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px 10px;
+}
+.mv-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.mv-volwrap { display: flex; align-items: center; gap: 2px; }
+/* 音量滑块：默认收起，悬停静音键才展开（省空间，与参考图一致） */
+.mv-vol {
+  width: 0;
+  opacity: 0;
+  height: 3px;
+  accent-color: #dfe3e7;
+  transition: width .18s, opacity .18s;
+}
+.mv-volwrap:hover .mv-vol { width: 64px; opacity: 1; }
+
+/* 播放列表抽屉：从右侧滑出，盖住右侧信息区 */
+.mv-queue {
+  position: absolute;
+  top: 0; right: 0; bottom: 56px;
+  width: min(340px, 42%);
+  display: flex;
+  flex-direction: column;
+  background: rgba(28, 30, 34, .96);
+  border-left: 1px solid rgba(255, 255, 255, .08);
+  box-shadow: -18px 0 44px rgba(0, 0, 0, .45);
+  z-index: 2;
+}
+.mv-queue-h {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, .07);
+}
+.mv-queue-h b { font-size: 13px; }
+.mv-queue-h span { font-size: 11.5px; color: #8f959c; margin-left: auto; }
+.mv-queue-body { flex: 1 1 auto; overflow-y: auto; padding: 6px; }
+.mv-q-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #cfd3d8;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.mv-q-item:hover { background: rgba(255, 255, 255, .07); }
+.mv-q-item.on { color: #fff; background: rgba(255, 255, 255, .12); }
+.mv-q-item i {
+  flex: 0 0 16px;
+  font-style: normal;
+  font-size: 11px;
+  color: #7d838a;
+  text-align: right;
+}
+.mv-q-item b {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mv-q-item span { margin-left: auto; flex: 0 0 auto; font-size: 11px; color: #7d838a; }
+
+/* 更多菜单：从右下角弹出 */
+.mv-menu {
+  position: absolute;
+  right: 12px;
+  bottom: 60px;
+  min-width: 168px;
+  padding: 6px;
+  border-radius: 10px;
+  background: rgba(34, 37, 41, .98);
+  border: 1px solid rgba(255, 255, 255, .1);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
+  z-index: 3;
+}
+.mv-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #d5d8dc;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.mv-menu button:hover { background: rgba(255, 255, 255, .09); color: #fff; }
+.mv-bar-art {
+  flex: 0 0 42px;
+  width: 42px; height: 42px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: #33363a center/cover no-repeat;
+}
+.mv-bar-art img { width: 100%; height: 100%; object-fit: cover; }
+.mv-bar-txt { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mv-bar-txt b {
+  font-size: 12.5px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mv-bar-txt span {
+  font-size: 11px; color: #8f959c;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mv-like {
+  flex: 0 0 auto;
+  width: 30px; height: 30px;
+  border: 0; border-radius: 50%;
+  background: transparent;
+  color: #b9bec4;
+  font-size: 15px;
+  cursor: pointer;
+  transition: color .15s, background .15s;
+}
+.mv-like:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+.mv-like[aria-pressed="true"] { color: #ff5b6a; }
+.mv-ctrl { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.mv-btn {
+  width: 32px; height: 32px;
+  border: 0; border-radius: 50%;
+  background: transparent;
+  color: #d5d8dc;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.mv-btn:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+.mv-play {
+  width: 38px; height: 38px;
+  background: rgba(255, 255, 255, .12);
+  font-size: 15px;
+}
+.mv-play:hover { background: rgba(255, 255, 255, .2); }
+
+/* 窄屏：黑胶缩小并堆到上方 */
+@media (max-width: 720px) {
+  .mv-main { flex-direction: column; justify-content: center; gap: 14px; padding: 6px 16px 10px; }
+  .mv-disc-wrap { width: min(52%, 190px); }
+  .mv-lyrics { max-height: 150px; }
+  .mv-head-label { display: none; }
+}
+
+/* 播放器往下沉一点（用户 2026-10-19：去掉下方栏位后视频贴着顶、显得偏上）。
+
+   ⚠️ 不用 `align-self: center`：`.wrap` 的高度是整个页面的高度（歌单页实测 1804px，
+      因为它包住了整张长列表），在 1804px 里居中会把播放器甩到屏幕外。
+      这里要的是**相对视口**下沉 —— 用 12vh 的顶部留白，滚动时位置不变，视觉上落到中间偏上。
+   ⚠️ `.player-box` 的父级是 `aside.col-right`，不是 `.wrap`，选择器别写错。 */
+.wrap > .col-right > .player-box {
+  margin-top: clamp(20px, 12vh, 120px);
+}

@@ -29,9 +29,13 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "发布")
-BUILD = os.path.join(ROOT, "build")
+# 构建缓存目录。⚠️ **每次用一个全新的名字**：这台机器上有安全软件会在文件刚被
+# 创建后独占它，上一次打包留下的 build/ 里每个文件都写不进去（PyInstaller 连自己的
+# .spec 都写不了，报 Permission denied）。换新目录即可绕开。
+# 这些 build_* 目录纯属缓存（不进包、不进版本库），可以随时手动删除。
+BUILD = os.path.join(ROOT, "build_%s" % time.strftime("%Y%m%d_%H%M%S"))
 
-APP_VERSION = "1.0.36"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.0.57"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
@@ -200,18 +204,33 @@ def _stage_data():
     return stage
 
 
+def _write_text(path, text):
+    """写文本到 build 目录。
+
+    ⚠️ 不能直接 open(path, "w")：这台机器上有安全软件**在文件刚被创建后立刻独占它**，
+    同一个路径第二次写就 Permission denied（实测 build/www_version.txt、build/readme.txt
+    都是这样，而换到一个新目录就能正常写）。改名只需要目录权限、不需要目标文件的写权，
+    所以先把旧文件改名挪开、再写新的；挪走的旧文件尽力删除（删不掉留着也无害）。
+    """
+    if os.path.exists(path):
+        try:
+            os.rename(path, "%s.%d.old" % (path, int(time.time() * 1000)))
+        except OSError:
+            pass
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def build_exe():
     """打包成单文件、无控制台窗口的 EXE，网页文件与说明一并内置"""
     os.makedirs(BUILD, exist_ok=True)
 
     # 版本标记：EXE 内一份、释放目录一份，比对决定要不要重新释放
     ver_file = os.path.join(BUILD, "www_version.txt")
-    with open(ver_file, "w", encoding="utf-8") as f:
-        f.write(time.strftime("%Y%m%d%H%M%S"))
+    _write_text(ver_file, time.strftime("%Y%m%d%H%M%S"))
 
     readme_file = os.path.join(BUILD, README_SRC)
-    with open(readme_file, "w", encoding="utf-8") as f:
-        f.write(README)
+    _write_text(readme_file, README)
 
     args = [
         sys.executable, "-m", "PyInstaller",
@@ -219,7 +238,10 @@ def build_exe():
         "--onefile",                    # 单文件：Python 运行时一起打进去
         "--noconsole",                  # 静默：双击后不出现黑窗口
         "--name", PYI_NAME,
-        "--distpath", OUT,
+        # ⚠️ 先输出到构建目录、最后再 os.replace 到 发布/：这台机器上
+        # 安全软件会在 EXE 刚写好后独占它，PyInstaller 的 EndUpdateResourceW
+        # （写图标资源）会失败 20 次后放弃。换到新目录写、再只做 rename，就不会撞。
+        "--distpath", os.path.join(BUILD, "dist"),
         "--workpath", os.path.join(BUILD, "pyi"),
         "--specpath", BUILD,
         # collect.py 是运行时用 importlib 动态加载的，PyInstaller 静态分析看不到，
@@ -274,7 +296,7 @@ def build_exe():
     print("$ " + " ".join(args))
     subprocess.check_call(args, cwd=ROOT)
 
-    src = os.path.join(OUT, PYI_NAME + ".exe")
+    src = os.path.join(BUILD, "dist", PYI_NAME + ".exe")
     dst = os.path.join(OUT, FINAL_NAME)
     # 直接覆盖，不产生需要删除的中间文件。
     # Windows 上刚写出来的 EXE 会被 Defender / 索引器短暂占用，rename 会报 WinError 5，

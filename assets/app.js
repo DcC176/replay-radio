@@ -569,6 +569,75 @@
     syncThemeUI();
   }
 
+  /* ---------------------------------------------------------- 主题切换：从触点裁切展开
+
+     用户给的规范是：**按钮位置就是扩散圆心 / 两套主题保持相同布局 / 裁切改变可见区域，文字不缩放**。
+     这三条只有「对新旧两版**页面快照**做 clip-path」才同时满足 —— 也就是 View Transitions：
+     旧快照原地不动，新快照从触点按不规则形状放大，露出多少看到多少，**文字不缩放、不拉伸**。
+
+     ⚠️ 别再用「盖一层纯色」那种做法（v1.0.39 就是那么做的）：颜色漫过去时下面的文字还是旧的，
+     看起来像色块扫过，而不是新主题铺开 —— 用户直接指认「效果完全错误」。
+     ⚠️ 无 startViewTransition（< Chrome 111）时**直接切**，不做任何假动画。 */
+  var WIPE_MS = 620;
+
+  /* 「不规则弧形 + 边缘羽化」的几何参数。
+
+     ⚠️ 为什么不再用 clip-path：clip-path 是**硬边** —— 边缘一刀切，做不到「模糊处理」。
+     要让边缘柔和，只能用 **alpha 遮罩（mask）**：每个 radial-gradient 从实心渐变到透明，
+     那条渐变带本身就是羽化，等于视觉上的高斯模糊边缘。
+
+     ⚠️ 为什么是三个偏心椭圆取并集：单个 radial-gradient 只能画出**规则椭圆**，
+     而用户要「不规则弧形、不要多边形」。三个长短轴不同、圆心各偏 3%~7% 的椭圆叠起来
+     （mask-composite: add），轮廓就没有对称感了，但仍全是弧线。
+     圆心偏移按**比例**算，所以放大到全屏时形状不变、只是尺度变化，过渡不会「扭」。 */
+  var MASK_SPEC = [
+    /* [中心x比例, 中心y比例, 横轴, 纵轴, 实心到, 全透明于] */
+    [0.50, 0.50, 0.52, 0.44, 0.52, 0.82],
+    [0.43, 0.57, 0.40, 0.58, 0.48, 0.80],
+    [0.57, 0.43, 0.58, 0.36, 0.50, 0.84]
+  ];
+
+  function maskSizes(sz) {
+    return MASK_SPEC.map(function () { return sz + 'px ' + sz + 'px'; }).join(', ');
+  }
+
+  /* 每个椭圆的圆心要落在「触点 + 比例偏移」上 → 位置随尺寸一起变，所以两端都要算 */
+  function maskPositions(x, y, sz) {
+    return MASK_SPEC.map(function (m) {
+      var cx = x + (m[0] - 0.5) * sz, cy = y + (m[1] - 0.5) * sz;
+      return (cx - m[2] * sz) + 'px ' + (cy - m[3] * sz) + 'px';
+    }).join(', ');
+  }
+
+  function setThemeAnimated(light, ev) {
+    if (isLightTheme() === !!light) return;
+    if (typeof document.startViewTransition !== 'function') {
+      setTheme(light);                    // 老浏览器：直接切，别放半截动画
+      return;
+    }
+    var x = (ev && ev.clientX) || window.innerWidth * 0.86;
+    var y = (ev && ev.clientY) || window.innerHeight * 0.12;
+    var W = window.innerWidth, H = window.innerHeight;
+    var far = Math.hypot(Math.max(x, W - x), Math.max(y, H - y)) * 1.25;
+
+    var vt = document.startViewTransition(function () { setTheme(light); });
+    vt.ready.then(function () {
+      /* 只动「新页面」这一层：三个椭圆一起从极小放大到盖满全屏。
+         尺寸与位置必须**同时**给两端 —— 圆心是按比例随尺寸走的，只给尺寸会漂。 */
+      /* s1 要够大：椭圆只占遮罩图的 ~96%，而遮罩图是 s1×s1，
+         所以半径约 0.48×s1，要 ≥ far 才不会在结尾露边。乘 2.6 留余量。 */
+      var s0 = 34, s1 = Math.round(far * 2.6);
+      document.documentElement.animate(
+        {
+          maskSize: [maskSizes(s0), maskSizes(s1)],
+          maskPosition: [maskPositions(x, y, s0), maskPositions(x, y, s1)]
+        },
+        { duration: WIPE_MS, easing: 'cubic-bezier(.42, .05, .28, 1)',
+          pseudoElement: '::view-transition-new(root)' }
+      );
+    }).catch(function () { /* 过渡被打断就保持已切换的状态，不影响结果 */ });
+  }
+
   function syncThemeUI() {
     var box = document.getElementById('theme-light');
     if (box) box.checked = isLightTheme();
@@ -606,16 +675,78 @@
     });
   }
 
+  /* 标签的「共享布局」过渡（参考图 10）：点任意 .chip 后，其余标签要**平滑**挪到新位置。
+
+     ⚠️ 为什么要 FLIP：flex 里某个 chip 变宽，后面的项是**瞬时**跳到新位置的 ——
+     CSS transition 管不到「布局重排导致的位置变化」。只能先记旧位置、改完再量新位置，
+     用 translateX 反向位移再回 0，才有「邻项跟着滑过去」的观感。
+
+     ⚠️ 为什么按**文本**匹配而不是元素引用：歌单筛选的 chips 是 `renderPlFilters()` 整个重建的，
+     点击后旧元素已经脱离文档、旧引用失效。文本在同一组里唯一，重建后仍能对上。
+
+     ⚠️ 用捕获阶段的全局监听：4 处 chips 各自的点击逻辑不用改，一处覆盖全部。 */
+  function bindChipFlip() {
+    document.addEventListener('click', function (e) {
+      var chip = e.target && e.target.closest ? e.target.closest('.chip') : null;
+      if (!chip || !chip.parentNode) return;
+      var box = chip.parentNode;
+      var items = Array.prototype.slice.call(box.querySelectorAll('.chip'));
+      if (items.length < 2) return;
+      var before = {};
+      items.forEach(function (el) {
+        var k = (el.textContent || '').trim();
+        if (k) before[k] = el.getBoundingClientRect().left;
+      });
+      // 等这一轮点击处理（切 active / 重建列表）跑完，再量新位置
+      requestAnimationFrame(function () {
+        var kids = Array.prototype.slice.call(box.querySelectorAll('.chip'));
+        kids.forEach(function (el) {
+          var k = (el.textContent || '').trim();
+          var old = before[k];
+          if (old == null) return;
+          var dx = old - el.getBoundingClientRect().left;
+          if (!dx || Math.abs(dx) < 0.5) return;
+          el.style.transition = 'none';
+          el.style.transform = 'translateX(' + dx + 'px)';
+          void el.offsetWidth;                       // 强制 reflow，否则起始值不生效
+          el.style.transition = 'transform .3s cubic-bezier(.4, 0, .2, 1)';
+          el.style.transform = '';
+        });
+      });
+    }, true);
+  }
+
   function bindThemeToggle() {
     var btn = document.getElementById('theme-toggle');
     if (btn) {
-      btn.addEventListener('click', function () { setTheme(!isLightTheme()); });
+      btn.addEventListener('click', function (ev) { setThemeAnimated(!isLightTheme(), ev); });
     }
     var box = document.getElementById('theme-light');
     if (box) {
-      box.addEventListener('change', function () { setTheme(box.checked); });
+      box.addEventListener('change', function () {
+        var r = box.getBoundingClientRect();
+        setThemeAnimated(box.checked, { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
+      });
     }
     syncThemeUI();
+  }
+
+  /* 色块上的字该用黑还是白：按 WCAG 相对亮度算，0.45 为分界。
+
+     ⚠️ 原来 style.css 里把 --on-red 写死成 #ffffff，前提是「主播色总是深红」。
+     但主播色来自各板块的 accent，可能是**浅黄绿**这类亮色 —— 白字压上去对比度只有 1.6:1，
+     实测几乎看不见（用户截图里的「全部」「chip」就是这样）。
+     所以改成按实际色值算：亮底用近黑字，暗底用白字。 */
+  function onColorFor(hex) {
+    var m = /^#([0-9a-f]{6})$/i.exec(String(hex || ''));
+    if (!m) return '#ffffff';
+    var n = parseInt(m[1], 16);
+    var lin = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(function (v) {
+      v /= 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    });
+    var L = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+    return L > 0.45 ? '#101013' : '#ffffff';
   }
 
   function applyTheme(accent, from) {
@@ -625,6 +756,7 @@
     if (light) hex = darkenForLight(hex);
     var rs = document.documentElement.style;
     rs.setProperty('--red', hex);
+    rs.setProperty('--on-red', onColorFor(hex));   // 色块上的字色跟着底色亮度走（见 onColorFor）
     rs.setProperty('--red-soft', hex + '24');      // 14% 左右，和原来的观感一致
     // 底色与卡片底色：**只有副站上色**。主站移除内联值，回到 style.css 里的原色
     // （黑红或浅色，取决于当前模式 —— 用户要求主站配色跟着模式走，不额外染色）。
@@ -919,9 +1051,10 @@
     state.drift = 0;
     state.segIndex = -1;
     state.playingKey = null;
-    // 直播间页正占着播放器放直播流，回放不能来抢（boot 完成时的这次调用尤其关键，
-    // 否则刚接上去的直播流会被回放覆盖）。离开时 resumeReplay() 会重新拉起回放。
-    if (state.view === 'broadcast') return;
+    // 直播间 / 监控室正占着播放器（或自己拉多路），回放不能来抢
+    // （boot 完成时的这次调用尤其关键，否则刚接上去的流会被回放覆盖）。
+    // 离开时 resumeReplay() 会重新拉起回放。
+    if (state.view === 'broadcast' || state.view === 'multi') return;
     if (state.cycle.total > 0) applyPlayer(true);
     else renderIdle();
   }
@@ -1230,12 +1363,12 @@
   }
 
   function applyPlayer(force) {
-    // 直播间页只放实时直播：回放引擎在此时一律不许碰播放器。
+    // 直播间 / 监控室都不放回放：前者用同一个 <video> 放直播流，后者自己拉 4 路。
     // 这里是唯一的咽喉 —— 扫码登录成功、切回标签页（visibilitychange）、
     // 播放出错后的重试定时器、退出登录、点列表换歌，都会绕到这儿来，
-    // 不在这里拦，直播间就会被换成回放画面。离开直播间时 resumeReplay()
-    // 是在 state.view 已经切走之后调用的，所以正常恢复不受影响。
-    if (state.view === 'broadcast') return;
+    // 不在这里拦，这两个页就会被换成回放画面、声音还会叠在一起。
+    // 离开时 resumeReplay() 是在 state.view 已经切走之后调用的，所以正常恢复不受影响。
+    if (state.view === 'broadcast' || state.view === 'multi') return;
     if (!state.cycle || !state.cycle.segments.length) return;
 
     var pos = cyclePos();
@@ -1681,6 +1814,10 @@
     // 先把回放彻底摘掉：留着 src 会停在回放的最后一帧上，看起来就像「直播间在放回放」
     destroyDash();
     destroyLive();
+    // 兜底：进了直播间就不该再有回放在响。正常路径下上面两步已经把播放器停掉
+    // （实测 paused=true、currentTime 归零），这条是防御性的 —— 万一以后新增了
+    // 别的播放入口忘了停，也不会出现「直播间里还在放录播」。
+    el.player.pause();
     el.banner.hidden = true;
     loadLiveInfo();
     refreshLiveCred();
@@ -3057,14 +3194,21 @@
     }
 
     // 监控室：切进来时才接流（不在首页就连 4 路，省带宽也省对面服务器）
-    if (name === 'multi') { bindMulti(); renderMulti(); }
+    if (name === 'multi') { pauseReplayForMulti(); bindMulti(); renderMulti(); }
     // 离开监控室必须销毁：这几路是持续拉流的直播，不销毁就会在后台一直跑，
     // 反复进出还会累积孤儿连接（重连定时器也一并清掉）。
-    if (prev === 'multi' && name !== 'multi') multiTeardown();
+    if (prev === 'multi' && name !== 'multi') {
+      multiTeardown();
+      // 进监控室时把回放停掉了，离开时接回去（与离开直播间走同一条路）。
+      // 直接去直播间时不用接 —— 那边会自己销毁并接直播流。
+      if (name !== 'broadcast') resumeReplay();
+    }
     // 动态 / 微博：切进来时才取（都是外部服务，没必要在首页就拉）
     if (name === 'dynamic') { bindDynamic(); renderDynamic(); }
     if (name === 'weibo') { bindWeibo(); renderWeibo(); }
     if (name === 'playlist') { bindPlaylist(); plAutoStart(); }
+    /* 音乐模式只在歌单页生效：切走要收起、切回要恢复（见 plSyncView） */
+    if (name === 'playlist' || prev === 'playlist') plSyncView();
 
     // 离开歌单页：把频道的时间轴换回来 —— 播放器只有一个，歌单是「临时借走」的
     if (prev === 'playlist' && name !== 'playlist' && state.playlistCycle) {
@@ -4425,7 +4569,7 @@
 
   function tick() {
     if (!state.cycle || !state.cycle.segments.length) return;
-    if (state.view === 'broadcast') return;   // 直播流占着播放器，回放的换段逻辑别来抢
+    if (state.view === 'broadcast' || state.view === 'multi') return;   // 直播/监控室占着播放器，回放的换段逻辑别来抢
     if (state.loading) {
       // 取流/定位期间不做换段判断。但**不能无限等**：dash 与 mp4 各自的兜底
       // 最长 15 秒，真遇上回调没回来，卡住的不只是换段 —— 用户再点同一期
@@ -4802,6 +4946,7 @@
   function init() {
     pageSetup();
     bindThemeToggle();           // 顶栏那颗按钮在两种模式下都要能用（含空态引导页）
+    bindChipFlip();              // 标签切换的「共享布局」过渡（全局捕获，只需绑一次）
     fetchStations().then(function (list) {
       var picked = false;
       try { picked = sessionStorage.getItem(PICK_KEY) === '1'; } catch (e) { /* 隐私模式 */ }
@@ -5513,6 +5658,21 @@
      只清播放器不清定时器的话，回调会在**已经离开监控室**之后照样跑，
      在已弃用的 <video> 上再接一路流 —— 反复进出就会累积孤儿连接。 */
   var multiTimers = [];
+
+  /* 进监控室前把回放彻底摘掉。
+     ⚠️ 监控室自己就要拉 4 路直播流，回放在后台继续解码的话会同时听到两路声音、
+     还白占带宽（用户 2026-10-18 反馈「从 24 小时频道跳到监控室，后台还在放录播」）。
+     这里可以放心 removeAttribute('src') + load()：监控室用的是 #multi-grid 里
+     另一批 <video>，完全不碰 el.player，所以不存在 dash 抢元素的问题。
+     返回时由 setView 调 resumeReplay() 重新拉起。 */
+  function pauseReplayForMulti() {
+    destroyDash();
+    try {
+      el.player.pause();
+      el.player.removeAttribute('src');
+      el.player.load();
+    } catch (e) { /* 元素还没就绪，忽略 */ }
+  }
 
   function multiTeardown() {
     multiTimers.forEach(function (t) { clearTimeout(t); });
@@ -6302,7 +6462,8 @@
 
   var PL = {
     lists: [], curId: store.get('xl_pl', '') || '', data: null,
-    filter: { lang: {}, style: {}, artist: {} }, picked: {}
+    filter: { lang: {}, style: {}, artist: {} }, picked: {},
+    view: store.get('xl_pl_view', 'list') === 'player' ? 'player' : 'list'
   };
 
   var PL_AXES = [['lang', '语言'], ['style', '风格'], ['artist', '演唱者']];
@@ -6371,12 +6532,21 @@
       }).join('');
       sel.disabled = !PL.lists.length;
     }
-    ['pl-rename', 'pl-delete', 'pl-playall'].forEach(function (id) {
+    var mv = document.getElementById('pl-move-to');
+    if (mv) {
+      mv.innerHTML = '<option value="">移动到…</option>'
+        + PL.lists.filter(function (x) { return x.id !== PL.curId; })
+            .map(function (x) {
+              return '<option value="' + esc(x.id) + '">' + esc(x.name) + '</option>';
+            }).join('');
+    }
+    ['pl-rename', 'pl-delete', 'pl-playall', 'pl-new'].forEach(function (id) {
       var b = document.getElementById(id);
       if (b) b.disabled = !PL.data;
     });
     renderPlFilters();
     renderPlRows();
+    plSyncView();
   }
 
   function renderPlFilters() {
@@ -6410,6 +6580,359 @@
     if (!state.playlistCycle || !state.cycle || state.segIndex < 0) return '';
     var seg = state.cycle.segments[state.segIndex];
     return seg ? (seg.key || '') : '';
+  }
+
+  /* ---------------------------------------------------------- 歌单·播放器模式
+
+     参考网易云那种布局：封面 + 歌名/歌手 + 歌词 + 控制。
+     歌词按**歌名**去 lrclib.net 查（`/api/lyrics` 在服务端代取，绕开 CORS）。
+     红心写在歌单条目上（跟歌单一起存后端），不是 localStorage —— 换版本/换浏览器都还在。 */
+  var ppState = { shownKey: '', lines: [] };
+  /* 循环模式：order = 顺序（播完下一首）、one = 单曲、random = 随机下一首。
+     存在 localStorage，下次进来沿用。 */
+  var LOOP_KEY = 'xl_pl_loop';
+  var plLoop = store.get(LOOP_KEY, 'order');
+  if (['order', 'one', 'random'].indexOf(plLoop) < 0) plLoop = 'order';
+
+  function plViewIsPlayer() { return PL.view === 'player'; }
+
+  function plSyncView() {
+    // ⚠️ 音乐模式盖的是**右侧视频播放器**，不是歌单列表；且只在歌单页生效 ——
+    //    切到别的板块要回到视频画面，否则整个播放器都被挡住。
+    var on = plViewIsPlayer() && state.view === 'playlist';
+    document.body.classList.toggle('music-mode', on);
+    var btn = document.getElementById('pl-view');
+    if (btn) btn.textContent = plViewIsPlayer() ? '列表模式' : '播放器模式';
+    if (on) ppState.shownKey = '';                   // 强制下一次 tick 重渲染
+    plLyricsTick();
+  }
+
+  function plSetView(v) {
+    PL.view = v === 'player' ? 'player' : 'list';
+    try { store.set('xl_pl_view', PL.view); } catch (e) { /* 隐私模式 */ }
+    plSyncView();
+  }
+
+  function plToggleView() { plSetView(plViewIsPlayer() ? 'list' : 'player'); }
+
+  /* 当前正在播的那首；没在放歌单时退回列表第一首（播放器视图总有东西可显示） */
+  function plCurrentItem() {
+    var items = plFiltered().filter(function (it) { return (it.dur || 0) > 0 && it.cid; });
+    if (!items.length) return null;
+    var key = plNowKey();
+    for (var i = 0; i < items.length; i++) {
+      if (plKeyOf(items[i]) === key) return items[i];
+    }
+    return items[0];
+  }
+
+  /* 这首已经播了多少秒 —— 用来高亮歌词。歌单模式下 cycle 就是这张表本身。 */
+  function plElapsed() {
+    if (!state.playlistCycle || !state.cycle || state.segIndex < 0) return 0;
+    var seg = state.cycle.segments[state.segIndex];
+    if (!seg) return 0;
+    return Math.max(0, cyclePos() - seg.start);
+  }
+
+  function plRenderPlayer() {
+    var it = plCurrentItem();
+    var box = document.getElementById('pl-player');
+    if (!box) return;
+    var cover = document.getElementById('pp-cover');
+    var title = document.getElementById('pp-title');
+    var sub = document.getElementById('pp-sub');
+    var tags = document.getElementById('pp-tags');
+    if (!it) {
+      if (title) title.textContent = '还没有可播放的歌';
+      if (sub) sub.textContent = '';
+      if (tags) tags.innerHTML = '';
+      if (cover) cover.textContent = '♪';
+      return;
+    }
+    if (title) title.textContent = it.song || it.title || '（未命名）';
+    if (sub) {
+      sub.textContent = (it.artist || '未识别')
+        + (it.dur ? '  ·  ' + fmtClock(it.dur) : '')
+        + (it.views ? '  ·  ' + it.views + ' 播放' : '');
+    }
+    if (tags) {
+      tags.innerHTML = [it.lang, it.style].filter(Boolean).map(function (x) {
+        return '<span>' + esc(x) + '</span>';
+      }).join('');
+    }
+    // 封面：歌单条目本身没有图，用主播头像兜底；没有就放个音符
+    var face = (findStation(ST) || {}).face;       // ST 是当前选中的主播 id
+    var art = face ? '<img src="' + esc(dynImg(face)) + '" alt="">' : '♪';
+    if (cover) cover.innerHTML = art;
+    var barArt = document.getElementById('pp-bar-art');
+    if (barArt) barArt.innerHTML = face ? '<img src="' + esc(dynImg(face)) + '" alt="">' : '';
+    var bt = document.getElementById('pp-bar-title');
+    if (bt) bt.textContent = it.song || it.title || '（未命名）';
+    var bs = document.getElementById('pp-bar-sub');
+    if (bs) bs.textContent = it.artist || '未识别';
+    plSyncLike(it);
+  }
+
+  function plSyncLike(it) {
+    var b = document.getElementById('pp-like');
+    if (!b) return;
+    var on = !!(it && it.liked);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    var h = b.querySelector('.pp-heart');
+    var t = b.querySelector('.pp-like-t');
+    if (h) h.textContent = on ? '♥' : '♡';
+    if (t) t.textContent = on ? '已喜欢' : '喜欢';
+  }
+
+  function plToggleLike() {
+    var it = plCurrentItem();
+    if (!it || !PL.curId) return;
+    var on = !it.liked;
+    postJSON('/api/playlist/like', { id: PL.curId, key: plKeyOf(it), on: on })
+      .then(function (d) {
+        if (!d || d.error) { plNote((d && d.error) || '红心保存失败'); return; }
+        it.liked = on;                 // 本地同步，省一次拉取
+        plSyncLike(it);
+      });
+  }
+
+  function plLoadLyrics(it) {
+    var box = document.getElementById('pp-lyrics');
+    if (!box) return;
+    box.innerHTML = '<p class="pp-empty">载入歌词…</p>';
+    var q = encodeURIComponent(it.song || it.title || '');
+    var a = encodeURIComponent(it.artist || '');
+    var want = plKeyOf(it);
+    fetch('/api/lyrics?q=' + q + '&artist=' + a)
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (ppState.shownKey !== want) return;         // 期间换歌了，丢弃
+        var lines = (d && d.lines) || [];
+        if (!lines.length) {
+          ppState.lines = [];
+          box.innerHTML = (d && d.error)
+            ? '<p class="pp-empty">歌词查不到<br><small>' + esc(String(d.error).slice(0, 90)) + '</small></p>'
+            : '<p class="pp-empty">暂无歌词</p>';
+          return;
+        }
+        ppState.lines = lines;
+        box.innerHTML = lines.map(function (ln) {
+          return '<p>' + esc(ln.text || '　') + '</p>';
+        }).join('');
+        box.scrollTop = 0;
+        plLyricsTick();
+      })
+      .catch(function (err) {
+        if (ppState.shownKey !== want) return;
+        // 先问一下后端支不支持歌词：旧版本没有 /api/lyrics，会返回 HTML 404，
+        // 前端看起来就像"歌词坏了"。把这两种情况分开提示，用户才知道该做什么。
+        fetch('/api/ping').then(function (r) { return r.json(); }).then(function (p) {
+          if (p && p.lyrics) {
+            box.innerHTML = '<p class="pp-empty">歌词加载失败<br><small>'
+              + esc(String((err && err.message) || err || '').slice(0, 80)) + '</small></p>';
+          } else {
+            box.innerHTML = '<p class="pp-empty">歌词需要较新的版本<br><small>'
+              + '当前运行的后端是旧版（没有歌词接口）。请完全退出本程序后重新打开新版。</small></p>';
+          }
+        }).catch(function () {
+          box.innerHTML = '<p class="pp-empty">歌词加载失败<br><small>'
+            + esc(String((err && err.message) || err || '').slice(0, 80)) + '</small></p>';
+        });
+      });
+  }
+
+  /* 300ms 一次：换歌就重渲染 + 拉歌词；否则只把当前行高亮并滚到中间。
+     ⚠️ 不做 rAF —— 歌词按秒对齐，300ms 足够，且不会和播放器的渲染抢帧。 */
+  function plLyricsTick() {
+    if (!plViewIsPlayer()) return;
+    var it = plCurrentItem();
+    var box = document.getElementById('pp-lyrics');
+    plSyncBar();
+    var playing = !!(el.player && !el.player.paused);
+    // 黑胶只在真播放时转（暂停就停住）—— 这是"唱片机"的直觉反馈
+    document.body.classList.toggle('mv-playing', playing);
+    var tg = document.getElementById('pp-toggle');
+    if (tg) tg.textContent = playing ? '⏸' : '▶';
+    if (!it) return;
+    var k = plKeyOf(it);
+    if (k !== ppState.shownKey) {
+      ppState.shownKey = k;
+      ppState.lines = [];
+      plRenderPlayer();
+      plLoadLyrics(it);
+      return;
+    }
+    var lines = ppState.lines || [];
+    if (!box || !lines.length) return;
+    var t = plElapsed();
+    var idx = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].t != null && lines[i].t <= t) idx = i;
+    }
+    var kids = box.children;
+    for (var j = 0; j < kids.length; j++) {
+      kids[j].classList.toggle('on', j === idx);
+    }
+    if (idx >= 0 && kids[idx]) {
+      var e = kids[idx];
+      box.scrollTop = e.offsetTop - box.clientHeight / 2 + e.offsetHeight / 2;
+    }
+  }
+
+  /* 上一首 / 下一首：在当前筛选结果里按顺序走（到头不循环，避免误触后突然跳回） */
+  function plStep(delta) {
+    var items = plFiltered().filter(function (it) { return (it.dur || 0) > 0 && it.cid; });
+    if (!items.length) return;
+    var key = plNowKey(), idx = 0;
+    for (var i = 0; i < items.length; i++) if (plKeyOf(items[i]) === key) { idx = i; break; }
+    var next = idx + delta;
+    if (next < 0 || next >= items.length) { plNote(delta < 0 ? '已经是第一首' : '已经是最后一首'); return; }
+    plPlay(plKeyOf(items[next]));
+  }
+
+  function plTogglePlay() {
+    if (!el.player) return;
+    if (el.player.paused) el.player.play().catch(function () {});
+    else el.player.pause();
+  }
+
+  /* ---------------- 底部条：进度 / 音量 / 循环 / 播放列表 / 更多 ---------------- */
+
+  /** 当前这首的总时长与已播秒数（用于进度条与歌词）。 */
+  function plProgress() {
+    if (!state.cycle || state.segIndex < 0) return { t: 0, dur: 0 };
+    var seg = state.cycle.segments[state.segIndex];
+    if (!seg) return { t: 0, dur: 0 };
+    return { t: Math.max(0, cyclePos() - seg.start), dur: seg.duration || 0 };
+  }
+
+  function plSyncBar() {
+    var p = plProgress();
+    var fill = document.getElementById('mv-seek-fill');
+    var dot = document.getElementById('mv-seek-dot');
+    var pct = p.dur ? Math.min(100, p.t / p.dur * 100) : 0;
+    if (fill) fill.style.width = pct + '%';
+    if (dot) dot.style.left = pct + '%';
+
+    var vol = document.getElementById('mv-vol');
+    if (vol && el.player && document.activeElement !== vol) vol.value = el.player.muted ? 0 : el.player.volume;
+    var mb = document.getElementById('mv-mute');
+    if (mb) mb.textContent = (el.player && (el.player.muted || el.player.volume === 0)) ? '🔇' : '♪';
+
+    var lb = document.getElementById('mv-loop');
+    if (lb) {
+      lb.textContent = plLoop === 'one' ? '🔂' : (plLoop === 'random' ? '🔀' : '⟳');
+      lb.title = plLoop === 'one' ? '单曲循环' : (plLoop === 'random' ? '随机播放' : '顺序播放');
+    }
+    var ss = document.getElementById('mv-skip-state');
+    if (ss && el.btnSkip) ss.textContent = el.btnSkip.textContent.indexOf('开') >= 0 ? '开' : '关';
+    var ms = document.getElementById('mv-mutedef-state');
+    if (ms && el.btnMutedef) ms.textContent = el.btnMutedef.textContent.indexOf('开') >= 0 ? '开' : '关';
+  }
+
+  /* 拖进度 = 改 state.drift（引擎的定位量），不是直接 seek 视频 ——
+     回放引擎每帧用 (now-epoch+drift) mod total 算位置，直接改 currentTime 会被立刻打回。 */
+  function plSeekTo(ratio) {
+    var p = plProgress();
+    if (!p.dur) return;
+    var want = Math.max(0, Math.min(0.999, ratio)) * p.dur;
+    state.drift += want - p.t;
+    tick();
+    plSyncBar();
+  }
+
+  function plSyncQueue() {
+    var body = document.getElementById('mv-queue-body');
+    var n = document.getElementById('mv-queue-n');
+    if (!body) return;
+    var items = plFiltered().filter(function (it) { return (it.dur || 0) > 0 && it.cid; });
+    if (n) n.textContent = items.length + ' 首';
+    var cur = plNowKey();
+    body.innerHTML = items.map(function (it, i) {
+      var k = plKeyOf(it);
+      return '<button class="mv-q-item' + (k === cur ? ' on' : '') + '" data-key="' + esc(k) + '" type="button">'
+        + '<i>' + (i + 1) + '</i><b>' + esc(it.song || it.title || '') + '</b>'
+        + '<span>' + fmtClock(it.dur || 0) + '</span></button>';
+    }).join('');
+  }
+
+  function bindMvBar() {
+    var seek = document.getElementById('mv-seek');
+    if (seek) {
+      var dragging = false;
+      function at(ev) {
+        var r = seek.getBoundingClientRect();
+        return (ev.clientX - r.left) / Math.max(1, r.width);
+      }
+      seek.addEventListener('pointerdown', function (ev) {
+        dragging = true;
+        try { seek.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ }
+        plSeekTo(at(ev));
+      });
+      seek.addEventListener('pointermove', function (ev) { if (dragging) plSeekTo(at(ev)); });
+      seek.addEventListener('pointerup', function () { dragging = false; });
+    }
+
+    var loop = document.getElementById('mv-loop');
+    if (loop) loop.addEventListener('click', function () {
+      var seq = ['order', 'one', 'random'];
+      plLoop = seq[(seq.indexOf(plLoop) + 1) % seq.length];
+      try { store.set(LOOP_KEY, plLoop); } catch (e) { /* 隐私模式 */ }
+      plSyncBar();
+    });
+
+    var vol = document.getElementById('mv-vol');
+    if (vol) vol.addEventListener('input', function () {
+      if (!el.player) return;
+      el.player.volume = Number(vol.value);
+      el.player.muted = Number(vol.value) === 0;
+    });
+    var mute = document.getElementById('mv-mute');
+    if (mute) mute.addEventListener('click', function () {
+      if (!el.player) return;
+      el.player.muted = !el.player.muted;
+      if (!el.player.muted && el.player.volume === 0) el.player.volume = 1;
+      plSyncBar();
+    });
+
+    var qb = document.getElementById('mv-queue-btn');
+    if (qb) qb.addEventListener('click', function () {
+      var q = document.getElementById('mv-queue');
+      if (!q) return;
+      q.hidden = !q.hidden;
+      if (!q.hidden) plSyncQueue();
+    });
+    var qc = document.getElementById('mv-queue-close');
+    if (qc) qc.addEventListener('click', function () {
+      var q = document.getElementById('mv-queue');
+      if (q) q.hidden = true;
+    });
+    var body = document.getElementById('mv-queue-body');
+    if (body) body.addEventListener('click', function (ev) {
+      var b = ev.target.closest && ev.target.closest('.mv-q-item');
+      if (!b) return;
+      plPlay(b.getAttribute('data-key'));
+      plSyncQueue();
+    });
+
+    var more = document.getElementById('mv-more');
+    if (more) more.addEventListener('click', function () {
+      var m = document.getElementById('mv-more-menu');
+      if (m) m.hidden = !m.hidden;
+    });
+    var menu = document.getElementById('mv-more-menu');
+    if (menu) menu.addEventListener('click', function (ev) {
+      var b = ev.target.closest && ev.target.closest('button[data-mv]');
+      if (!b) return;
+      var what = b.getAttribute('data-mv');
+      menu.hidden = true;
+      // 这些功能原本在下方的 .np 栏位里；栏位已隐藏，但元素还在，直接转调它们
+      var target = what === 'live' ? '#view-live [data-action="resync"]'
+                 : what === 'skip' ? '#btn-skip'
+                 : '#btn-mutedef';
+      var node = document.querySelector(target);
+      if (node) { node.click(); setTimeout(plSyncBar, 60); }
+    });
   }
 
   function renderPlRows() {
@@ -6447,8 +6970,10 @@
         + '<td class="pl-lang">' + esc(it.lang || '—') + '</td>'
         + '<td class="pl-style">' + esc(it.style || '未分类') + '</td>'
         + '<td class="col-dur">' + fmtClock(it.dur) + '</td>'
-        + '<td class="col-act"><button class="chip pl-play" data-key="'
-        + esc(k) + '" type="button">播放</button></td></tr>';
+        + '<td class="col-act"><button class="pl-play" data-key="'
+        + esc(k) + '" type="button" title="播放这首" aria-label="播放">'
+        + '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.6v12.8L19.4 12z"/></svg>'
+        + '</button></td></tr>';
     }).join('');
     plSyncPick();
   }
@@ -6467,8 +6992,10 @@
 
   /* 放进播放引擎：把 items 铺成时间轴，并把「当前位置」瞄到第 idx 首的开头。
      `key` 是条目唯一键（见 plKeyOf）；空串 = 从头放。 */
-  function plPlay(key) {
-    var items = plFiltered().filter(function (it) { return (it.dur || 0) > 0 && it.cid; });
+  /* preItems：已经排好序的条目（随机播放会把洗好的数组传进来）。
+     不传就按当前筛选的列表顺序。 */
+  function plPlay(key, preItems) {
+    var items = (preItems || plFiltered()).filter(function (it) { return (it.dur || 0) > 0 && it.cid; });
     if (!items.length) { plNote('当前筛选下没有可播放的歌'); return; }
     var idx = 0;
     if (key) {
@@ -6515,10 +7042,20 @@
      而实际媒体往往短一点（实测 306.7 秒）—— 播放位置永远差那 0.3 秒够不到段边界，
      表现就是「一首放完卡在结尾不动」。所以用媒体自己的 ended 事件来推进。 */
   function plAdvance() {
-    if (!state.playlistCycle || state.view === 'broadcast') return;
+    if (!state.playlistCycle || state.view === 'broadcast' || state.view === 'multi') return;
     if (!state.cycle || !state.cycle.segments.length) return;
+    var segs = state.cycle.segments;
     var i = state.segIndex >= 0 ? state.segIndex : 0;
-    var seg = state.cycle.segments[(i + 1) % state.cycle.segments.length];
+    var seg;
+    if (plLoop === 'one') {
+      seg = segs[i];                       // 单曲循环：还是这首
+    } else if (plLoop === 'random') {
+      /* 随机：从**除当前这首以外**的里挑，避免连播同一首（只有一首时才回头） */
+      var pool = segs.filter(function (x) { return x.key !== (segs[i] || {}).key; });
+      seg = pool.length ? pool[Math.floor(Math.random() * pool.length)] : segs[i];
+    } else {
+      seg = segs[(i + 1) % segs.length];   // 顺序：播完回头
+    }
     if (seg) plPlay(seg.key);      // ⚠️ 用 key 不用 bvid：同 bvid 多分P 时按 bvid 会回到该期第一首
   }
 
@@ -6538,6 +7075,36 @@
         + (d.truncated ? '，超过上限已截断' : '') + (d.updated ? '，更新了同名歌单' : ''));
       return renderPlaylist();
     }).catch(function () { plNote('导入失败（网络问题）'); });
+  }
+
+  /* 新建一张空歌单。建完自动切过去（此时它是空的，正好往里导入或从别的表移歌）。 */
+  function plNew() {
+    var name = window.prompt('新歌单的名字', '新歌单');
+    if (!name || !name.trim()) return;
+    postJSON('/api/playlist/create', { name: name.trim() }).then(function (d) {
+      if (!d || d.error) { plNote((d && d.error) || '新建失败'); return; }
+      PL.curId = d.id;
+      PL.picked = {};
+      plNote('已新建「' + d.name + '」：可以在这里导入，或回别的歌单勾选后「移动」过来');
+      renderPlaylist();
+    });
+  }
+
+  /* 把已勾选的歌移到另一张歌单。目标里已有的会被后端跳过（不重复加）。 */
+  function plMoveTo() {
+    var keys = Object.keys(PL.picked).filter(function (k) { return PL.picked[k]; });
+    var sel = document.getElementById('pl-move-to');
+    var to = sel && sel.value;
+    if (!keys.length) { plNote('先勾选要移动的歌'); return; }
+    if (!to) { plNote('先选一个目标歌单'); return; }
+    if (to === PL.curId) { plNote('目标就是当前歌单，换一个'); return; }
+    postJSON('/api/playlist/move', { from: PL.curId, to: to, keys: keys }).then(function (d) {
+      if (!d || d.error) { plNote((d && d.error) || '移动失败'); return; }
+      PL.picked = {};
+      plNote('已移动 ' + d.moved + ' 首'
+        + (d.skipped ? '（目标里已有 ' + d.skipped + ' 首，跳过）' : ''));
+      renderPlaylist();
+    });
   }
 
   function plRename() {
@@ -6597,10 +7164,30 @@
     });
     var rn = document.getElementById('pl-rename');
     if (rn) rn.addEventListener('click', plRename);
+    var pnew = document.getElementById('pl-new');
+    if (pnew) pnew.addEventListener('click', plNew);
+    var pmv = document.getElementById('pl-move');
+    if (pmv) pmv.addEventListener('click', plMoveTo);
+    var pv = document.getElementById('pl-view');
+    if (pv) pv.addEventListener('click', plToggleView);
+    var plk = document.getElementById('pp-like');
+    if (plk) plk.addEventListener('click', plToggleLike);
+    var pprev = document.getElementById('pp-prev');
+    if (pprev) pprev.addEventListener('click', function () { plStep(-1); });
+    var pnext = document.getElementById('pp-next');
+    if (pnext) pnext.addEventListener('click', function () { plStep(1); });
+    var ptg = document.getElementById('pp-toggle');
+    if (ptg) ptg.addEventListener('click', plTogglePlay);
+    var mvb = document.getElementById('mv-back');
+    if (mvb) mvb.addEventListener('click', function () { plSetView('list'); });
+    bindMvBar();
+    if (!ppState.timer) ppState.timer = setInterval(plLyricsTick, 300);
     var dl = document.getElementById('pl-delete');
     if (dl) dl.addEventListener('click', plDelete);
     var pa = document.getElementById('pl-playall');
     if (pa) pa.addEventListener('click', function () { plPlay(''); });
+    var ps = document.getElementById('pl-shuffle');
+    if (ps) ps.addEventListener('click', function () { plShuffle(); });
     var ap = document.getElementById('pl-bulk-apply');
     if (ap) ap.addEventListener('click', plApplyTags);
     var ca = document.getElementById('pl-check-all');
@@ -6635,11 +7222,26 @@
       rows.addEventListener('click', function (e) {
         var b = e.target.closest('.pl-play');
         if (b) { plPlay(b.getAttribute('data-key')); return; }
-        if (e.target.closest('.pl-ck')) return;
-        var tr = e.target.closest('tr[data-key]');
-        if (tr) plPlay(tr.getAttribute('data-key'));       // 点整行也能播
+        // 点整行**不再**切歌（用户 2026-10-18 要求）：只有点右侧的播放图标才播。
+        // 之前整行都能点，想勾选/看信息时很容易误触把正在放的歌换掉。
       });
     }
+  }
+
+  /* 随机播放：把当前筛选结果洗一次牌，再从洗好的第一首开始。
+     洗牌只发生在这一刻 —— 之后 plAdvance() 按这个顺序走，所以「一轮之内不重复」
+     是自然成立的；再点一次会重新洗。
+     ⚠️ 用 Fisher-Yates，别用 sort(function(){ return Math.random() - .5 })：
+     后者分布不均（各位置被选中的概率不相等）。 */
+  function plShuffle() {
+    var items = plFiltered().filter(function (it) { return (it.dur || 0) > 0 && it.cid; });
+    if (!items.length) { plNote('当前筛选下没有可播放的歌'); return; }
+    if (items.length === 1) { plPlay(plKeyOf(items[0])); return; }
+    for (var i = items.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var t = items[i]; items[i] = items[j]; items[j] = t;
+    }
+    plPlay(plKeyOf(items[0]), items);
   }
 
   /* 进歌单页自动开播（用户要的）。已经在放歌单时不重开 ——

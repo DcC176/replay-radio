@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>噼里啪啦 · 24 小时直播回放</title>
 <link rel="stylesheet" href="assets/style.css">
-<link rel="stylesheet" href="assets/frost.css">
 <script>
 /* 切换板块是整页重载（数据源换了，时间轴必须整个重建）。重载会有一小段
    「骨架态」——页面框架在、内容是空的，和切换前的画面一对比就是一次突变。
@@ -490,7 +489,10 @@ window.__BOOT_T0 = Date.now();
         <select id="pl-select" title="切换歌单"></select>
         <button class="btn small ghost" id="pl-rename" type="button">重命名</button>
         <button class="btn small ghost" id="pl-delete" type="button">删除</button>
+        <button class="btn small ghost" id="pl-new" type="button" title="建一张空歌单，往里导入或从别的歌单移歌过来">新建歌单</button>
         <button class="btn small" id="pl-playall" type="button">从头连播</button>
+        <button class="btn small ghost" id="pl-shuffle" type="button" title="打乱当前筛选的歌，从第一首开始（一轮内不重复）">随机播放</button>
+        <button class="btn small ghost" id="pl-view" type="button" title="整块换成播放器样式（封面 / 歌词 / 红心）">播放器模式</button>
       </div>
 
       <div class="pl-filters" id="pl-filters"></div>
@@ -519,6 +521,8 @@ window.__BOOT_T0 = Date.now();
           <option value="二次元">二次元</option>
           <option value="未分类">改回未分类</option>
         </select>
+        <select id="pl-move-to" title="移动到哪张歌单"></select>
+        <button class="btn small ghost" id="pl-move" type="button">移动</button>
         <button class="btn small" id="pl-bulk-apply" type="button">应用</button>
       </div>
 
@@ -567,6 +571,18 @@ window.__BOOT_T0 = Date.now();
         <p class="live-note">每次打开软件默认进入这个板块（也可以继续用带 <code>#/板块</code> 的链接直接打开某页，
           链接优先）。<b>第一次使用</b>时仍会先请你选主播，选完进入后按这里的设置。
           选项只记在本机浏览器里。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">播放</div>
+        <label class="seg-auto">默认静音
+          <button class="btn small ghost" id="btn-mutedef" type="button">默认静音：开</button>
+        </label>
+        <p class="live-note">打开软件时不自动出声。想听声音按播放器上的「进入直播」或音量键。</p>
+        <label class="seg-auto" style="margin-top:10px">跳过空白
+          <button class="btn small ghost" id="btn-skip" type="button">跳过空白：关</button>
+        </label>
+        <p class="live-note">排期里遇到主播没有直播的空白段时自动跳过，不显示「暂无回放」。</p>
       </div>
 
       <div class="live-card" style="margin-top:18px">
@@ -716,6 +732,75 @@ window.__BOOT_T0 = Date.now();
 
       <div class="mute-hint" id="mute-hint">静音播放中 · 点「进入直播」开启声音</div>
       <div class="offline-banner" id="offline-banner" hidden></div>
+
+      <!-- 音乐播放器视图：切到「播放器模式」时盖住视频区（视频仍在后台放声音） -->
+      <div class="mv" id="pl-player">
+        <div class="mv-head">
+          <button class="mv-collapse" id="mv-back" type="button" title="回到视频画面">⌄</button>
+          <span class="mv-head-label">播放器模式</span>
+        </div>
+        <div class="mv-main">
+          <div class="mv-disc-wrap">
+            <div class="mv-disc" id="mv-disc">
+              <div class="mv-art" id="pp-cover"></div>
+            </div>
+            <div class="mv-arm"><i></i></div>
+          </div>
+          <div class="mv-side">
+            <h1 class="mv-title" id="pp-title">—</h1>
+            <div class="mv-sub" id="pp-sub"></div>
+            <div class="mv-tags" id="pp-tags"></div>
+            <div class="mv-lyrics" id="pp-lyrics"><p class="pp-empty">载入歌词…</p></div>
+          </div>
+        </div>
+        <div class="mv-bar">
+          <div class="mv-seek" id="mv-seek" title="拖动调节进度">
+            <div class="mv-seek-fill" id="mv-seek-fill"></div>
+            <i class="mv-seek-dot" id="mv-seek-dot"></i>
+          </div>
+          <div class="mv-bar-row">
+            <div class="mv-bar-art" id="pp-bar-art"></div>
+            <div class="mv-bar-txt">
+              <b id="pp-bar-title">—</b>
+              <span id="pp-bar-sub"></span>
+            </div>
+            <button class="mv-like" id="pp-like" type="button" aria-pressed="false" title="喜欢这首歌">
+              <span class="pp-heart">♡</span>
+            </button>
+            <div class="mv-ctrl">
+              <button class="mv-btn" id="mv-loop" type="button" title="顺序播放">⟳</button>
+              <button class="mv-btn" id="pp-prev" type="button" title="上一首">⏮</button>
+              <button class="mv-btn mv-play" id="pp-toggle" type="button" title="播放 / 暂停">▶</button>
+              <button class="mv-btn" id="pp-next" type="button" title="下一首">⏭</button>
+              <button class="mv-btn" id="mv-queue-btn" type="button" title="播放列表">☰</button>
+            </div>
+            <div class="mv-right">
+              <div class="mv-volwrap">
+                <button class="mv-btn" id="mv-mute" type="button" title="静音">♪</button>
+                <input type="range" id="mv-vol" class="mv-vol" min="0" max="1" step="0.05" value="1" title="音量">
+              </div>
+              <button class="mv-btn" id="mv-more" type="button" title="更多">⋯</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 播放列表（参考图那个右侧抽屉）：列当前歌单，点一首直接播 -->
+        <div class="mv-queue" id="mv-queue" hidden>
+          <div class="mv-queue-h">
+            <b>播放列表</b>
+            <span id="mv-queue-n">0 首</span>
+            <button class="mv-btn" id="mv-queue-close" type="button" title="关闭">✕</button>
+          </div>
+          <div class="mv-queue-body" id="mv-queue-body"></div>
+        </div>
+
+        <!-- 更多：把原来下方栏位里的按钮收进来（回直播 / 跳过空白 / 默认静音） -->
+        <div class="mv-menu" id="mv-more-menu" hidden>
+          <button type="button" data-mv="live">回到直播</button>
+          <button type="button" data-mv="skip">跳过空白：<span id="mv-skip-state">关</span></button>
+          <button type="button" data-mv="mutedef">默认静音：<span id="mv-mutedef-state">开</span></button>
+        </div>
+      </div>
     </div>
 
     <div class="quality-panel" id="quality-panel" hidden>
@@ -769,8 +854,6 @@ window.__BOOT_T0 = Date.now();
       <div class="np-btns">
         <button class="btn small primary" data-action="unmute">进入直播</button>
         <button class="btn small ghost" data-action="resync">回到直播</button>
-        <button class="btn small ghost" id="btn-mutedef">默认静音：开</button>
-        <button class="btn small ghost" id="btn-skip">跳过空白：关</button>
       </div>
     </div>
 
