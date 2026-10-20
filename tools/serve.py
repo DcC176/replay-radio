@@ -997,6 +997,26 @@ def api_stations():
 
 APP_TAG = "replay-radio"   # /api/ping 的应答标识：启动时用它认出「已经有一个实例在跑」
 
+
+def read_build_stamp():
+    """打包时写入 `www_version.txt` 的构建时间戳（形如 20261020065150）。
+
+    ⚠️ 为什么要在界面上显示它：用户几次报「改了没生效」，而实际跑的是**旧版进程**
+    （www 已被新版覆盖 → 前端是新的，后端还是旧的）。有了这个时间戳，一眼就能看出
+    当前进程是哪一次构建 —— 不用再猜。
+    """
+    for base in (getattr(sys, "_MEIPASS", ""), APPDIR, ROOT):
+        if not base:
+            continue
+        try:
+            with open(os.path.join(base, "www_version.txt"), encoding="utf-8") as f:
+                v = f.read().strip()
+            if v:
+                return v
+        except OSError:
+            continue
+    return ""
+
 # 空态闸门：本版本不内置主播，首次运行时 load_stations() 是空的，
 # 而 cur_station() 有 32 处调用，全靠它拿 mid/room/id —— 取不到就全线 500。
 # 与其挨个判空，不如在入口只放行「添加主播」这件事真正用得到的接口，
@@ -1014,7 +1034,7 @@ STATIONLESS_OK = (
     "/api/playlist/import", "/api/playlist/rename", "/api/playlist/delete",
     "/api/playlist/tag",
     "/api/playlist/create", "/api/playlist/move",
-    "/api/playlist/like", "/api/lyrics",
+    "/api/playlist/like", "/api/lyrics", "/api/stations/weibo",
 )
 
 
@@ -1075,8 +1095,12 @@ def urlopen(req, timeout):
 # 所以取流撞上 412 就记住冷却时间、冷却期内**不带 SESSDATA**。否则每失败一次就
 # 再用登录态撞一次，会把风控窗口越撑越长，用户只看到「播放地址获取失败」反复刷。
 # ⚠️ 只对取流开（fallback_anon）：弹幕、发弹幕、动态这些**必须**带登录态的不能降级。
-_BAN = {"until": 0.0}
-BAN_COOLDOWN = 120
+_BAN = {"until": 0.0, "strikes": 0}   # strikes：连续撞了几次 412（用于指数退避）
+BAN_COOLDOWN = 120        # 第一次撞 412 的冷却（秒）
+# ⚠️ 但 B 站的实际封禁往往有**几十分钟**，固定 120 秒会造成一个死循环：
+#    到一个半小时点 → 试探一次又 412 → 再锁 120 秒 → 用户看到"倒计时结束但限流没结束"。
+#    所以改成**指数退避**：120 → 240 → 480 → …，封顶 30 分钟；只要有一次请求成功就归零。
+BAN_MAX = 1800
 
 
 def _bili_fetch(url, referer, sess, timeout):
@@ -1095,22 +1119,44 @@ def _bili_fetch(url, referer, sess, timeout):
 
 
 def bili_get(url, referer=REFERER, timeout=25, fallback_anon=False):
-    """打 B 站接口。fallback_anon=True 时，412 会自动去掉登录态再试一次（见 _BAN）。"""
+    """打 B 站接口 —— 所有 B 站元数据请求都从这里出去（18 处调用），风控策略集中在这里。
+
+    关于 412（B 站风控限流），这里做两件事：
+      ① **任何** 412 都记冷却。原来只有「带登录态 + fallback_anon」才记，
+         于是列表 / 歌单这类接口撞了不记、继续撞 —— 而 412 的惩罚是按**持续请求**
+         累加的，越撞恢复越慢。这是"歌单老是撞限流"的主要成因。
+      ② 冷却期内**非取流**请求直接快速失败（带剩余秒数），不再去撞。
+         取流必须放行，否则播放会断 —— 用 `fallback_anon=True` 当这个标志
+         （它本来就是"取流/直播"那几处在用）。
+
+    ⚠️ 这里不做「绕过」：不换 UA/指纹、不轮换代理、不重放 wbi 签名。
+       那类做法违反平台规则、且随对方改版立刻失效；真正有效的是**降密度 + 退避**。
+    """
     s = sessdata()
-    if s and fallback_anon and time.time() < _BAN["until"]:
+    cooling = time.time() < _BAN["until"]
+    if s and fallback_anon and cooling:
         s = ""                      # 冷却期内直接匿名，别再去撞风控
+    if not fallback_anon and cooling:
+        raise RuntimeError("B 站风控冷却中，约 %d 秒后再试（刚才有请求被限流 412）。"
+                           "这期间界面上部分内容会加载失败，等冷却结束会自动恢复。"
+                           % max(1, int(_BAN["until"] - time.time())))
     try:
-        return _bili_fetch(url, referer, s, timeout)
+        r = _bili_fetch(url, referer, s, timeout)
+        _BAN["strikes"] = 0          # 成功一次就把退避归零：说明封禁真的过去了
+        return r
     except urllib.error.HTTPError as e:
-        if e.code == 412 and s and fallback_anon:
+        if e.code == 412:
             # 上一次冷却已结束才算「新一轮」，免得每次重试都往日志里刷一行。
-            # 这条日志是排障唯一线索：不然用户只看到「画质变差」，看不到原因。
             fresh = time.time() >= _BAN["until"]
-            _BAN["until"] = time.time() + BAN_COOLDOWN
+            _BAN["strikes"] = (_BAN["strikes"] or 0) + 1
+            wait = min(BAN_COOLDOWN * (2 ** (_BAN["strikes"] - 1)), BAN_MAX)
+            _BAN["until"] = time.time() + wait
             if fresh:
-                print("[play] 取流撞上 B 站限流（412），暂时改用匿名方式"
-                      "（清晰度会降低，%d 秒后再试登录态）" % BAN_COOLDOWN)
-            return _bili_fetch(url, referer, "", timeout)
+                print("[bili] 撞上 B 站限流（412），第 %d 次，冷却 %d 秒（上限 %d）%s"
+                      % (_BAN["strikes"], wait, BAN_MAX,
+                         "；取流改匿名重试" if (s and fallback_anon) else ""))
+            if s and fallback_anon:
+                return _bili_fetch(url, referer, "", timeout)
         raise
 
 
@@ -3523,6 +3569,29 @@ SEASON_ARCHIVES_API = ("https://api.bilibili.com/x/polymer/web-space/"
                        "seasons_archives_list")
 ARCHIVES_PAGE_SIZE = 30
 
+# 「归档已取到第几页」的落盘缓存：撞 412 后重试要从断点继续，不能从头再翻一遍
+# （从头翻 = 又一轮密集请求 = 把封禁时间拉长）。见 _fetch_archives。
+ARCHIVES_CACHE_FILE = os.path.join(ROOT, "data", "archives_cache.json")
+ARCHIVES_TTL = 1800.0        # 30 分钟：来源可能新增投稿，过这么久就重新拉
+
+
+def _archives_cache_read():
+    try:
+        with open(ARCHIVES_CACHE_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _archives_cache_write(d):
+    """写不进去也不影响主流程 —— 只是下次从头拉而已，不该因此让整次构建失败。"""
+    try:
+        os.makedirs(os.path.dirname(ARCHIVES_CACHE_FILE), exist_ok=True)
+        _write_json_file(ARCHIVES_CACHE_FILE, d)
+    except OSError:
+        pass
+
 
 def _series_page(mid, sid, pn):
     url = (SERIES_ARCHIVES_API + "?mid=%s&series_id=%s&only_normal=true&sort=desc"
@@ -3541,8 +3610,24 @@ def _fetch_archives(mid, sid, kind):
     所以下游组装逻辑可以共用一条路。"""
     fetch = _series_page if kind == "series" else _season_page
     label = "系列" if kind == "series" else "合集"
+    key = "%s|%s|%s" % (mid, sid, kind)
+    cache = _archives_cache_read()
+    hit = cache.get(key) or {}
+
     items = []
     pn = 1
+    # 断点续取：上次翻到第几页，这次就从下一页接着翻。
+    # ⚠️ 为什么重要：归档多的时候要翻十几页，撞上 412 后如果从头再来，
+    #    等于又打一轮密集请求 → 封禁时间被越拉越长。落盘后重试成本几乎为零。
+    if hit and (time.time() - float(hit.get("at") or 0)) < ARCHIVES_TTL:
+        items = list(hit.get("items") or [])
+        if hit.get("done") and items:
+            return items                     # 上次已经拉全，TTL 内直接用
+        if items:
+            pn = int(hit.get("page") or 0) + 1
+            print("[archives] %s 已有缓存 %d 条（到第 %d 页），从第 %d 页继续"
+                  % (label, len(items), pn - 1, pn))
+
     while True:
         d = fetch(mid, sid, pn)
         if d.get("code") != 0:
@@ -3552,7 +3637,11 @@ def _fetch_archives(mid, sid, kind):
         items.extend(arcs)
         # 分页字段名不一样：系列是 num/size/total，合集是 page_num/page_size/total
         total = int((data.get("page") or {}).get("total") or 0)
-        if not arcs or len(arcs) < ARCHIVES_PAGE_SIZE or (total and len(items) >= total):
+        done = (not arcs) or len(arcs) < ARCHIVES_PAGE_SIZE or (total and len(items) >= total)
+        # 每翻完一页立刻落盘 —— 下一页万一撞 412，重试就能从这页之后接着来
+        cache[key] = {"items": items, "page": pn, "at": time.time(), "done": bool(done)}
+        _archives_cache_write(cache)
+        if done:
             break
         pn += 1
         time.sleep(0.4)          # 翻页间隔，避免风控
@@ -4281,7 +4370,13 @@ EXIT_TIMER = [None]
 SERVER_REF = [None]              # main() 里填，退出定时器要用
 PAGE_GRACE = 2.0                 # 收到 bye 后等这么久（刷新页面会在这个窗口内重新连上）
 PAGE_IDLE = 180.0                # 心跳兜底：这么久没动静就退出
-SEG_EXIT_GRACE = 1800.0          # 还有分段没跑完时，关掉网页后最多再等这么久（30 分钟）
+# 还有分段没跑完时，关掉网页后最多再等这么久。
+# ⚠️ 原来是 1800（30 分钟）—— 而打开页面就会触发自动分段，等于「关掉网页后后台几乎总在撑」，
+#    用户看到的就是「退出网页了程序还没退」。用户明确要求「退出网页就直接关」，
+#    所以改成 0：立刻退出。
+#    代价：排队中的分段会中断 —— 但已完成的分P 都落盘了，下次打开接着补，不会白干
+#    （这也是原先留宽限的唯一理由，权衡后以用户的明确要求为准）。
+SEG_EXIT_GRACE = 0.0
 SEG_EXIT_DEADLINE = [0.0]        # 宽限期的截止时刻；0 = 没在等
 
 
@@ -4880,7 +4975,12 @@ class Handler(SimpleHTTPRequestHandler):
             # 那个要问 B 站接口，慢的时候会把本服务误判成「别的程序」。
             # lyrics：本版本是否支持 /api/lyrics。前端在歌词失败时用它判断
             # 「是网络问题」还是「跑着旧版进程」——两者表现都是拿不到歌词。
-            return self._json(200, {"app": APP_TAG, "lyrics": True})
+            # ban_left：B 站风控冷却还剩多少秒（0 = 正常）。
+            # 前端靠它显示右上角那条「限流中」的提示 —— 否则用户只看到「加载失败」，
+            # 不知道是网络坏了还是被限流、还要等多久。
+            _left = max(0, int(_BAN["until"] - time.time()))
+            return self._json(200, {"app": APP_TAG, "lyrics": True,
+                                    "build": read_build_stamp(), "ban_left": _left})
         if parsed.path == "/api/quit":
             # 供「停止」脚本调用。服务只绑 127.0.0.1，外部访问不到。
             # shutdown() 要等 serve_forever 退出，必须另起线程，否则会把当前响应卡死。
@@ -5064,6 +5164,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*protocol_unregister())
         if parsed.path == "/api/shortcut/create":
             return self._json(*api_shortcut_create(str(obj.get("dir") or "")))
+        if parsed.path == "/api/stations/weibo":
+            # ⚠️ POST 接口，必须在 do_POST 里 —— 曾经又一次放进 do_GET，
+            #    结果前端只看到「未知接口」（do_GET 里连 obj 都没有）。v1.0.51 踩过同样的坑。
+            return self._json(*api_station_weibo_bind(obj))
         if parsed.path == "/api/weibo/cookie":
             return self._json(*api_weibo_cookie(obj))
         if parsed.path == "/api/weibo/logout":
@@ -5631,21 +5735,32 @@ def weibo_desktop_profile(uid, u):
 
 def weibo_mobile(uid, cookie):
     """m 站通道：访客也能拿到资料卡；登录态下正文一起给。"""
-    prof, posts, err = None, [], ""
-    try:
+    # 资料与正文是两个独立请求，**并发**发出 —— 串行只是白等一个往返
+    # （微博 m 站单次往返常在 0.5~1.5 秒，两个串起来就是翻倍）。
+    # 只发 2 个请求，不会比串行更容易触发风控。
+    ref = weibo_home(uid)
+
+    def _prof():
         d = weibo_get("%s?type=uid&value=%s&containerid=100505%s" % (WEIBO_API, uid, uid),
-                      cookie=cookie, referer=weibo_home(uid))
-        ui = (d.get("data") or {}).get("userInfo") or {}
-        if ui:
-            prof = weibo_profile_parse(uid, ui)
-    except Exception as e:
-        err = "资料获取失败：%s" % e
-    try:
-        d2 = weibo_get("%s?type=uid&value=%s&containerid=107603%s" % (WEIBO_API, uid, uid),
-                       cookie=cookie, referer=weibo_home(uid))
-        posts = weibo_parse_posts((d2.get("data") or {}).get("cards") or [])
-    except Exception as e:
-        err = (err + " / " if err else "") + "正文获取失败：%s" % e
+                      cookie=cookie, referer=ref)
+        return weibo_profile_parse(uid, (d.get("data") or {}).get("userInfo") or {})
+
+    def _posts():
+        d = weibo_get("%s?type=uid&value=%s&containerid=107603%s" % (WEIBO_API, uid, uid),
+                      cookie=cookie, referer=ref)
+        return weibo_parse_posts((d.get("data") or {}).get("cards") or [])
+
+    prof, posts, err = None, [], ""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        f1, f2 = ex.submit(_prof), ex.submit(_posts)
+        try:
+            prof = f1.result()
+        except Exception as e:
+            err = "资料获取失败：%s" % e
+        try:
+            posts = f2.result()
+        except Exception as e:
+            err = (err + " / " if err else "") + "正文获取失败：%s" % e
     return prof, posts, err
 
 
@@ -5721,8 +5836,79 @@ def weibo_fetch(uid, force=False):
         out["need_login"] = True
 
     with _WEIBO_LOCK:
-        _WEIBO_CACHE[uid] = {"at": now, "data": out}
+        prev = ((_WEIBO_CACHE.get(uid) or {}).get("data") or {})
+        if not out["posts"] and prev.get("posts"):
+            # ⚠️ 这次没取到正文（风控 / 掉线 / 登录态掉了），但**上一次是好的** ——
+            #    绝不能拿空结果把它顶掉：否则用户会看到"刚才还在的微博突然全没了"，
+            #    而且 TTL 到期前反复刷新也回不来（同 v1.0.19 节目单被顶空的那次教训）。
+            #    保留旧内容，只把这次的错误与登录态挂上去，并标 stale 让前端可以提示。
+            merged = dict(prev)
+            merged["logged"] = out["logged"]
+            merged["error"] = out["error"] or prev.get("error") or ""
+            merged["stale"] = True
+            _WEIBO_CACHE[uid] = {"at": now, "data": merged}
+        else:
+            _WEIBO_CACHE[uid] = {"at": now, "data": out}
     return out
+
+
+def _parse_weibo_uid(v):
+    """把用户输入解析成微博 UID。返回 (uid, 错误说明)。
+
+    支持：纯数字 / weibo.com/u/<uid> / m.weibo.cn/u/<uid> / weibo.cn/u/<uid> / /profile/<uid>。
+    ⚠️ **昵称不做解析**：探测过 `m.weibo.cn/api/container/getIndex?...q=<昵称>`，
+       对未登录访客是 **HTTP 432 反爬**（带空 cookie 也一样），假不了。
+       所以昵称直接返回提示，让用户改填 UID —— 比"点了没反应"诚实。
+    """
+    s = (v or "").strip()
+    if not s:
+        return "", "填一个微博 UID 或主页链接"
+    if s.isdigit():
+        return s, ""
+    m = re.search(r"weibo\.(?:com|cn)/(?:u/|profile/)(\d{4,})", s)
+    if m:
+        return m.group(1), ""
+    m2 = re.search(r"weibo\.(?:com|cn)/n/([^/?#\s]+)", s)
+    if m2:
+        return "", "「%s」是昵称不是 UID。昵称要走微博搜索接口，未登录时它直接返回反爬（432），解析不了 —— 请改填数字 UID（在微博主页地址里 /u/ 后面那串）" % m2.group(1)
+    return "", "看不懂这个输入。请填数字 UID，或直接粘贴 https://weibo.com/u/<一串数字> 这样的主页链接"
+
+
+def api_station_weibo_bind(obj):
+    """POST /api/stations/weibo —— 一键把微博绑到某位主播，省得手改 data/stations.json。"""
+    o = obj or {}
+    sid = str(o.get("id") or "").strip()
+    if not sid:
+        return 400, {"error": "没说是哪位主播"}
+    uid, bad = _parse_weibo_uid(o.get("weibo"))
+    if bad:
+        return 400, {"error": bad}
+    try:
+        with open(STATIONS_FILE, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:
+        return 500, {"error": "读主播列表失败：%s" % e}
+    hit = False
+    for it in (doc.get("stations") or []):
+        if str(it.get("id") or "") == sid:
+            it["weibo"] = uid
+            hit = True
+            break
+    if not hit:
+        return 404, {"error": "找不到这位主播"}
+    try:
+        _write_json_file(STATIONS_FILE, doc)
+    except OSError as e:
+        return 500, {"error": "写主播列表失败：%s" % e}
+    # 绑完立刻拉一次，把结果一并告诉用户（省得他再点一次刷新）
+    _WEIBO_CACHE.pop(uid, None)
+    got = weibo_fetch(uid, force=True)
+    return 200, {"ok": True, "weibo": uid,
+                 "profile": bool(got.get("profile")),
+                 "posts": len(got.get("posts") or []),
+                 "logged": bool(got.get("logged")),
+                 "need_login": bool(got.get("need_login")),
+                 "error": got.get("error") or ""}
 
 
 def api_weibo(query):

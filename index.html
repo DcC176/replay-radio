@@ -208,7 +208,12 @@ window.__BOOT_T0 = Date.now();
     <a class="tab" data-view="settings" href="#/settings">设置</a>
   </nav>
   <div class="tb-right">
-    <!-- 四色灯：点亮谁就看谁，可以同时点亮多位（混合播放几人的内容）。
+    <!-- B 站风控限流提示：平时隐藏，撞上 412 后由 /api/ping 的 ban_left 驱动显示 -->
+    <div class="ban-alert" id="ban-alert" hidden role="status" aria-live="polite">
+      <span class="ban-dot" aria-hidden="true"></span>
+      <span class="ban-txt" id="ban-txt">B 站限流中</span>
+    </div>
+    <!-- 四色灯：点亮谁就看谁，可以同时点亮多人（混合播放几人的内容）。
          主站默认点亮，不允许全部熄灭。 -->
     <div class="station-lamps" id="station-lamps" role="group"
          title="点亮谁就看谁的内容，可同时点亮多位（混合播放）"></div>
@@ -414,9 +419,17 @@ window.__BOOT_T0 = Date.now();
       <h1 class="title sm">接下来播什么</h1>
 
       <div class="actions">
-        <button class="chip" data-horizon="86400">24 小时</button>
-        <button class="chip" data-horizon="259200">72 小时</button>
-        <button class="chip" data-horizon="0">整个循环</button>
+        <!-- 时间范围：互斥单选，用 radio 驱动滑动指示器（参考 smooth-option-switcher 的做法）。
+             ⚠️ radio 必须在 label **之前** —— 样式靠 `:checked ~ label` 兄弟选择器选中文字颜色。 -->
+        <div class="seg-switch" id="horizon-switch" role="radiogroup" aria-label="节目单时间范围">
+          <input type="radio" name="horizon" id="hz-24" data-horizon="86400" value="86400" checked>
+          <input type="radio" name="horizon" id="hz-72" data-horizon="259200" value="259200">
+          <input type="radio" name="horizon" id="hz-all" data-horizon="0" value="0">
+          <i class="seg-slider" aria-hidden="true"></i>
+          <label for="hz-24">24 小时</label>
+          <label for="hz-72">72 小时</label>
+          <label for="hz-all">整个循环</label>
+        </div>
       </div>
 
       <div class="list-head"><span class="stat" id="sch-stat">—</span></div>
@@ -460,7 +473,7 @@ window.__BOOT_T0 = Date.now();
         <summary>也可以手动粘贴微博 Cookie</summary>
         <p class="wb-tip">
           在浏览器里登录微博后，按 F12 → Network → 随便点一个请求 → 找到
-          <b>Cookie</b> 那一行，整行复制粘贴到这里即可。Cookie 只存在你本机。
+           <b>粘一次就会保存在本机，之后不用再输</b>；只有它失效（登出、改密、换号）时才需要重新粘。<b>Cookie</b> 那一行，整行复制粘贴到这里即可。Cookie 只存在你本机。
         </p>
         <textarea id="wb-cookie" rows="3" placeholder="SUB=…; SUBP=…; SSOLoginState=…"></textarea>
         <div class="qp-btns">
@@ -583,6 +596,35 @@ window.__BOOT_T0 = Date.now();
           <button class="btn small ghost" id="btn-skip" type="button">跳过空白：关</button>
         </label>
         <p class="live-note">排期里遇到主播没有直播的空白段时自动跳过，不显示「暂无回放」。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">关于</div>
+        <p class="live-note" style="margin:0">当前版本构建：<b id="app-build">读取中…</b>
+          ／ 运行中的后端：<b id="app-build-hint">—</b></p>
+        <p class="live-note">如果这里的时间比你刚装的程序还旧，说明**旧的程序还在后台跑**：
+          请完全退出（含托盘）后再打开新版。界面上的网页文件会跟着新版更新，
+          所以「界面是新的、功能却没生效」通常就是这个原因。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">微博</div>
+        <label class="seg-auto">给哪位主播
+          <select id="wb-station" title="选择要绑定微博的主播"></select>
+        </label>
+        <label class="seg-auto" style="margin-top:10px">微博 UID 或主页链接
+          <input id="wb-input" type="text" placeholder="例如 1234567890 或 https://weibo.com/u/1234567890" style="min-width:280px">
+        </label>
+        <div class="actions" style="margin:10px 0 0">
+          <button class="btn small primary" id="wb-bind" type="button">一键绑定</button>
+          <button class="btn small ghost" id="wb-goto-login" type="button" title="打开微博页的登录流程：登一次，cookie 自动读回并存下来">去登录微博</button>
+          <span class="sub" id="wb-state" style="margin:0 0 0 8px"></span>
+        </div>
+        <p class="live-note">填数字 UID，或直接粘贴微博主页地址（<code>weibo.com/u/…</code>）即可，不用再手改 json。
+          <b>昵称解析不了</b>：微博搜索接口对未登录访客直接返回反爬（432），这是对方的限制。</p>
+        <p class="live-note"><b>cookie 不能从网址得到</b> —— 它是登录的产物。点「去登录微博」，
+          程序会开一个独立浏览器窗口让你登录，然后把 cookie 自动读回来存下；只需要登一次，
+          之后正文就能取到。</p>
       </div>
 
       <div class="live-card" style="margin-top:18px">

@@ -685,6 +685,129 @@
      点击后旧元素已经脱离文档、旧引用失效。文本在同一组里唯一，重建后仍能对上。
 
      ⚠️ 用捕获阶段的全局监听：4 处 chips 各自的点击逻辑不用改，一处覆盖全部。 */
+  /* 设置页「微博」卡片：把 UID/主页链接一键绑到某位主播。
+
+     ⚠️ 以前只能手改 data/stations.json 加 `weibo` 字段，门槛太高（用户反馈"过于复杂"）。
+     现在：选主播 + 粘地址 + 点一下即可。解析在服务端做（见 _parse_weibo_uid）。
+     ⚠️ 昵称解析不了 —— 微博搜索接口对未登录访客返回 432 反爬，这是对方的限制，
+        所以这里只做「数字 UID / 主页链接」，并如实提示。 */
+  /* 填充「微博」卡片里的主播下拉。
+     ⚠️ 必须是**模块级**函数：`bindSettings` 在 STATIONS 还是空的时候就跑了，
+        那时填进去是 0 个选项；真正有数据是在 boot() 之后。所以进入设置页时要再填一次
+        （见 setView 里的调用）。放在 bindWeiboBind 闭包里就调不到了。 */
+  function fillWbStations() {
+    var sel = document.getElementById('wb-station');
+    if (!sel) return;
+    var list = STATIONS || [];
+    if (sel.dataset.n === String(list.length) && sel.options.length) return;
+    sel.innerHTML = list.map(function (s) {
+      return '<option value="' + esc(s.id) + '">' + esc(s.name || s.id)
+        + (s.weibo ? '（已绑 ' + esc(s.weibo) + '）' : '') + '</option>';
+    }).join('');
+    sel.dataset.n = String(list.length);
+  }
+
+  /* 把 /api/ping 的构建时间戳显示出来 —— 用来区分「跑的是哪一版」。
+     格式 20261020065150 → 2026-10-20 06:51 */
+  /* B 站限流提示：每 10 秒问一次 /api/ping（它不访问 B 站，很便宜），
+     有 ban_left 就在右上角显示倒计时；归零自动收起。
+     ⚠️ 倒计时靠本地每秒自减，不必每秒请求 —— 请求密度本身就是 412 的成因之一。 */
+  var banLeft = 0, banTimer = null;
+
+  function banRender() {
+    var box = document.getElementById('ban-alert');
+    var txt = document.getElementById('ban-txt');
+    if (!box) return;
+    if (banLeft <= 0) { box.hidden = true; return; }
+    box.hidden = false;
+    if (txt) {
+      var m = Math.floor(banLeft / 60), s2 = banLeft % 60;
+      txt.textContent = 'B 站限流中 · 约 ' + (m ? m + ' 分 ' : '') + s2 + ' 秒后恢复';
+    }
+    box.title = '最近一次请求被 B 站风控拒绝（412）。冷却期间部分内容会加载失败，'
+      + '等倒计时结束会自动恢复；不要反复刷新 —— 继续请求会把限流时间拉长。';
+  }
+
+  function bindBanAlert() {
+    function poll() {
+      fetch('/api/ping').then(function (r) { return r.json(); }).then(function (d) {
+        var left = Number((d && d.ban_left) || 0);
+        if (left > 0) banLeft = left;
+        // 服务端说已经恢复了就归零；还在冷却则沿用（本地已倒数过，取较大值更稳）
+        else banLeft = 0;
+        banRender();
+      }).catch(function () { /* ping 失败就不动，别把提示弄乱 */ });
+    }
+    poll();
+    setInterval(poll, 10000);
+    if (!banTimer) {
+      banTimer = setInterval(function () {
+        if (banLeft > 0) { banLeft -= 1; banRender(); }
+      }, 1000);
+    }
+  }
+
+  function fillBuildStamp() {
+    var a = document.getElementById('app-build');
+    var b = document.getElementById('app-build-hint');
+    if (!a && !b) return;
+    fetch('/api/ping').then(function (r) { return r.json(); }).then(function (d) {
+      var raw = String((d && d.build) || '');
+      var m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(raw);
+      var txt = m ? (m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5]) : (raw || '未知');
+      if (a) a.textContent = txt;
+      if (b) b.textContent = (d && d.lyrics) ? '新版（支持歌词）' : '旧版（不支持歌词）';
+    }).catch(function () {
+      if (a) a.textContent = '读取失败';
+    });
+  }
+
+  function bindWeiboBind() {
+    var sel = document.getElementById('wb-station');
+    var inp = document.getElementById('wb-input');
+    var btn = document.getElementById('wb-bind');
+    var out = document.getElementById('wb-state');
+    if (!sel || !inp || !btn || !out) return;
+
+    function fillStations() { fillWbStations(); }
+
+    btn.addEventListener('click', function () {
+      var sid = sel.value;
+      var v = (inp.value || '').trim();
+      if (!sid) { out.textContent = '先选一位主播'; return; }
+      if (!v) { out.textContent = '填 UID 或主页链接'; inp.focus(); return; }
+      out.textContent = '绑定中…';
+      postJSON('/api/stations/weibo', { id: sid, weibo: v }).then(function (d) {
+        if (!d || d.error) { out.textContent = (d && d.error) || '绑定失败'; return; }
+        // 成功：把结果说清楚（拿到资料 / 拿到正文 / 是否还需要登录）
+        var msg = '已绑定 UID ' + d.weibo;
+        if (d.posts > 0) msg += '，取到 ' + d.posts + ' 条微博';
+        else if (d.profile) msg += '，只拿到资料卡 —— 正文需要登录';
+        else msg += '，但资料也没取到：UID 可能不对';
+        out.textContent = msg;
+        inp.value = '';
+        sel.dataset.n = '';            // 让下拉重建（显示「已绑 …」）
+        fillStations();
+        // ⚠️ 这里不要调 loadStations() —— 本项目没有这个函数（踩过一次，会抛 ReferenceError）。
+        //    下拉的「已绑 …」由 fillStations 自己重建就够了。
+      });
+
+      var go = document.getElementById('wb-goto-login');
+      if (go) go.addEventListener('click', function () {
+        // cookie 不是"从网址拿"的东西 —— 它是登录的产物。微博页里有完整流程：
+        // 开一个独立浏览器窗口让你登录，再用调试协议把 cookie 自动读回来。只登一次。
+        location.hash = '#/weibo';
+      });
+    });
+
+    fillStations();
+    // 每次切到设置页都刷新一遍下拉（可能刚改过主播）
+    document.addEventListener('click', function (ev) {
+      var t = ev.target;
+      if (t && t.closest && t.closest('.tab[data-view="settings"]')) setTimeout(fillStations, 200);
+    }, true);
+  }
+
   function bindChipFlip() {
     document.addEventListener('click', function (e) {
       var chip = e.target && e.target.closest ? e.target.closest('.chip') : null;
@@ -3209,6 +3332,8 @@
     if (name === 'playlist') { bindPlaylist(); plAutoStart(); }
     /* 音乐模式只在歌单页生效：切走要收起、切回要恢复（见 plSyncView） */
     if (name === 'playlist' || prev === 'playlist') plSyncView();
+    /* 博主下拉依赖 STATIONS，而 bindSettings 跑的时候它还是空的 —— 进页面时补填 */
+    if (name === 'settings') { fillWbStations(); fillBuildStamp(); }
 
     // 离开歌单页：把频道的时间轴换回来 —— 播放器只有一个，歌单是「临时借走」的
     if (prev === 'playlist' && name !== 'playlist' && state.playlistCycle) {
@@ -4245,12 +4370,11 @@
       if (b) playProgram(b.getAttribute('data-play'));
     });
 
+    /* 时间范围现在是 radio（滑动指示器），所以监听 change 而不是 click；
+       选中样式由 `:checked` 在 CSS 里完成，不用再切 .active 类。 */
     document.querySelectorAll('[data-horizon]').forEach(function (b) {
-      b.addEventListener('click', function () {
+      b.addEventListener('change', function () {
         state.horizon = parseInt(b.getAttribute('data-horizon'), 10) || 0;
-        document.querySelectorAll('[data-horizon]').forEach(function (x) {
-          x.classList.toggle('active', x === b);
-        });
         renderSchedule();
       });
     });
@@ -4947,6 +5071,8 @@
     pageSetup();
     bindThemeToggle();           // 顶栏那颗按钮在两种模式下都要能用（含空态引导页）
     bindChipFlip();              // 标签切换的「共享布局」过渡（全局捕获，只需绑一次）
+    bindWeiboBind();             // 设置页「微博」卡片：填 UID/链接，一键绑到某位主播
+    bindBanAlert();              // 右上角 B 站限流提示（带倒计时）
     fetchStations().then(function (list) {
       var picked = false;
       try { picked = sessionStorage.getItem(PICK_KEY) === '1'; } catch (e) { /* 隐私模式 */ }
@@ -5516,7 +5642,9 @@
     box.innerHTML = STATIONS.map(function (s) {
       var on = ST_SET.indexOf(s.id) >= 0;
       var name = (s.short || s.name) + (s.main ? '（主站）' : '');
-      var hint = on ? ' · 已点亮，点一下取消' : ' · 点一下把 TA 也加进来（混合播放）';
+      var hint = on
+        ? ' · 左键取消混合 · 右键只看这一位'
+        : ' · 左键加入混合 · 右键只看这一位';
       var accent = s.accent || '#8a8a95';
       return '<button type="button" class="lamp' + (on ? ' on' : '') + '"'
         + ' data-id="' + esc(s.id) + '"'
@@ -5541,6 +5669,12 @@
       var mains = STATIONS.filter(function (s) { return s.main; });
       ST_SET = [(mains[0] || STATIONS[0] || {}).id || ''];
     }
+    applyStationSet();
+  }
+
+  /* 把当前 ST_SET 应用生效：写盘、重画灯、切主题、延迟重载。
+     左键（toggleStation）与右键（独显）共用这一段 —— 否则重载/遮罩那套逻辑要写两遍。 */
+  function applyStationSet() {
     ST = ST_SET[0];
     saveStations();
     renderLamps();
@@ -5600,7 +5734,19 @@
       renderMixedNote();
       box.addEventListener('click', function (e) {
         var b = e.target && e.target.closest ? e.target.closest('.lamp') : null;
-        if (b) toggleStation(b.getAttribute('data-id'));
+        if (b) toggleStation(b.getAttribute('data-id'));       // 左键：加入 / 退出混合
+      });
+      /* 右键 = 独显这一位：把选择收成只剩它。
+         ⚠️ 不能复用 toggleStation —— 那是"反转"，右键点到已亮的灯会变成取消，
+            而用户要的是"只看这一位"。 */
+      box.addEventListener('contextmenu', function (e) {
+        var b = e.target && e.target.closest ? e.target.closest('.lamp') : null;
+        if (!b) return;
+        e.preventDefault();                                     // 别弹浏览器右键菜单
+        var id = b.getAttribute('data-id');
+        if (ST_SET.length === 1 && ST_SET[0] === id) return;     // 已经是独显，什么都不用做
+        ST_SET = [id];
+        applyStationSet();
       });
       var note = document.getElementById('mixed-note');
       if (note) {
@@ -7458,16 +7604,58 @@
     var name = st.short || st.name || '';
     wbSetTxt('wb-title', (name || '') + (name ? '的' : '') + '微博');
     if (!st.weibo) {
-      wbSetTxt('wb-sub', '这位板块还没有配置微博。');
-      weiboTip('在 <code>data/stations.json</code> 里给它加一个 '
-        + '<code>"weibo": "微博UID"</code> 就会出现在这里。');
+      wbSetTxt('wb-sub', '这位板块还没有绑定微博。');
+      weiboTip('');                     // 清掉上一位的旧提示
       document.getElementById('wb-profile').hidden = true;
-      list.innerHTML = '';
+      /* 直接在页内给绑定入口 —— 用户不该为了填个 UID 再跳去设置页。
+         走的是同一个接口（POST /api/stations/weibo），绑定逻辑只有一份。 */
+      list.innerHTML =
+        '<div class="wb-bindbox">'
+        + '<p>填微博 UID 或主页链接，绑定后这里就会显示这位的微博：</p>'
+        + '<div class="actions" style="margin:0">'
+        + '<input id="wb-inline-input" type="text" style="min-width:260px" '
+        + 'placeholder="8295994616 或 https://weibo.com/u/8295994616">'
+        + '<button class="btn small primary" id="wb-inline-bind" type="button">一键绑定</button>'
+        + '<span class="sub" id="wb-inline-state" style="margin:0 0 0 8px"></span>'
+        + '</div>'
+        + '<p class="sub" style="margin-top:10px">'
+        + '昵称解析不了（微博搜索接口对未登录返回反爬 432）；正文要登录一次，'
+        + '<b>cookie 存在本机，不用每次输入</b>。</p>'
+        + '</div>';
+      bindWeiboInline(st);
       return;
     }
     // 同上：正常状态不显示冗余说明，只清空（异常提示那条保留在上面）
     wbSetTxt('wb-sub', '');
     loadWeibo();
+  }
+
+  /* 微博页内的绑定：只做「填 UID/链接 → 调接口 → 重新渲染」，逻辑不复制。 */
+  function bindWeiboInline(st) {
+    var inp = document.getElementById('wb-inline-input');
+    var btn = document.getElementById('wb-inline-bind');
+    var out = document.getElementById('wb-inline-state');
+    if (!inp || !btn || !out) return;
+    function go() {
+      var v = (inp.value || '').trim();
+      if (!v) { out.textContent = '先填 UID 或主页链接'; inp.focus(); return; }
+      out.textContent = '绑定中…';
+      btn.disabled = true;
+      postJSON('/api/stations/weibo', { id: st.id, weibo: v }).then(function (d) {
+        btn.disabled = false;
+        if (!d || d.error) { out.textContent = (d && d.error) || '绑定失败'; return; }
+        out.textContent = '已绑定 UID ' + d.weibo
+          + (d.posts ? '，取到 ' + d.posts + ' 条微博' : (d.profile ? '，但正文要登录' : '，但没取到资料'));
+        st.weibo = d.weibo;                       // 本地同步，省一次全量拉取
+        setTimeout(renderWeibo, 700);
+      }).catch(function () {
+        btn.disabled = false;
+        out.textContent = '请求失败，请重试';
+      });
+    }
+    btn.addEventListener('click', go);
+    inp.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') go(); });
+    setTimeout(function () { inp.focus(); }, 60);
   }
 
   function loadWeibo(force) {

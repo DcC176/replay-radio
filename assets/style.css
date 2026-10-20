@@ -3765,3 +3765,125 @@ body.mv-playing .mv-disc { animation-play-state: running; }
 .wrap > .col-right > .player-box {
   margin-top: clamp(20px, 12vh, 120px);
 }
+
+/* 微博页内的绑定盒（未绑定某位主播时出现在列表位置） */
+.wb-bindbox {
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.wb-bindbox > p { margin: 0 0 10px; color: var(--text-2); font-size: 13px; }
+.wb-bindbox .actions { flex-wrap: wrap; }
+.wb-bindbox input {
+  padding: 7px 11px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.wb-bindbox input:focus { border-color: var(--red); }
+
+/* ---------------------------------------------------------------- 限流提示（右上角） */
+
+/* 撞上 B 站 412 时出现，明确告诉用户「是被限流，不是坏了」，并给一个大致恢复时间。
+   用固定的琥珀色而不是主题色 —— 它要跳出页面配色、被一眼看见。 */
+.ban-alert {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px 5px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 176, 66, .45);
+  background: rgba(255, 152, 0, .12);
+  color: #ffc266;
+  font-size: 12px;
+  white-space: nowrap;
+  margin-right: 4px;
+}
+.ban-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #ffb042;
+  box-shadow: 0 0 0 0 rgba(255, 176, 66, .6);
+  animation: banPulse 1.6s ease-out infinite;
+  flex: 0 0 auto;
+}
+@keyframes banPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(255, 176, 66, .55); }
+  70%  { box-shadow: 0 0 0 7px rgba(255, 176, 66, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 176, 66, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ban-dot { animation: none; }
+}
+.ban-txt { line-height: 1.2; }
+/* 窄屏：只留圆点，文字折进 title，别把顶栏挤爆 */
+@media (max-width: 900px) {
+  .ban-alert { padding: 5px; }
+  .ban-alert .ban-txt { display: none; }
+}
+
+/* ---------------------------------------------------------------- 分段切换（滑动指示器） */
+
+/* 做法参考 smooth-option-switcher：纯 CSS —— radio 负责状态，`:checked ~` 负责样式，
+   一颗绝对定位的滑块用 translateX 在三段之间滑过去。缓动与时长沿用它的那条曲线。
+   ⚠️ 只用在这里的**互斥**选项；多选筛选仍然是 .chip，两者别混。 */
+.seg-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+}
+.seg-switch input {
+  position: absolute;
+  width: 1px; height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.seg-switch label {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 0;
+  min-width: 74px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  text-align: center;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color .5s cubic-bezier(.34, .96, .6, .99);
+}
+/* 三段等宽：滑块宽度 = (100% - 左右内边距) / 3 */
+.seg-slider {
+  position: absolute;
+  z-index: 0;
+  top: 3px; bottom: 3px; left: 3px;
+  width: calc((100% - 6px) / 3);
+  border-radius: 999px;
+  background: var(--red);
+  transform: translateX(0);
+  transition: transform .5s cubic-bezier(.34, .96, .6, .99);
+}
+#hz-72:checked ~ .seg-slider  { transform: translateX(100%); }
+#hz-all:checked ~ .seg-slider { transform: translateX(200%); }
+#hz-24:checked  ~ label:nth-of-type(1),
+#hz-72:checked  ~ label:nth-of-type(2),
+#hz-all:checked ~ label:nth-of-type(3) { color: var(--on-red); }
+/* 键盘可达：radio 视觉隐藏了，焦点环画在对应的 label 上 */
+#hz-24:focus-visible  ~ label[for="hz-24"],
+#hz-72:focus-visible  ~ label[for="hz-72"],
+#hz-all:focus-visible ~ label[for="hz-all"] {
+  outline: 2px solid color-mix(in srgb, var(--red) 72%, transparent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .seg-slider, .seg-switch label { transition: none; }
+}

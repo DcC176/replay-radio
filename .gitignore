@@ -74,6 +74,7 @@ tools/weibo-profile/
 data/programs_cache.json
 data/series_cache.json
 data/stations/*/programs_cache.json
+data/archives_cache.json
 
 # ============================================================
 # 其它
