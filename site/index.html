@@ -173,9 +173,6 @@ h2{font-size:clamp(24px,3.2vw,36px);line-height:1.25;letter-spacing:-.01em;font-
   box-shadow:0 30px 66px -28px rgba(0,0,0,.92)}
 html[data-theme="light"] .gal:hover{box-shadow:0 30px 66px -30px rgba(20,20,40,.35)}
 .gal img{width:100%;height:auto}
-.gal-tag{position:absolute;top:10px;left:10px;z-index:2;font-family:var(--mono);font-size:11px;
-  color:#dedee6;background:rgba(10,10,14,.72);border:1px solid rgba(255,255,255,.18);
-  border-radius:999px;padding:3px 9px;backdrop-filter:blur(6px)}
 .gal figcaption{position:absolute;left:0;right:0;bottom:0;padding:26px 16px 12px;font-size:13px;color:#e8e8ee;
   background:linear-gradient(transparent,rgba(6,6,9,.88));display:flex;justify-content:space-between;gap:12px}
 .gal figcaption span{color:#9a9aa6;font-family:var(--mono);font-size:11px}
@@ -419,16 +416,14 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
     <div class="reveal">
       <p class="eyebrow">SCREENSHOTS</p>
       <h2>真实运行界面</h2>
-      <p class="sub">以下均为本机运行时的实拍，未做视觉修饰；主播未开播的板块按空态展示，角标已注明。</p>
+      <p class="sub">以下均为本机运行时的实拍，未做视觉修饰。</p>
     </div>
     <div class="gallery">
       <figure class="gal reveal">
-        <span class="gal-tag">主播未开播 · 右侧弹幕面板照常</span>
         <img src="assets/app-broadcast.webp" alt="直播间：左侧直播画面与实时弹幕，右侧是直播状态与发弹幕框" width="1920" height="953" loading="lazy" />
         <figcaption>直播间：画面、弹幕、发弹幕<span>BROADCAST</span></figcaption>
       </figure>
       <figure class="gal reveal">
-        <span class="gal-tag">六路均未开播</span>
         <img src="assets/app-monitor.webp" alt="监控室：同时看多路直播，布局与音量可分别设置" width="1920" height="953" loading="lazy" />
         <figcaption>监控室：多路同时看<span>MONITOR</span></figcaption>
       </figure>
