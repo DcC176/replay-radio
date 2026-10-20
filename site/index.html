@@ -173,6 +173,9 @@ h2{font-size:clamp(24px,3.2vw,36px);line-height:1.25;letter-spacing:-.01em;font-
   box-shadow:0 30px 66px -28px rgba(0,0,0,.92)}
 html[data-theme="light"] .gal:hover{box-shadow:0 30px 66px -30px rgba(20,20,40,.35)}
 .gal img{width:100%;height:auto}
+.gal-tag{position:absolute;top:10px;left:10px;z-index:2;font-family:var(--mono);font-size:11px;
+  color:#dedee6;background:rgba(10,10,14,.72);border:1px solid rgba(255,255,255,.18);
+  border-radius:999px;padding:3px 9px;backdrop-filter:blur(6px)}
 .gal figcaption{position:absolute;left:0;right:0;bottom:0;padding:26px 16px 12px;font-size:13px;color:#e8e8ee;
   background:linear-gradient(transparent,rgba(6,6,9,.88));display:flex;justify-content:space-between;gap:12px}
 .gal figcaption span{color:#9a9aa6;font-family:var(--mono);font-size:11px}
@@ -319,7 +322,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
   <div class="spot" id="spot" aria-hidden="true"></div>
   <div class="wrap hero-wrap">
     <div class="hero-head">
-      <span class="chip"><span class="dot" aria-hidden="true"></span>v<span id="verChip">1.0.57</span> · 最新版</span>
+      <span class="chip"><span class="dot" aria-hidden="true"></span>v<span id="verChip">1.0.68</span> · 最新版</span>
       <h1>简洁全能的<br /><em>第三方 B 站客户端</em></h1>
       <p class="lede">直播、回放、节目单、歌单、监控室、动态，全都收在同一个页面。<span style="white-space:nowrap">一个 EXE 打开就用</span>，数据只留在本机。</p>
     </div>
@@ -416,14 +419,16 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
     <div class="reveal">
       <p class="eyebrow">SCREENSHOTS</p>
       <h2>真实运行界面</h2>
-      <p class="sub">以下均为本机运行时的实拍，未做视觉修饰。</p>
+      <p class="sub">以下均为本机运行时的实拍，未做视觉修饰；主播未开播的板块按空态展示，角标已注明。</p>
     </div>
     <div class="gallery">
       <figure class="gal reveal">
+        <span class="gal-tag">主播未开播 · 右侧弹幕面板照常</span>
         <img src="assets/app-broadcast.webp" alt="直播间：左侧直播画面与实时弹幕，右侧是直播状态与发弹幕框" width="1920" height="953" loading="lazy" />
         <figcaption>直播间：画面、弹幕、发弹幕<span>BROADCAST</span></figcaption>
       </figure>
       <figure class="gal reveal">
+        <span class="gal-tag">六路均未开播</span>
         <img src="assets/app-monitor.webp" alt="监控室：同时看多路直播，布局与音量可分别设置" width="1920" height="953" loading="lazy" />
         <figcaption>监控室：多路同时看<span>MONITOR</span></figcaption>
       </figure>
@@ -477,9 +482,9 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5l8-1.1v7.1H3zM12 4.3L21 3v8.5h-9zM3 12.5h8v7.1l-8-1.1zM12 12.5h9V21l-9-1.3z"/></svg>
           </div>
           <div>
-            <h4 id="assetName">ReplayRadio-v1.0.57.exe <code id="assetArch">x64</code></h4>
+            <h4 id="assetName">ReplayRadio-v1.0.68.exe <code id="assetArch">x64</code></h4>
             <ul>
-              <li id="assetVer">版本 v1.0.57</li>
+              <li id="assetVer">版本 v1.0.68</li>
               <li id="assetSize">体积约 55 MB</li>
               <li>免安装 · 单文件</li>
               <li>SHA256 见 Release 页</li>
@@ -578,7 +583,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
 
   /* ⚠️ 发版时只改这三行：版本号 / 安装包体积。下载地址与文件名会自动拼出来。
      改完记得同步 index.html 顶部静态文案里的 v1.0.35（无 JS 时显示）。 */
-  var VERSION = "1.0.57";
+  var VERSION = "1.0.68";
   var ASSET_SIZE_MB = 53;
   var ASSET_NAME = "ReplayRadio-v" + VERSION + ".exe";
   var ASSET_URL = "https://github.com/" + REPO + "/releases/download/v" + VERSION + "/" + ASSET_NAME;
