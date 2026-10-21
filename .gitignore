@@ -102,3 +102,5 @@ data/stations.json.bak_*
 data/follow_cache.json
 data/playlists.json
 data/song_tags.json
+# buvid 持久化 cookie（v1.0.69 起写入，本机专属、不进仓库）
+data/buvid.json

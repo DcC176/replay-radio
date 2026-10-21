@@ -1103,7 +1103,12 @@ BAN_COOLDOWN = 120        # 第一次撞 412 的冷却（秒）
 BAN_MAX = 1800
 
 
-def _bili_fetch(url, referer, sess, timeout):
+def _bili_fetch(url, referer, sess, timeout, no_buvid=False):
+    """所有 B 站请求的底层出口。
+
+    ⚠️ `no_buvid=True` 只在「领取 buvid 自己」时用 —— 否则会递归：
+       _bili_fetch → buvid_cookie → (没货) → _bili_fetch …… 无限套娃。
+    """
     hdrs = {
         "User-Agent": UA,
         "Referer": referer,
@@ -1111,8 +1116,15 @@ def _bili_fetch(url, referer, sess, timeout):
         "Accept-Encoding": "identity",
         "Origin": "https://www.bilibili.com",
     }
+    ck = []
     if sess:
-        hdrs["Cookie"] = "SESSDATA=%s" % sess
+        ck.append("SESSDATA=%s" % sess)
+    if not no_buvid:
+        bv = buvid_cookie()
+        if bv:
+            ck.append(bv)
+    if ck:
+        hdrs["Cookie"] = "; ".join(ck)
     req = urllib.request.Request(url, headers=hdrs)
     with urlopen(req, timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
@@ -3207,6 +3219,26 @@ CHAT_LOCK = threading.Lock()
 CHAT_BACKLOG_MAX = 30
 
 
+# ---------------------------------------------------------------- WS 推送的开播状态
+#
+# 为什么要有这个：开播状态原来靠前端每 60 秒打一次 api.live 接口（HTTP）。
+# 而弹幕连接本身就是一条 WebSocket —— B 站在里面**主动推** `LIVE` / `PREPARING`，
+# 拿到就直接用，一次 HTTP 都不用发（WS 也不占浏览器那 6 条 HTTP 连接的名额）。
+# 参考 DD_Monitor_CE 的做法：它把弹幕/状态都挂在 WS 上，HTTP 只用来取网关地址。
+LIVE_WS = {}                 # room_id(str) -> {"living": bool, "title": str, "at": ts}
+LIVE_WS_TTL = 180.0          # 3 分钟没新消息就认为不新鲜，回退 HTTP
+
+
+def live_ws_hit():
+    """WS 里有没有足够新的开播状态。有就返回，没有返回 None。"""
+    with CHAT_LOCK:
+        rec = LIVE_WS.get(str(cur_room()))
+        rec = dict(rec) if rec else None
+    if not rec or (time.time() - float(rec.get("at") or 0)) > LIVE_WS_TTL:
+        return None
+    return rec
+
+
 def chat_state(sid=None):
     sid = str(sid or cur_station().get("id"))
     with CHAT_LOCK:
@@ -3352,7 +3384,15 @@ def _chat_parse_nested(sid, payload):
         if op == 5 and ver == 0:
             try:
                 j = json.loads(payload[off + 16:off + ln].decode("utf-8", "replace"))
-                if str(j.get("cmd") or "").startswith("DANMU_MSG") and j.get("info"):
+                cmd = str(j.get("cmd") or "")
+                # B 站主动推的开播/下播：拿到就记下来，供 /api/status/board 直接使用
+                if cmd in ("LIVE", "PREPARING"):
+                    rid = str(j.get("roomid") or cur_room())
+                    with CHAT_LOCK:
+                        LIVE_WS[rid] = {"living": cmd == "LIVE",
+                                        "title": str(j.get("title") or ""),
+                                        "at": time.time()}
+                if cmd.startswith("DANMU_MSG") and j.get("info"):
                     info = j["info"]
                     who = info[2] or []
                     _chat_broadcast(sid, {"type": "danmaku", "uid": who[0] or 0,
@@ -3369,7 +3409,7 @@ def _chat_worker(sid):
     try:
         while True:
             with CHAT_LOCK:
-                if not st["subs"]:
+                if not st["subs"] and not st.get("keep"):
                     break
             sock = None
             try:
@@ -3392,7 +3432,7 @@ def _chat_worker(sid):
                 last_hb = time.time()
                 while True:
                     with CHAT_LOCK:
-                        if not st["subs"]:
+                        if not st["subs"] and not st.get("keep"):
                             break
                     if time.time() - last_hb > 25:
                         _ws_send(sock, _bili_pack(b"", 2))
@@ -3427,6 +3467,28 @@ def _chat_worker(sid):
             time.sleep(3)                 # 重连间隔
     finally:
         st["worker"]["running"] = False
+
+
+def live_ws_start():
+    """给「当前主播」挂一条**常驻**的弹幕/状态连接（不需要有人看弹幕）。
+
+    ⚠️ 只设 keep、不建订阅队列 —— 它不服务弹幕面板，只为了接 B 站推的
+       LIVE / PREPARING。切主播时要把上一位的 keep 清掉，否则会一直连着一堆房间。
+    """
+    cur = str(cur_station().get("id"))
+    with CHAT_LOCK:
+        for k, other in CHAT.items():
+            if k != cur:
+                other["keep"] = False
+    st = chat_state(cur)
+    with CHAT_LOCK:
+        st["keep"] = True
+        running = st["worker"]["running"]
+    if not running:
+        try:
+            threading.Thread(target=_chat_worker, args=(cur,), daemon=True).start()
+        except Exception:
+            pass
 
 
 def chat_subscribe():
@@ -4893,8 +4955,27 @@ def api_status_board(refresh=False):
         bucket = STATUS_CACHE.setdefault(sid, {"at": 0.0, "data": None})
         hit = bucket["data"]
 
+    # ① 优先用 WS 推来的状态（一次 HTTP 都不发）；不新鲜才回退到接口
+    ws = None if refresh else live_ws_hit()
+    if ws:
+        prev = (hit or {}).get("live") or {}
+        base = {"living": bool(ws.get("living")), "mid": cur_mid(), "room_id": cur_room(),
+                "title": ws.get("title") or prev.get("title") or "",
+                "url": "https://live.bilibili.com/%s" % cur_room()}
+        # 封面/分区/开播时长这些 WS 不推，沿用上一次 HTTP 的结果，别把弹窗搞秃
+        for k2 in ("cover", "area_name", "start"):
+            if k2 in prev:
+                base[k2] = prev[k2]
+        out["live"] = base
+        out["source"] = "ws"
+        out["ok"] = True
+        with STATUS_LOCK:
+            bucket["at"] = time.time()
+            bucket["data"] = out
+        return 200, out
     try:
         out["live"] = fetch_live()
+        out["source"] = "http"
     except Exception as e:
         # 接口偶发失败时，退回上一次成功的结果，好过让弹窗空白
         prev = (hit or {}).get("live")
@@ -5290,26 +5371,63 @@ DYN_TTL_OK = 300            # 成功结果缓存 5 分钟（动态不常变，�
 DYN_TTL_FAIL = 60
 _DYN_LOCK = threading.Lock()
 _DYN_CACHE = {}             # mid -> {"at": ts, "data": {...}}
-_BUVID = {"v": "", "at": 0.0}
+_BUVID = {"v": "", "at": 0.0, "nut": 0}
+BUVID_FILE = os.path.join(ROOT, "data", "buvid.json")
 
 
-def bili_buvid3(force=False):
-    """领一个 buvid3（B 站要求的风控指纹 cookie），缓存 12 小时。"""
+def buvid_cookie():
+    """"buvid3=…; b_nut=…" —— B 站判「是不是陌生客户端」的设备指纹，**落盘持久化**。
+
+    ⚠️ 为什么必须带：本项目 5277 那段实测结论写着 —— 只带 buvid3 仍是风控（code=-352），
+       **SESSDATA + buvid3 才 code=0**。但此前只有「动态 / 弹幕」两处手动带了，
+       18 处 `bili_get` 全都裸着 → 列表 / 歌单 / 归档被当成陌生客户端，更容易 412。
+    ⚠️ 为什么要落盘：只放内存的话每次重启换一个新设备指纹，等于天天当陌生人，
+       反而更容易被限流。DD_Monitor_CE 的做法也是把 buvid3 存进配置长期复用。
+    """
     now = time.time()
     with _DYN_LOCK:
-        if not force and _BUVID["v"] and now - _BUVID["at"] < 12 * 3600:
-            return _BUVID["v"]
-    v = ""
+        if _BUVID["v"] and now - _BUVID["at"] < 12 * 3600:
+            return "buvid3=%s; b_nut=%d" % (_BUVID["v"], _BUVID["nut"])
+    # 内存没有 → 先看盘（重启后沿用同一个身份）
     try:
-        d = bili_get(BILI_FINGER_API, referer="https://www.bilibili.com")
-        v = str((d.get("data") or {}).get("b_3") or "")
-    except Exception:
-        v = ""
+        with open(BUVID_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        v = str(d.get("v") or "")
+        nut = int(d.get("nut") or 0)
+    except (OSError, ValueError):
+        v, nut = "", 0
+    if not v:
+        # 领一个：**裸请求**（no_buvid=True）避免递归
+        try:
+            r = _bili_fetch(BILI_FINGER_API, "https://www.bilibili.com", "", 15,
+                            no_buvid=True)
+            v = str((r.get("data") or {}).get("b_3") or "")
+        except Exception:
+            v = ""
+        nut = int(now)
+        if v:
+            try:
+                os.makedirs(os.path.dirname(BUVID_FILE), exist_ok=True)
+                _write_json_file(BUVID_FILE, {"v": v, "nut": nut})
+            except OSError:
+                pass
     if v:
         with _DYN_LOCK:
             _BUVID["v"] = v
+            _BUVID["nut"] = nut or int(now)
             _BUVID["at"] = now
-    return v
+        return "buvid3=%s; b_nut=%d" % (_BUVID["v"], _BUVID["nut"])
+    return ""
+
+
+def bili_buvid3(force=False):
+    """只要 buvid3 的值（别的模块在用）。统一走 buvid_cookie，避免两份逻辑各自递归。"""
+    if force:
+        with _DYN_LOCK:
+            _BUVID["at"] = 0.0
+    ck = buvid_cookie()
+    m = re.search(r"buvid3=([^;]+)", ck)
+    return m.group(1) if m else ""
 
 
 def _dyn_pics(major):
@@ -6235,6 +6353,12 @@ def main():
 
     # 升级后 EXE 换了文件名，协议注册还指着老版本 —— 每次启动顺手校正（详见函数注释）
     protocol_refresh()
+
+    # 给当前主播挂一条常驻 WS：开播/下播由 B 站主动推，省掉每 60 秒一次的 HTTP 轮询
+    try:
+        live_ws_start()
+    except Exception:
+        pass
 
     if not os.path.exists(os.path.join(ROOT, "index.html")):
         # 正常情况下走不到这里：单文件模式已从内置资源释放。
