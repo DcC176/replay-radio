@@ -718,8 +718,17 @@
     var box = document.getElementById('ban-alert');
     var txt = document.getElementById('ban-txt');
     if (!box) return;
-    if (banLeft <= 0) { box.hidden = true; return; }
+    if (banLeft <= 0) {
+      /* 没限流也要显示 —— 用户要求"正常时给出明确的正常"，
+         否则"不显示"和"还没问到"看起来是一样的。 */
+      box.hidden = false;
+      box.setAttribute('data-state', 'ok');
+      if (txt) txt.textContent = '目前无限流';
+      box.title = 'B 站接口响应正常（最近一次请求没有被风控拒绝）。';
+      return;
+    }
     box.hidden = false;
+    box.setAttribute('data-state', 'ban');
     if (txt) {
       var m = Math.floor(banLeft / 60), s2 = banLeft % 60;
       txt.textContent = 'B 站限流中 · 约 ' + (m ? m + ' 分 ' : '') + s2 + ' 秒后恢复';

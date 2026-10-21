@@ -209,9 +209,9 @@ window.__BOOT_T0 = Date.now();
   </nav>
   <div class="tb-right">
     <!-- B 站风控限流提示：平时隐藏，撞上 412 后由 /api/ping 的 ban_left 驱动显示 -->
-    <div class="ban-alert" id="ban-alert" hidden role="status" aria-live="polite">
+    <div class="ban-alert" id="ban-alert" data-state="wait" role="status" aria-live="polite">
       <span class="ban-dot" aria-hidden="true"></span>
-      <span class="ban-txt" id="ban-txt">B 站限流中</span>
+      <span class="ban-txt" id="ban-txt">检测限流状态…</span>
     </div>
     <!-- 四色灯：点亮谁就看谁，可以同时点亮多人（混合播放几人的内容）。
          主站默认点亮，不允许全部熄灭。 -->

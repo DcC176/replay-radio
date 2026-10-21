@@ -35,7 +35,7 @@ OUT = os.path.join(ROOT, "发布")
 # 这些 build_* 目录纯属缓存（不进包、不进版本库），可以随时手动删除。
 BUILD = os.path.join(ROOT, "build_%s" % time.strftime("%Y%m%d_%H%M%S"))
 
-APP_VERSION = "1.0.70"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.0.71"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，

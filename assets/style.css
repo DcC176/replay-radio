@@ -3791,26 +3791,45 @@ body.mv-playing .mv-disc { animation-play-state: running; }
 
 /* 撞上 B 站 412 时出现，明确告诉用户「是被限流，不是坏了」，并给一个大致恢复时间。
    用固定的琥珀色而不是主题色 —— 它要跳出页面配色、被一眼看见。 */
+/* 三态：wait（刚打开，还没问到）/ ok（正常）/ ban（限流中）。
+   常驻显示 —— 用户要求"没限流时也要看得见"，不能靠"不显示"来表达正常。 */
 .ban-alert {
   display: inline-flex;
   align-items: center;
   gap: 7px;
   padding: 5px 11px 5px 9px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 176, 66, .45);
-  background: rgba(255, 152, 0, .12);
-  color: #ffc266;
   font-size: 12px;
   white-space: nowrap;
   margin-right: 4px;
+  border: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--muted);
+  transition: color .2s, border-color .2s, background .2s;
 }
 .ban-dot {
   width: 7px; height: 7px;
   border-radius: 50%;
-  background: #ffb042;
+  background: currentColor;
+  flex: 0 0 auto;
+  opacity: .75;
+}
+/* 正常：中性绿，安静一点，不抢注意力 */
+.ban-alert[data-state="ok"] {
+  border-color: rgba(70, 199, 132, .38);
+  background: rgba(70, 199, 132, .10);
+  color: #63d69b;
+}
+/* 限流：琥珀 + 呼吸点 */
+.ban-alert[data-state="ban"] {
+  border-color: rgba(255, 176, 66, .45);
+  background: rgba(255, 152, 0, .12);
+  color: #ffc266;
+}
+.ban-alert[data-state="ban"] .ban-dot {
   box-shadow: 0 0 0 0 rgba(255, 176, 66, .6);
   animation: banPulse 1.6s ease-out infinite;
-  flex: 0 0 auto;
+  opacity: 1;
 }
 @keyframes banPulse {
   0%   { box-shadow: 0 0 0 0 rgba(255, 176, 66, .55); }
