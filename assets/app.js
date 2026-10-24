@@ -84,7 +84,8 @@
        programs(清单) / segments/*(分段) / live/*(直播) / status-board(主播状态)
        / weibo*(微博) / dynamic(动态) / series(回放来源) —— 后几个是补上的。
      不带 station 的：/api/status(B站登录态)、/api/stations(主播注册表)、
-       /api/img(图片代理)、/api/protocol、/api/ping —— 都是全局的。 */
+       /api/img(图片代理)、/api/protocol、/api/ping —— 都是全局的。
+       /api/dd/*(DD 看播档案) 也是全局的：它读的是**登录者自己**的 vtb.cat 记录。 */
   var STATION_RE = new RegExp('^/api/(' + [
     'programs',
     'segments/',
@@ -94,6 +95,9 @@
     'weibo',
     'dynamic',
     'series'
+    /* ⚠️ `dd/` **不在**这里：DD 看播档案读的是**登录者自己**的 vtb.cat 记录
+       （「我看过谁 / 我发过什么」），跟当前板块是哪位主播无关。
+       曾经把 dd/ 加进来过 —— 那是错的，会让「自己的档案」变成「主播的档案」。 */
   ].join('|') + ')');
   /* ---------- 主题色：随「板块」（当前在看的主播）切换 ----------
      每位主播在 data/stations.json 里有一个 accent。切换时把它写进 --red / --red-soft，
@@ -756,6 +760,645 @@
     }
   }
 
+  /* ---------------------------------------------------------- DD 板块（vtb.cat）
+
+     词云与记录都来自 vtb.cat 的 actions 接口：它按 **B 站 UID** 查弹幕记录，
+     不需要登录，也不需要 uid 映射（实测 from_id 就是 B 站 UID）。
+     数据量取决于该主播在那个站上的记录多少 —— 有的主播几万条，有的只有几十条。 */
+  /* ---------------------------------------------------------- DD：看播档案（vtb.cat 同构）
+
+     数据来自 vtb.cat 的 `actions?uid=` —— 它是**这个 UID 自己的互动记录**：
+     每条带 `liver_name`（被互动的主播）、`medal_level`（粉丝牌）、`gift_*`、`action_name`。
+     所以：
+       左栏「N 个常去」 = 按 liver 聚合（互动次数 + 打赏额 + 粉丝牌）
+       右栏「主播卡 + 粉丝/互动/打赏/上舰 + 筛选 + 互动流」 */
+  var ddPState = { page: 1, hasMore: false, kind: "", order: "time_desc", kw: "", liver: "",
+                   loaded: false, view: "list", side: "money", desc: true,
+                   rows: [], board: [] };
+  /* uid → {face, uname}。头像基本不变，后端落了盘缓存，这里只是内存副本。 */
+  var ddFaces = {};
+
+  function ddTxt(id, t) { var e = document.getElementById(id); if (e) e.textContent = t; }
+
+  function ddFmtTime(s2) {                       // 10-24 13:00（榜单/首次记录用短格式）
+    var t = String(s2 || "");
+    return t ? t.replace("T", " ").slice(5, 16) : "";
+  }
+
+  function ddFullTime(s2) {                      // 2026/10/24 13:00:52（互动流用长格式）
+    var t = String(s2 || "").replace("T", " ");
+    if (!t) return "";
+    return t.slice(0, 10).replace(/-/g, "/") + " " + t.slice(11, 19);
+  }
+
+  function ddDay(s2) { return String(s2 || "").replace("T", " ").slice(0, 10); }
+  function ddHM(s2) { return String(s2 || "").replace("T", " ").slice(11, 19); }
+
+  function ddKindLabel(r) {
+    var k = String(r.kind || '');
+    if (k === 'gift') return '礼物';
+    if (k === 'sc') return 'SuperChat';
+    if (k === 'guard' || r.guard > 0) return '大航海';
+    return '弹幕';
+  }
+
+  /* 头像：拿不到 face 时 faceHtml 会自动退成首字母色块（不要手写 <img>） */
+  function ddAvatar(uid, name, cls) {
+    var f = (uid && ddFaces[uid]) ? ddFaces[uid].face : '';
+    return faceHtml(f, cls, name);
+  }
+
+  /* 主播名 → 左榜里那条（拿 uid / 房间号）。actions 行也带 liver_id，老数据可能没有。 */
+  function ddLiverMeta(name) {
+    var hit = null;
+    (ddPState.board || []).forEach(function (r) { if (!hit && r.name === name) hit = r; });
+    return hit || {};
+  }
+
+  function ddLoadFaces() {
+    var uids = (ddPState.board || []).map(function (r) { return String(r.id || ''); })
+      .filter(function (u, i, a) { return /^\d+$/.test(u) && a.indexOf(u) === i; });
+    if (!uids.length) return;
+    fetch('/api/dd/faces?uids=' + uids.join(',')).then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.faces) return;
+        Object.keys(d.faces).forEach(function (u) { ddFaces[u] = d.faces[u]; });
+        ddRenderBoard();               // 补上头像后重画一次（布局不变，只是把占位换成图）
+        if (ddPState.rows.length) ddPaintRows();
+      }).catch(function () { /* 取不到就一直是首字母块，不影响功能 */ });
+  }
+
+  /* ---------------- 左栏：主播榜 ---------------- */
+
+  function ddBoardRows() {
+    var key = ddPState.side === 'count' ? 'n' : 'money';
+    var rows = (ddPState.board || []).slice();
+    rows.sort(function (a, b) {
+      var d = (b[key] || 0) - (a[key] || 0);
+      if (!d) d = (b.n || 0) - (a.n || 0);
+      return ddPState.desc ? d : -d;
+    });
+    return rows;
+  }
+
+  function ddRenderBoard() {
+    var box = document.getElementById('ddp-board');
+    if (!box) return;
+    var rows = ddBoardRows();
+    ddTxt('ddp-board-n', (ddPState.board || []).length + ' 个主播榜');
+    if (!rows.length) { box.innerHTML = '<p class="dl-empty">还没有互动记录</p>'; return; }
+    var useCount = ddPState.side === 'count';
+    var max = 1;
+    rows.forEach(function (r) { max = Math.max(max, useCount ? (r.n || 0) : (r.money || 0)); });
+    box.innerHTML = rows.map(function (r, i) {
+      var cur = useCount ? (r.n || 0) : (r.money || 0);
+      // 没打过赏的主播在「按金额」排序下金额是 0 —— 那种行改显示次数，别写成 0.0 元
+      var showCount = useCount || !(r.money > 0);
+      var val = showCount ? ((r.n || 0) + ' 条') : ('¥' + (r.money || 0).toFixed(1));
+      var bar = showCount ? (r.n || 0) : (r.money || 0);
+      var w = Math.max(2, Math.round(bar * 100 / (showCount && !useCount ? Math.max(1, rows[0].n || 1) : max)));
+      var on = ddPState.liver && ddPState.liver === r.name;
+      /* 粉丝牌不放正文：左栏只有 300px，牌子会把名字挤成省略号
+         （vtb.cat 那一栏也只显示名字 + 金额）。改成挂在 title 上，鼠标停一下能看到。 */
+      var tip = r.name + (r.medal ? (' · ' + (r.medal_name || '粉丝牌') + ' ' + r.medal + ' 级') : '');
+      return '<div class="ddp-row' + (on ? ' on' : '') + '" data-name="' + esc(r.name) + '"'
+        + ' data-room="' + esc(r.room || '') + '" title="' + esc(tip) + '" style="--i:' + i + '">'
+        + '<i>' + (i + 1) + '</i>'
+        + ddAvatar(String(r.id || ''), r.name, 'ddp-av')
+        + '<span class="nm">' + esc(r.name) + '</span>'
+        + '<span class="mt">' + val + '</span>'
+        + '<span class="bar"><span style="--w:' + w + '%"></span></span>'
+        + '<span class="pct">' + (r.pct != null ? r.pct : 0) + '%</span>'
+        + '</div>';
+    }).join('');
+    bindFaceFallback(box);
+  }
+
+  /* 数字滚动：0 → 目标值（easeOutCubic，约 0.4 秒）。
+     直接写 textContent 会「啪」地出现；滚一下能让人认出这是个会变的数。 */
+  function ddCount(el, to) {
+    if (!el) return;
+    var target = Number(to);
+    if (!isFinite(target)) { el.textContent = (to == null ? '—' : to); return; }
+    var dec = (String(target).split('.')[1] || '').length;
+    var t0 = performance.now(), dur = 460;
+    el.classList.add('counting');
+    function tick(now) {
+      var k = Math.min(1, (now - t0) / dur);
+      var e = 1 - Math.pow(1 - k, 3);
+      el.textContent = (target * e).toFixed(dec);
+      if (k < 1) requestAnimationFrame(tick);
+      else { el.textContent = dec ? target.toFixed(dec) : String(target); el.classList.remove('counting'); }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  /* 四项色带统计：弹幕 / 互动 / 消费 / 勋章（vtb.cat 那一排的长相） */
+  function ddRenderStats(d) {
+    var st = d.stats || {};
+    var mix = d.mix || {};
+    ddCount(document.getElementById('ddp-danmu'), mix.msg == null ? '—' : mix.msg);
+    ddCount(document.getElementById('ddp-actions'), st.actions == null ? '—' : st.actions);
+    ddCount(document.getElementById('ddp-spend'), st.spend == null ? '—' : st.spend);
+    ddCount(document.getElementById('ddp-medals'), st.medals == null ? '—' : st.medals);
+    ddCount(document.getElementById('ddp-follower'), st.follower == null ? '—' : st.follower);
+    ddCount(document.getElementById('ddp-guards'), st.guards == null ? '—' : st.guards);
+    ddCount(document.getElementById('ddp-livers'), st.livers == null ? '—' : st.livers);
+    ddTxt('ddp-uid', 'UID ' + (d.uid || ''));
+    ddTxt('ddp-first', d.first ? ddFmtTime(d.first) : '—');
+    /* 「最近出没」= 抓到的样本里最新的一条 —— vtb.cat 那栏也是这么来的 */
+    ddTxt('ddp-last', d.last ? ddFmtTime(d.last) : '—');
+    /* 卡片上是你自己（登录者），不是当前板块那位主播 ——
+       这个页面读的是「我看过谁」，所以名字和头像都从登录态来。 */
+    var me = d.user || {};
+    ddTxt('ddp-name', me.uname || ('UID ' + (d.uid || '')));
+    var face = document.getElementById('ddp-face');
+    if (face) {
+      if (me.face) { face.src = dynImg(me.face); face.style.display = ''; }
+      else face.style.display = 'none';
+    }
+  }
+
+  /* 两块可视化：互动构成（环形，ECharts）+ 出没时段（24 根 CSS 柱）。
+     环用的是后端算好的 mix（互斥），不是 kinds（guard 会和 msg/gift 重叠）。 */
+  function ddRenderViz(d) {
+    var mix = d.mix || {};
+    var parts = [
+      { n: mix.msg || 0, name: '弹幕', color: '#63b3ed' },
+      { n: mix.gift || 0, name: '礼物', color: '#f0a04b' },
+      { n: mix.sc || 0, name: 'SuperChat', color: '#ef5b7d' },
+      { n: mix.guard || 0, name: '大航海', color: '#68d391' }
+    ].filter(function (x) { return x.n > 0; });
+    var total = parts.reduce(function (a, b) { return a + b.n; }, 0);
+
+    var legend = document.getElementById('ddp-legend');
+    if (legend) {
+      legend.innerHTML = parts.map(function (p) {
+        var pc = total ? (p.n * 100 / total).toFixed(1) : '0.0';
+        return '<span class="ddp-lg"><i style="background:' + p.color + '"></i>'
+          + p.name + '<b>' + p.n + '</b><em>' + pc + '%</em></span>';
+      }).join('') || '<span class="sub">样本里还没有互动</span>';
+    }
+    ddTxt('ddp-ring-sub', total ? ('共 ' + total + ' 条') : '');
+
+    var ring = document.getElementById('ddp-ring');
+    if (ring && window.echarts && total) {
+      var ch = window.__ddRing || window.echarts.init(ring);
+      window.__ddRing = ch;
+      ch.setOption({
+        animationDuration: 900,
+        animationEasing: 'cubicOut',
+        tooltip: { trigger: 'item', formatter: '{b} {c} 条（{d}%）' },
+        series: [{
+          type: 'pie', radius: ['62%', '88%'], center: ['50%', '50%'],
+          avoidLabelOverlap: false, label: { show: false }, labelLine: { show: false },
+          itemStyle: { borderWidth: 2, borderColor: 'transparent' },
+          data: parts.map(function (p) {
+            return { name: p.name, value: p.n, itemStyle: { color: p.color, borderRadius: 3 } };
+          })
+        }]
+      }, true);
+      ch.resize();
+    }
+
+    var hbox = document.getElementById('ddp-hours');
+    if (hbox) {
+      var hs = d.hours || [];
+      var max = Math.max.apply(null, hs.concat([1]));
+      var peak = hs.indexOf(max);
+      ddTxt('ddp-hours-sub', max > 0 ? ('最常在 ' + peak + ' 点') : '');
+      hbox.innerHTML = hs.map(function (n, i) {
+        var h = n ? Math.max(6, Math.round(n / max * 100)) : 2;
+        return '<span class="ddp-hour' + (n === max && n > 0 ? ' peak' : '') + '"'
+          + ' title="' + i + ' 点 · ' + n + ' 条" style="--i:' + i + '">'
+          + '<b style="height:' + h + '%"></b><em>' + (i % 6 === 0 ? i : '') + '</em></span>';
+      }).join('');
+    }
+  }
+
+  /* ---------------- 互动流：列表视图 / 卡片视图 ---------------- */
+
+  function ddPaintRows() {
+    var list = document.getElementById('ddp-feed-list');
+    var cards = document.getElementById('ddp-cards');
+    if (!list || !cards) return;
+    var isCard = ddPState.view === 'card';
+    list.hidden = isCard;
+    cards.hidden = !isCard;
+    if (isCard) ddRenderCards(ddPState.rows);
+    else ddRenderList(ddPState.rows);
+  }
+
+  function ddRenderList(rows) {
+    var box = document.getElementById('ddp-feed-list');
+    if (!box) return;
+    if (!rows.length) { box.innerHTML = '<p class="dl-empty">没有匹配的记录</p>'; return; }
+    box.innerHTML = rows.map(function (r, i) {
+      var meta = ddLiverMeta(r.liver);
+      var uid = String(r.liver_id || meta.id || '');
+      var k = String(r.kind || '');
+      var label = ddKindLabel(r);
+      var badge = '<span class="ddp-badge ' + (k === 'gift' ? 'gift' : k === 'sc' ? 'sc' : (k === 'guard' || r.guard > 0) ? 'guard' : 'msg') + '">' + label + '</span>';
+      var body;
+      if (k === 'gift') body = '送出了 <b>' + esc(r.gift || '礼物') + '</b> <em>×' + (r.amount || 0) + '</em>';
+      else if (r.gift) body = esc(r.gift) + ' <em>×' + (r.amount || 0) + '</em>';
+      else body = r.text ? esc(r.text) : '<em>（无内容）</em>';
+      var room = meta.room || '';
+      return '<div class="ddp-item" style="--i:' + Math.min(i, 30) + '" data-day="' + ddDay(r.at) + '">'
+        + '<span class="c-who">' + esc(r.name || '') + '</span>'
+        + '<span class="c-kind">' + badge + '</span>'
+        + '<span class="c-body">' + body + '</span>'
+        + '<span class="c-liver">' + ddAvatar(uid, r.liver, 'ddp-av sm')
+        + '<b>' + esc(r.liver || '') + '</b></span>'
+        + '<span class="c-time">' + esc(ddFullTime(r.at)) + '</span>'
+        + '<span class="c-ico">' + (room
+            ? '<a href="https://live.bilibili.com/' + esc(room) + '" target="_blank" rel="noopener" title="打开直播间">↗</a>'
+            : '') + '</span>'
+        + '</div>';
+    }).join('');
+    bindFaceFallback(box);
+  }
+
+  /* 卡片视图：按「主播 + 日期」把同一场直播里的记录攒成一张卡（vtb.cat 的卡片视图）。
+     我们的数据里没有直播标题，就用该组最新一条内容当标题 —— 与它那边的观感一致。 */
+  function ddRenderCards(rows) {
+    var box = document.getElementById('ddp-cards');
+    if (!box) return;
+    if (!rows.length) { box.innerHTML = '<p class="dl-empty">没有匹配的记录</p>'; return; }
+    var groups = [], idx = {};
+    rows.forEach(function (r) {
+      var key = (r.liver || '') + '|' + ddDay(r.at);
+      if (idx[key] == null) { idx[key] = groups.length; groups.push({ liver: r.liver, items: [] }); }
+      groups[idx[key]].items.push(r);
+    });
+    box.innerHTML = groups.map(function (g, gi) {
+      var meta = ddLiverMeta(g.liver);
+      var uid = String(meta.id || (g.items[0].liver_id || ''));
+      var first = g.items[0];
+      var title = first.text || (first.gift ? ('送出了 ' + first.gift) : '（无内容）');
+      var rowsHtml = g.items.slice(0, 12).map(function (r) {
+        var t = r.text || (r.gift ? ('送出了 ' + r.gift + ' ×' + (r.amount || 0)) : '');
+        return '<li><time>' + esc(ddHM(r.at)) + '</time>'
+          + '<span class="w">' + esc(r.name || '') + '</span>'
+          + '<span class="k">' + esc(ddKindLabel(r)) + '</span>'
+          + '<span class="t">' + esc(t.slice(0, 46)) + '</span></li>';
+      }).join('');
+      if (g.items.length > 12) rowsHtml += '<li class="more">… 还有 ' + (g.items.length - 12) + ' 条</li>';
+      return '<article class="dd-card" style="--i:' + gi + '">'
+        + '<div class="dd-card-h">'
+        + '<div class="dd-card-t">' + esc(String(title).slice(0, 54)) + '</div>'
+        + '<div class="dd-card-d">' + esc(ddFullTime(first.at)) + '</div>'
+        + '<div class="dd-card-m"><span>互动 <b>' + g.items.length + '</b></span></div>'
+        + '<div class="dd-card-l">' + ddAvatar(uid, g.liver, 'ddp-av') + '<b>' + esc(g.liver || '') + '</b></div>'
+        + '</div>'
+        + '<ul class="dd-card-list">' + rowsHtml + '</ul>'
+        + '</article>';
+    }).join('');
+    bindFaceFallback(box);
+  }
+
+  function ddpQuery(page) {
+    var kwEl = document.getElementById('ddp-kw');
+    var kindEl = document.getElementById('ddp-kind');
+    var ordEl = document.getElementById('ddp-order');
+    ddPState.kw = kwEl ? kwEl.value.trim() : '';
+    ddPState.kind = kindEl ? kindEl.value : '';
+    ddPState.order = ordEl ? ordEl.value : 'time_desc';
+    ddPState.page = page || 1;
+    ddTxt('ddp-stat', '查询中…');
+    var q = '/api/dd/actions?pn=' + ddPState.page + '&ps=100&order=' + encodeURIComponent(ddPState.order)
+      + '&keyword=' + encodeURIComponent(ddPState.kw)
+      + (ddPState.kind ? '&kind=' + encodeURIComponent(ddPState.kind) : '')
+      + (ddPState.liver ? '&liver=' + encodeURIComponent(ddPState.liver) : '');
+    fetch(q).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || d.error) { ddTxt('ddp-stat', (d && d.error) || '查询失败'); return; }
+      ddPState.rows = d.rows || [];
+      ddPaintRows();
+      ddPState.hasMore = d.page * d.size < d.total;
+      var more = document.getElementById('ddp-more');
+      if (more) more.hidden = !ddPState.hasMore;
+      /* 按主播筛选时后端会扫最近 5 页（与左榜同源），`total` 是**筛出来的条数**，
+         不是上游全量 —— 文案里写清楚，免得看起来像总数对不上。 */
+      ddTxt('ddp-stat', ddPState.liver
+        ? ('只看 ' + ddPState.liver + ' · 共 ' + d.total + ' 条（近 5 页）')
+        : ('共 ' + d.total + ' 条 · 第 ' + d.page + ' 页'));
+    }).catch(function () { ddTxt('ddp-stat', '查询失败（网络问题）'); });
+  }
+
+  /* 词云：拿最近几页弹幕统计高频词（后端 /api/dd/wordcloud，2 字滑窗 + 停用词）。
+     纯 DOM 排版 —— ECharts 核心包没有 wordcloud 扩展，为这一个功能再塞一个 JS 不值。 */
+  function ddpCloud() {
+    var box = document.getElementById('ddp-cloud');
+    var btn = document.getElementById('ddp-cloud-btn');
+    if (!box) return;
+    if (!box.hidden) {                       // 再点一次收起
+      box.hidden = true; box.innerHTML = '';
+      if (btn) btn.classList.remove('on');
+      return;
+    }
+    box.hidden = false;
+    if (btn) btn.classList.add('on');
+    box.innerHTML = '<p class="dl-empty">正在统计…</p>';
+    fetch('/api/dd/wordcloud?pages=5').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || d.error) { box.innerHTML = '<p class="dl-empty">' + esc((d && d.error) || '词云生成失败') + '</p>'; return; }
+      var ws = d.words || [];
+      if (!ws.length) { box.innerHTML = '<p class="dl-empty">样本太少，凑不出词云</p>'; return; }
+      var max = ws[0].n || 1, min = ws[ws.length - 1].n || 1;
+      var pal = ['#ef5b7d', '#f0a04b', '#63b3ed', '#68d391', '#b794f4', '#f6e05e'];
+      box.innerHTML = '<div class="ddp-cloud-h"><b>' + ws.length + ' 个高频词</b>'
+        + '<span class="sub">来自 ' + (d.samples || 0) + ' 条弹幕'
+        + (ws.length < 8 ? ' · 样本偏少，重复词不多' : '') + '</span></div>'
+        + '<div class="ddp-cloud-body">' + ws.map(function (w, i) {
+            var t = max === min ? 0.5 : (w.n - min) / (max - min);
+            var sz = Math.round(12 + t * 20);
+            return '<span style="font-size:' + sz + 'px;opacity:' + (0.55 + t * 0.45).toFixed(2)
+              + ';color:' + pal[i % pal.length] + '" title="' + esc(w.w) + ' × ' + w.n + '">'
+              + esc(w.w) + '</span>';
+          }).join('') + '</div>';
+    }).catch(function () { box.innerHTML = '<p class="dl-empty">词云生成失败（网络问题）</p>'; });
+  }
+
+  /* 取不到档案时**必须把原因放到页面上**：只在筛选条右侧写一句，
+     左栏会一直停在「载入中…」，用户只会以为这页坏了（未登录是常见情况）。 */
+  function ddProfileFail(msg) {
+    msg = msg || '档案加载失败';
+    ddTxt('ddp-stat', msg);
+    var box = document.getElementById('ddp-board');
+    if (box) box.innerHTML = '<p class="dl-empty">' + esc(msg) + '</p>';
+    var feed = document.getElementById('ddp-feed-list');
+    if (feed) feed.innerHTML = '<p class="dl-empty">这里显示的是你自己账号的记录，登录后再进来。</p>';
+  }
+
+  function ddpLoadProfile() {
+    if (ddPState.loaded) return;
+    ddPState.loaded = true;
+    fetch('/api/dd/profile?pages=5').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || d.error) { ddProfileFail(d && d.error); return; }
+      ddPState.board = d.board || [];
+      ddRenderBoard();
+      ddRenderStats(d);
+      ddRenderViz(d);
+      ddLoadFaces();
+    }).catch(function () { ddProfileFail('档案加载失败（网络问题）'); });
+  }
+
+  function bindDD() {
+    var go = document.getElementById('ddp-go');
+    if (go) go.addEventListener('click', function () { ddPState.loaded = true; ddpQuery(1); });
+    var kw = document.getElementById('ddp-kw');
+    if (kw) kw.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') ddpQuery(1); });
+    var more = document.getElementById('ddp-more');
+    if (more) more.addEventListener('click', function () { ddpQuery(ddPState.page + 1); });
+    var cloud = document.getElementById('ddp-cloud-btn');
+    if (cloud) cloud.addEventListener('click', ddpCloud);
+    ['ddp-kind', 'ddp-order'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener('change', function () { ddPState.loaded = true; ddpQuery(1); });
+    });
+
+    /* 列表 / 卡片视图 */
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="ddpv"]'), function (r) {
+      r.addEventListener('change', function () {
+        if (!r.checked) return;
+        ddPState.view = r.value;
+        ddPaintRows();
+      });
+    });
+
+    /* 左栏：排序依据（金额 ↔ 次数）+ 直降开关 */
+    var ord = document.getElementById('ddp-side-order');
+    if (ord) ord.addEventListener('click', function () {
+      ddPState.side = ddPState.side === 'money' ? 'count' : 'money';
+      ord.textContent = ddPState.side === 'money' ? '按金额' : '按次数';
+      ord.classList.toggle('on', ddPState.side === 'count');
+      ddRenderBoard();
+    });
+    var desc = document.getElementById('ddp-side-desc');
+    if (desc) desc.addEventListener('click', function () {
+      ddPState.desc = !ddPState.desc;
+      desc.textContent = ddPState.desc ? '直降' : '直升';
+      desc.classList.toggle('on', ddPState.desc);
+      ddRenderBoard();
+    });
+
+    /* 点左榜：把它当作筛选条件（再点一次取消）—— 服务端过滤，分页总数才准 */
+    var board = document.getElementById('ddp-board');
+    if (board) board.addEventListener('click', function (ev) {
+      var row = ev.target.closest && ev.target.closest('.ddp-row');
+      if (!row) return;
+      var name = row.getAttribute('data-name') || '';
+      ddPState.liver = (ddPState.liver === name) ? '' : name;
+      ddRenderBoard();
+      ddPState.loaded = true;
+      ddpQuery(1);
+    });
+  }
+
+  /* 旧的弹幕/词云查询逻辑已由上面的看播档案取代；
+     词云接口（/api/dd/wordcloud）保留，暂未挂 UI。 */
+
+  /* ---------------------------------------------------------- 直播数据（日历 + 粉丝趋势）
+
+     日历：vtb.cat 的 lives（翻页合并去重）。
+       ⚠️ start_at 是"把本地时间当 UTC 存的"，必须用 gmtime/utc 读，否则整体偏 8 小时；
+       ⚠️ end_at 是脏数据（比 start_at 还早），所以不显示时长。
+     粉丝趋势：本程序每天记一次 x/relation/stat 的 follower（一天一条，多记没意义且易 412）。 */
+  var dlState = { data: null, ym: null };
+
+  function dlSetTxt(id, t) { var e = document.getElementById(id); if (e) e.textContent = t; }
+
+  function dlPad(n) { return (n < 10 ? "0" : "") + n; }
+
+  function dlRenderCal() {
+    var box = document.getElementById('dl-cal');
+    if (!box || !dlState.data) return;
+    var days = dlState.data.days || {};
+    var ym = dlState.ym;
+    var y = ym[0], m = ym[1];
+    var first = new Date(y, m - 1, 1);
+    var startWd = first.getDay();            // 0=周日
+    var lastDay = new Date(y, m, 0).getDate();
+    var today = new Date();
+    var isCur = (today.getFullYear() === y && today.getMonth() + 1 === m);
+
+    // 本月最多几场：格子的「热度」按它归一（同 GitHub 那种贡献格子）
+    var monthPrefix = y + '-' + dlPad(m);
+    var maxN = 1;
+    Object.keys(days).forEach(function (k) {
+      if (k.slice(0, 7) === monthPrefix) maxN = Math.max(maxN, days[k].length);
+    });
+
+    var html = ['日', '一', '二', '三', '四', '五', '六']
+      .map(function (w) { return '<div class="dl-wd">' + w + '</div>'; }).join('');
+    for (var i = 0; i < startWd; i++) html += '<div class="dl-cell blank"></div>';
+    for (var d = 1; d <= lastDay; d++) {
+      var key = monthPrefix + '-' + dlPad(d);
+      var list = days[key] || [];
+      var cls = 'dl-cell' + (list.length ? ' has' : '')
+        + (isCur && today.getDate() === d ? ' today' : '');
+      var h = list.length ? (0.28 + 0.72 * (list.length / maxN)) : 0;
+      var money = list.reduce(function (a, x) { return a + (x.money || 0); }, 0);
+      var tip = list.length
+        ? (key + ' · ' + list.length + ' 场' + (money > 0 ? ' · 收 ' + money.toFixed(1) : ''))
+        : key;
+      html += '<div class="' + cls + '" data-day="' + key + '" title="' + esc(tip) + '"'
+        + ' style="--h:' + h.toFixed(2) + ';--i:' + (startWd + d) + '">'
+        + '<div class="d">' + d + '</div>'
+        + (list.length ? '<span class="n">' + list.length + ' 场</span>' : '')
+        + '</div>';
+    }
+    box.innerHTML = html;
+    dlSetTxt('dl-month', y + ' 年 ' + m + ' 月');
+    dlSetTxt('dl-cal-stat', '共 ' + (dlState.data.total || 0) + ' 场');
+  }
+
+  function dlRenderDay(day) {
+    var box = document.getElementById('dl-day');
+    if (!box || !dlState.data) return;
+    var list = (dlState.data.days || {})[day] || [];
+    if (!list.length) { box.innerHTML = '<p class="dl-empty">这一天没有记录</p>'; return; }
+    box.innerHTML = list.map(function (x) {
+      return '<div class="dl-row"><time>' + esc(x.time || '') + '</time>'
+        + '<p>' + esc(x.title || '(无标题)')
+        + ' <em>· 弹幕 ' + (x.message || 0) + ' · 收 ' + (x.money || 0) + '</em></p></div>';
+    }).join('');
+  }
+
+  function dlRenderChart(d) {
+    var box = document.getElementById('dl-chart');
+    var empty = document.getElementById('dl-fans-empty');
+    if (!box) return;
+    var pts = d.points || [];
+    dlSetTxt('dl-fans-stat',
+      '今日 ' + (d.today || 0) + '　1d ' + (d.d1 >= 0 ? '+' : '') + (d.d1 || 0)
+      + (d.d7 !== null && d.d7 !== undefined ? '　7d ' + (d.d7 >= 0 ? '+' : '') + d.d7 : '')
+      + (d.d30 !== null && d.d30 !== undefined ? '　30d ' + (d.d30 >= 0 ? '+' : '') + d.d30 : ''));
+    if (pts.length < 2) {
+      // 只有一天画不出趋势 —— 明确说明，而不是给一张空图
+      if (box) box.style.display = 'none';
+      if (empty) empty.hidden = false;
+      return;
+    }
+    if (box) box.style.display = '';
+    if (empty) empty.hidden = true;
+    if (!window.echarts) return;
+    var chart = window.__dlChart || window.echarts.init(box);
+    window.__dlChart = chart;
+    chart.setOption({
+      animation: false,
+      grid: { left: 56, right: 56, top: 18, bottom: 36 },
+      tooltip: { trigger: 'axis' },
+      xAxis: { type: 'category', data: pts.map(function (p) { return p.d; }),
+               axisLabel: { fontSize: 10 }, axisLine: { lineStyle: { color: 'rgba(128,128,128,.35)' } } },
+      yAxis: [
+        { type: 'value', name: '粉丝', scale: true, nameTextStyle: { fontSize: 10 },
+          splitLine: { lineStyle: { color: 'rgba(128,128,128,.15)' } },
+          axisLabel: { fontSize: 10 } },
+        { type: 'value', name: '增减', nameTextStyle: { fontSize: 10 },
+          splitLine: { show: false }, axisLabel: { fontSize: 10 } }
+      ],
+      series: [
+        { name: '粉丝数', type: 'line', smooth: true, symbol: 'none',
+          data: pts.map(function (p) { return p.n; }),
+          lineStyle: { width: 2, color: '#ef5b7d' },
+          areaStyle: { opacity: .12, color: '#ef5b7d' } },
+        { name: '日增减', type: 'bar', yAxisIndex: 1,
+          data: pts.map(function (p) { return p.delta; }),
+          itemStyle: { color: function (o) { return o.value >= 0 ? '#ef5b7d' : '#5b9bef'; } } }
+      ]
+    });
+    chart.resize();
+  }
+
+  function dlLoad() {
+    // 页数越多场次越全（lives 只按页附带）：互动多的账号 3 页只到 53 场，取 5 页更接近全量
+    fetch('/api/dd/lives?pages=5').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || d.error) { dlSetTxt('dl-cal-stat', (d && d.error) || '日历加载失败'); return; }
+      dlState.data = d;
+      // 默认停在有场次的最近一个月
+      var keys = Object.keys(d.days || {}).sort();
+      var pick = keys.length ? keys[keys.length - 1] : '';
+      var now = new Date();
+      dlState.ym = pick ? [parseInt(pick.slice(0, 4), 10), parseInt(pick.slice(5, 7), 10)]
+                        : [now.getFullYear(), now.getMonth() + 1];
+      dlRenderCal();
+      if (keys.length) {
+        var newest = keys[keys.length - 1];
+        dlRenderDay(newest);
+        var cell0 = document.querySelector('#dl-cal .dl-cell[data-day="' + newest + '"]');
+        if (cell0) cell0.classList.add('sel');
+      }
+    }).catch(function () { dlSetTxt('dl-cal-stat', '日历加载失败（网络问题）'); });
+
+    fetch('/api/dd/fans').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || d.error) { dlSetTxt('dl-fans-stat', (d && d.error) || '粉丝数据取不到'); return; }
+      dlRenderChart(d);
+    }).catch(function () { dlSetTxt('dl-fans-stat', '粉丝数据取不到（网络问题）'); });
+  }
+
+  function bindDDLive() {
+    var cal = document.getElementById('dl-cal');
+    if (cal) cal.addEventListener('click', function (ev) {
+      var cell = ev.target.closest && ev.target.closest('.dl-cell.has');
+      if (!cell) return;
+      Array.prototype.forEach.call(cal.querySelectorAll('.dl-cell.sel'), function (x) {
+        x.classList.remove('sel');
+      });
+      cell.classList.add('sel');
+      dlRenderDay(cell.getAttribute('data-day'));
+    });
+    var prev = document.getElementById('dl-prev');
+    if (prev) prev.addEventListener('click', function () {
+      if (!dlState.ym) return;
+      var y = dlState.ym[0], m = dlState.ym[1] - 1;
+      if (m < 1) { m = 12; y -= 1; }
+      dlState.ym = [y, m]; dlRenderCal();
+    });
+    var next = document.getElementById('dl-next');
+    if (next) next.addEventListener('click', function () {
+      if (!dlState.ym) return;
+      var y = dlState.ym[0], m = dlState.ym[1] + 1;
+      if (m > 12) { m = 1; y += 1; }
+      dlState.ym = [y, m]; dlRenderCal();
+    });
+  }
+
+  /* ---------------------------------------------------------- DD 的两个子页面
+
+     一个板块内部切两页：看播档案（feed）、直播数据（cal）。
+     各页数据**首次进入时才拉**，避免打开 DD 就把两份请求全发出去。
+     （「墓碑」页已按要求去掉：上游 deleted_at 几乎全是空，页面长期是空态。） */
+  var ddSub = 'feed';
+  var ddLoaded = { cal: false };
+
+  function ddShowSub(name) {
+    ddSub = (name === 'cal') ? 'cal' : 'feed';
+    ['feed', 'cal'].forEach(function (k) {
+      var p2 = document.getElementById('ddp-' + k);
+      if (p2) p2.hidden = (k !== ddSub);
+    });
+    var tabs = document.querySelectorAll('#dd-subtabs .dd-sub');
+    Array.prototype.forEach.call(tabs, function (b) {
+      b.classList.toggle('on', b.getAttribute('data-sub') === ddSub);
+    });
+    ddSubLoad();
+    // 环形图在隐藏面板里 init 会拿到 0 宽 —— 切回档案页时补一次尺寸结算
+    if (ddSub === 'feed' && window.__ddRing) setTimeout(function () { window.__ddRing.resize(); }, 30);
+  }
+
+  function ddSubLoad() {
+    if (ddSub === 'cal' && !ddLoaded.cal) { ddLoaded.cal = true; dlLoad(); }
+  }
+
+  function bindDDSub() {
+    var box = document.getElementById('dd-subtabs');
+    if (!box) return;
+    box.addEventListener('click', function (ev) {
+      var b = ev.target.closest && ev.target.closest('.dd-sub');
+      if (b) ddShowSub(b.getAttribute('data-sub'));
+    });
+  }
+
   function fillBuildStamp() {
     var a = document.getElementById('app-build');
     var b = document.getElementById('app-build-hint');
@@ -925,7 +1568,7 @@
   })();
 
   var VIEWS = ['live', 'multi', 'broadcast', 'schedule', 'playlist',
-               'dynamic', 'weibo', 'about', 'settings'];
+               'dynamic', 'weibo', 'dd', 'about', 'settings'];
   var KEY_MUTED = 'xl_muted';
 
   var store = {
@@ -3310,6 +3953,9 @@
     document.body.classList.toggle('view-other', name !== 'live');
     document.body.classList.toggle('view-multi', name === 'multi');
     document.body.classList.toggle('view-broadcast', name === 'broadcast');
+    /* DD 板块自己也要一个 class：它整块全宽、播放器缩到后台。
+       ⚠️ body 上只有这种**特例 class**，没有通用的 view-<name>（踩过一次）。 */
+    document.body.classList.toggle('view-dd', name === 'dd');
     document.querySelectorAll('.tab').forEach(function (t) {
       t.classList.toggle('active', t.getAttribute('data-view') === name);
     });
@@ -3343,6 +3989,16 @@
     if (name === 'playlist' || prev === 'playlist') plSyncView();
     /* 博主下拉依赖 STATIONS，而 bindSettings 跑的时候它还是空的 —— 进页面时补填 */
     if (name === 'settings') { fillWbStations(); fillBuildStamp(); }
+    /* DD 板块：第一次进去自动查一页，省一次点击；词云等用户点（要拉几页） */
+    if (name === 'dd') {
+      ddPState.loaded = false;          // 每次进来重拉一次统计（数据会变）
+      ddPState.page = 1;
+      ddpLoadProfile();
+      var feed = document.getElementById('ddp-feed-list');
+      if (feed && /dl-empty/.test(feed.innerHTML)) ddpQuery(1);
+    }
+    /* DD 板块的子页面：进入时按当前子标签拉数据（播放器缩在后台，播放不中断） */
+    if (name === 'dd') ddSubLoad();
 
     // 离开歌单页：把频道的时间轴换回来 —— 播放器只有一个，歌单是「临时借走」的
     if (prev === 'playlist' && name !== 'playlist' && state.playlistCycle) {
@@ -5082,6 +5738,9 @@
     bindChipFlip();              // 标签切换的「共享布局」过渡（全局捕获，只需绑一次）
     bindWeiboBind();             // 设置页「微博」卡片：填 UID/链接，一键绑到某位主播
     bindBanAlert();              // 右上角 B 站限流提示（带倒计时）
+    bindDD();                    // DD 板块：关键词查询 + 词云
+    bindDDLive();                // 直播数据：日历翻月 + 点日期看场次
+    bindDDSub();                 // DD 内部三个子页面
     fetchStations().then(function (list) {
       var picked = false;
       try { picked = sessionStorage.getItem(PICK_KEY) === '1'; } catch (e) { /* 隐私模式 */ }
@@ -7226,8 +7885,7 @@
       PL.filter = { lang: {}, style: {}, artist: {} };
       PL.picked = {};
       if (inp) inp.value = '';
-      plNote('已导入 ' + d.count + ' 首（' + d.source + '）'
-        + (d.truncated ? '，超过上限已截断' : '') + (d.updated ? '，更新了同名歌单' : ''));
+      plNote(plImportMsg(d, '导入'));
       return renderPlaylist();
     }).catch(function () { plNote('导入失败（网络问题）'); });
   }
@@ -7298,6 +7956,40 @@
       });
   }
 
+  /* 导入/更新的结果文案：字数不多，但「新增几首」和「共几首」必须分开说 ——
+     合并之后总数不变时，用户会以为没生效。 */
+  function plImportMsg(d, verb) {
+    var head = (d.added || 0) > 0
+      ? verb + '完成：新增 ' + d.added + ' 首，共 ' + d.count + ' 首'
+      : verb + '完成：没有新增，共 ' + d.count + ' 首（已是最新）';
+    return head + '（' + d.source + '）'
+      + (d.truncated ? '，超过上限已截断' : '')
+      + (d.updated ? '，更新了同名歌单' : '');
+  }
+
+  /* 「更新」当前歌单：拿它导入时记下的来源链接重新抓一次。
+     ⚠️ 后端是**按 key 合并**，不是整条替换 —— 红心与手动改过的分类不会丢（见 _pl_merge）。 */
+  function plRefresh() {
+    var cur = PL.data || {};
+    var url = String(cur.url || '').trim();
+    if (!url) {
+      plNote('这张歌单没有记录来源链接（可能是早期导入的），请用「导入」重新粘一次地址');
+      return;
+    }
+    plNote('正在更新…（收藏夹/合集大的话要十几秒）');
+    var btn = document.getElementById('pl-refresh');
+    if (btn) btn.disabled = true;
+    postJSON('/api/playlist/import', { url: url }).then(function (d) {
+      if (btn) btn.disabled = false;
+      if (!d || d.error) { plNote((d && d.error) || '更新失败'); return null; }
+      plNote(plImportMsg(d, '更新'));
+      return renderPlaylist();
+    }).catch(function () {
+      if (btn) btn.disabled = false;
+      plNote('更新失败（网络问题）');
+    });
+  }
+
   function bindPlaylist() {
     if (!PL.endedBound) {
       PL.endedBound = true;
@@ -7323,6 +8015,8 @@
     if (pnew) pnew.addEventListener('click', plNew);
     var pmv = document.getElementById('pl-move');
     if (pmv) pmv.addEventListener('click', plMoveTo);
+    var prf = document.getElementById('pl-refresh');
+    if (prf) prf.addEventListener('click', plRefresh);
     var pv = document.getElementById('pl-view');
     if (pv) pv.addEventListener('click', plToggleView);
     var plk = document.getElementById('pp-like');

@@ -104,3 +104,9 @@ data/playlists.json
 data/song_tags.json
 # buvid 持久化 cookie（v1.0.69 起写入，本机专属、不进仓库）
 data/buvid.json
+# dd_faces.json：DD 主播头像落盘缓存（v1.0.90 起，本机专属）
+data/dd_faces.json
+# fans/：粉丝数历史（运行时写，本机专属）
+data/fans/
+# .tmp/：测试/临时脚本目录，非仓库内容
+.tmp/

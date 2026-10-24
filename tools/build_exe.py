@@ -35,7 +35,7 @@ OUT = os.path.join(ROOT, "发布")
 # 这些 build_* 目录纯属缓存（不进包、不进版本库），可以随时手动删除。
 BUILD = os.path.join(ROOT, "build_%s" % time.strftime("%Y%m%d_%H%M%S"))
 
-APP_VERSION = "1.0.71"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.0.90"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
@@ -83,7 +83,7 @@ def ensure_pyinstaller():
 # data/ 下**不该进分发包**的东西：全是运行时数据，体积可到几十上百 MB，
 # 而且每位用户各一份、可重算。`--add-data` 不读 .gitignore，所以必须显式剔除
 # （实测漏剔除时 EXE 从 54MB 涨到 80MB：chu2u 的两个临时 chunk.wav 就占 32MB）。
-DATA_EXCLUDE_DIRS = {"stations"}            # 各主播的清单缓存/分段结果/音频中间产物
+DATA_EXCLUDE_DIRS = {"stations", "fans"}     # 各主播的清单缓存/分段结果/音频中间产物；fans = 开发者自己的粉丝数历史
 DATA_EXCLUDE_SUFFIX = (".bak", ".bak_test")
 
 # data/ 顶层那些**运行时会写**的文件：一律不许把开发机上的内容打进包。
@@ -96,6 +96,11 @@ _EMPTY_PROGRAMS_JS = ("// 通用版不带离线快照：清单由本机服务按
 DATA_RESET = {
     "programs_cache.json": "{}\n",
     "series_cache.json": "{}\n",
+    # 归档清单缓存：键是「UID|剧集id|类型」，实测开发机上这份有 40KB、
+    # 直接带着开发者自己的 UID 打进包（v1.0.84 查出来的）。它只是缓存，清空即可。
+    "archives_cache.json": "{}\n",
+    # DD 头像缓存（uid → face）：是开发者看过的那批主播，别人装了用不上，会自己重新取
+    "dd_faces.json": "{}\n",
     "programs.json": '{\n "meta": {},\n "programs": []\n}\n',
     "programs.js": _EMPTY_PROGRAMS_JS,
     # 这四个是 index.html 静态 <script src> 的容器，必须存在且语法有效，只是内容为空
@@ -113,8 +118,12 @@ DATA_RESET = {
 #
 # playlists.json / song_tags.json 是 v1.0.28 的歌单数据：开发者本机导入过什么歌单、
 # 给哪些歌填过标签，都不该随包发出去（song_tags 的**内置**表在 assets/ 里，那份要进包）。
+#
+# buvid.json 是 B 站的设备指纹（v1.0.7x 起落盘）：打进包等于把开发者的指纹发给所有用户，
+# 而且新用户第一次运行会误以为自己"已经领过"，该自己领一个。data/fans/ 同理 ——
+# 那是开发者自己的粉丝数历史，别人装上去看到的是自己的空趋势才对。
 DATA_EXCLUDE_FILES = {"seg_state.json", ".main_data_owner", "follow_cache.json",
-                      "playlists.json", "song_tags.json"}
+                      "playlists.json", "song_tags.json", "buvid.json"}
 # 归位标记的**变体**（本地测试会把它重命名成 .main_data_owner.stash 再挪回来）同样
 # 不能进包：包里只要出现「已经搬过家」的痕迹，真主站的历史分段就永远归不了位。
 DATA_EXCLUDE_PREFIX = (".main_data_owner",)

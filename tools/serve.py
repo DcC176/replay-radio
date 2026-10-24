@@ -1034,7 +1034,7 @@ STATIONLESS_OK = (
     "/api/playlist/import", "/api/playlist/rename", "/api/playlist/delete",
     "/api/playlist/tag",
     "/api/playlist/create", "/api/playlist/move",
-    "/api/playlist/like", "/api/lyrics", "/api/stations/weibo",
+    "/api/playlist/like", "/api/lyrics", "/api/stations/weibo", "/api/dd/actions", "/api/dd/wordcloud", "/api/dd/lives", "/api/dd/fans", "/api/dd/profile",
 )
 
 
@@ -1095,12 +1095,58 @@ def urlopen(req, timeout):
 # 所以取流撞上 412 就记住冷却时间、冷却期内**不带 SESSDATA**。否则每失败一次就
 # 再用登录态撞一次，会把风控窗口越撑越长，用户只看到「播放地址获取失败」反复刷。
 # ⚠️ 只对取流开（fallback_anon）：弹幕、发弹幕、动态这些**必须**带登录态的不能降级。
-_BAN = {"until": 0.0, "strikes": 0}   # strikes：连续撞了几次 412（用于指数退避）
+# 冷却**按域名分开**：实测同一 IP 下主站域已 412、直播域仍是 code=0 ——
+# B 站的风控是「域名 + 接口」维度的。合在一起记会造成误伤：
+# 主站撞了 412，把没被限的直播域请求也一起拦掉 → 直播间显示"未开播"、画面全黑。
+_BAN = {"until": 0.0, "strikes": 0}        # api.bilibili.com（主站）
+_BAN_LIVE = {"until": 0.0, "strikes": 0}   # api.live.bilibili.com（直播）
+
+
+def _ban_of(url):
+    """按 URL 归属选冷却桶。直播域单独计，互不牵连。"""
+    h = (urllib.parse.urlparse(url).hostname or "")
+    return _BAN_LIVE if h.endswith("live.bilibili.com") else _BAN
 BAN_COOLDOWN = 120        # 第一次撞 412 的冷却（秒）
 # ⚠️ 但 B 站的实际封禁往往有**几十分钟**，固定 120 秒会造成一个死循环：
 #    到一个半小时点 → 试探一次又 412 → 再锁 120 秒 → 用户看到"倒计时结束但限流没结束"。
 #    所以改成**指数退避**：120 → 240 → 480 → …，封顶 30 分钟；只要有一次请求成功就归零。
 BAN_MAX = 1800
+
+# ---------------- 元数据请求限速与去重 ----------------
+#
+# 412 的本质是"单位时间请求太多"。除了撞了就退避，更根本的是**别撞**：
+#   ① 令牌桶：元数据请求 6 次/秒（突发 12）。**取流豁免** —— 取流有自己的缓存与降级，
+#      限速会把播放拖卡。
+#   ② URL 级短缓存：同一 URL 3 秒内重复请求直接复用。列表刷新、状态板轮询、
+#      节目单重建都会在短时间内打同一个接口，去重能省掉相当一部分请求。
+META_QPS = 6.0
+META_BURST = 12
+META_CACHE_TTL = 3.0
+_META_LOCK = threading.Lock()
+_META_BUCKET = [float(META_BURST), time.time()]
+_META_CACHE = {}            # url -> (ts, data)
+
+
+def _meta_throttle():
+    """标准令牌桶：取不到就小步等待，直到拿到为止（最多累计等 2 秒）。
+
+    ⚠️ 必须**循环取**。前两版写成「够就扣、不够就补到 1 再扣」，令牌在 0/1 之间摆动，
+       结果「等一次、不等一次」交替，实际速率是目标的 2 倍（实测 12/s 而非 6/s）。
+    """
+    deadline = time.time() + 2.0
+    while True:
+        with _META_LOCK:
+            now = time.time()
+            _META_BUCKET[0] = min(META_BURST,
+                                  _META_BUCKET[0] + (now - _META_BUCKET[1]) * META_QPS)
+            _META_BUCKET[1] = now
+            if _META_BUCKET[0] >= 1.0:
+                _META_BUCKET[0] -= 1.0
+                return
+            need = (1.0 - _META_BUCKET[0]) / META_QPS
+        if time.time() >= deadline:
+            return                      # 等太久就直接放行，让上层按 412 退避处理
+        time.sleep(min(need, 0.05))     # 小步睡：睡过头会让速率低于目标
 
 
 def _bili_fetch(url, referer, sess, timeout, no_buvid=False):
@@ -1113,6 +1159,7 @@ def _bili_fetch(url, referer, sess, timeout, no_buvid=False):
         "User-Agent": UA,
         "Referer": referer,
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Accept-Encoding": "identity",
         "Origin": "https://www.bilibili.com",
     }
@@ -1145,27 +1192,44 @@ def bili_get(url, referer=REFERER, timeout=25, fallback_anon=False):
        那类做法违反平台规则、且随对方改版立刻失效；真正有效的是**降密度 + 退避**。
     """
     s = sessdata()
-    cooling = time.time() < _BAN["until"]
+    ban = _ban_of(url)              # ⚠️ 按域取冷却桶：主站被限不该拦直播域
+    cooling = time.time() < ban["until"]
     if s and fallback_anon and cooling:
         s = ""                      # 冷却期内直接匿名，别再去撞风控
     if not fallback_anon and cooling:
         raise RuntimeError("B 站风控冷却中，约 %d 秒后再试（刚才有请求被限流 412）。"
                            "这期间界面上部分内容会加载失败，等冷却结束会自动恢复。"
-                           % max(1, int(_BAN["until"] - time.time())))
+                           % max(1, int(ban["until"] - time.time())))
+    # 元数据请求：先查 3 秒短缓存（短时间内重复打同一接口，多半是页面在重复拉）
+    cacheable = not fallback_anon
+    if cacheable:
+        with _META_LOCK:
+            hit = _META_CACHE.get(url)
+        if hit and (time.time() - hit[0]) < META_CACHE_TTL:
+            return hit[1]
+        _meta_throttle()             # 再取一个令牌；取流不走这里
     try:
         r = _bili_fetch(url, referer, s, timeout)
-        _BAN["strikes"] = 0          # 成功一次就把退避归零：说明封禁真的过去了
+        ban["strikes"] = 0           # 成功一次就把退避归零：说明封禁真的过去了
+        if cacheable:
+            with _META_LOCK:
+                _META_CACHE[url] = (time.time(), r)
+                if len(_META_CACHE) > 400:      # 别让缓存无限长大
+                    cut = time.time() - META_CACHE_TTL
+                    for k in [k2 for k2, v in _META_CACHE.items() if v[0] < cut]:
+                        _META_CACHE.pop(k, None)
         return r
     except urllib.error.HTTPError as e:
         if e.code == 412:
             # 上一次冷却已结束才算「新一轮」，免得每次重试都往日志里刷一行。
-            fresh = time.time() >= _BAN["until"]
-            _BAN["strikes"] = (_BAN["strikes"] or 0) + 1
-            wait = min(BAN_COOLDOWN * (2 ** (_BAN["strikes"] - 1)), BAN_MAX)
-            _BAN["until"] = time.time() + wait
+            fresh = time.time() >= ban["until"]
+            ban["strikes"] = (ban["strikes"] or 0) + 1
+            wait = min(BAN_COOLDOWN * (2 ** (ban["strikes"] - 1)), BAN_MAX)
+            ban["until"] = time.time() + wait
             if fresh:
-                print("[bili] 撞上 B 站限流（412），第 %d 次，冷却 %d 秒（上限 %d）%s"
-                      % (_BAN["strikes"], wait, BAN_MAX,
+                print("[bili] %s 撞上 B 站限流（412），第 %d 次，冷却 %d 秒（上限 %d）%s"
+                      % ("直播域" if ban is _BAN_LIVE else "主站域",
+                         ban["strikes"], wait, BAN_MAX,
                          "；取流改匿名重试" if (s and fallback_anon) else ""))
             if s and fallback_anon:
                 return _bili_fetch(url, referer, "", timeout)
@@ -1232,6 +1296,10 @@ def api_status(force=False):
             dd = d.get("data") or {}
             info["logged"] = bool(dd.get("isLogin"))
             info["uname"] = dd.get("uname") or ""
+            # DD 看播档案要「看的人」的身份：这里一次 nav 就把 mid / 头像带回来，
+            # 免得再单独打一次（也免得 DD 页面拿主播的头像去配自己的数据）。
+            info["mid"] = int(dd.get("mid") or 0)
+            info["face"] = dd.get("face") or ""
             info["vip"] = bool((dd.get("vipStatus") or 0) == 1)
         except Exception as e:
             info["error"] = str(e)
@@ -2400,6 +2468,22 @@ def _pl_decorate(it):
     return out
 
 
+def _pl_fav_id(text):
+    """从收藏夹链接里取 fid（media_id）。认不出返回空串。
+
+    支持：space.bilibili.com/<mid>/favlist?fid=<fid>… / ?fid=<fid> / 纯 fid（放在 fav: 前缀后）。
+    """
+    s = (text or "").strip()
+    m = re.search(r"[?&]fid=(\d+)", s)
+    if m:
+        return m.group(1)
+    if s.lower().startswith("fav:"):
+        m2 = re.fullmatch(r"fav:(\d+)", s.strip(), re.I)
+        if m2:
+            return m2.group(1)
+    return ""
+
+
 def _pl_resolve_bvid(text):
     """把用户粘的东西解析成 bvid：完整链接 / b23.tv 短链 / 纯 BV 号。"""
     text = (text or "").strip()
@@ -2437,6 +2521,72 @@ def _pl_strip_index(part):
     s = (part or "").strip()
     out = re.sub(r"^\d{1,3}\s*[_\-.\u3001]\s*", "", s).strip()
     return out or s
+
+
+def _pl_fav_items(fid, limit):
+    """拉一个收藏夹的条目（分页），并把每个 bvid 的 cid 补上。
+
+    ⚠️ 收藏夹接口**不返回 cid**，而歌单条目必须有 cid 才能定位到分P
+       （见 `_pl_item_key` 的说明）。所以这里对每条再取一次 view ——
+       并发 4（与项目其它地方一致），别往上调：这是最容易触发 412 的地方。
+    ⚠️ 收藏夹里可能混着图文/番剧，拿不到 view 的直接跳过，不算失败。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    rows, pn = [], 1
+    while len(rows) < limit:
+        d = bili_get("https://api.bilibili.com/x/v3/fav/resource/list"
+                     "?media_id=%s&pn=%d&ps=20&platform=web" % (fid, pn),
+                     "https://space.bilibili.com/")
+        code = d.get("code")
+        if code != 0:
+            if pn == 1:
+                raise RuntimeError("收藏夹接口 code=%s %s（私密收藏夹需要先在微博…不，需要在 B 站登录）"
+                                   % (code, d.get("message")))
+            break
+        medias = ((d.get("data") or {}).get("medias") or [])
+        if not medias:
+            break
+        for m in medias:
+            bv = str(m.get("bvid") or "")
+            if not bv:
+                continue                    # 图文 / 番剧：没有 bvid
+            rows.append({"bvid": bv,
+                         "title": str(m.get("title") or ""),
+                         "artist": str(((m.get("upper") or {}).get("name")) or ""),
+                         "dur": int(m.get("duration") or 0),
+                         "views": int(((m.get("cnt_info") or {}).get("play")) or 0)})
+            if len(rows) >= limit:
+                break
+        if (d.get("data") or {}).get("has_more") is False:
+            break
+        pn += 1
+        time.sleep(0.4)                     # 翻页间隔，与归档分页一致
+
+    def one(row):
+        try:
+            v = bili_get("%s?bvid=%s" % (VIEW_API, row["bvid"]),
+                         "https://www.bilibili.com/video/%s" % row["bvid"])
+            if v.get("code") != 0:
+                return None
+            data = v.get("data") or {}
+            pages = data.get("pages") or []
+            if not pages:
+                return None
+            cid = int(pages[0].get("cid") or 0)
+            if not cid:
+                return None
+            row["cid"] = cid
+            row["song"] = "《%s》" % (row["title"] or data.get("title") or row["bvid"])
+            row["dur"] = int(pages[0].get("duration") or row["dur"] or 0)
+            return row
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        out = [r for r in ex.map(one, rows) if r]
+    if not out:
+        raise RuntimeError("收藏夹里没有可导入的视频（图文/番剧会被跳过）")
+    return out
 
 
 def _pl_entries(data):
@@ -2580,10 +2730,82 @@ def api_playlist(pid):
     return 404, {"error": "没有这张歌单"}
 
 
+def _pl_save(doc):
+    """写回 playlists.json。返回 (ok, 错误说明)。
+
+    ⚠️ 必须捕获 OSError：Windows 上同一个文件被另一个进程打开时写会抛
+       `PermissionError: [Errno 13]`。之前没捕获 → 未捕获异常 → **连接直接断开**，
+       前端只能显示「网络问题」，用户完全不知道是"另一个本程序还开着"。
+    """
+    try:
+        _write_json_file(PLAYLISTS_FILE, doc)
+        return True, ""
+    except OSError as e:
+        return False, ("写歌单文件失败：%s。最常见的原因是**另一个本程序还在运行**并占用着它，"
+                       "请先完全退出那个实例再试。" % e)
+
+
+def _pl_merge(old_items, new_items):
+    """把新抓到的条目并进旧歌单 —— **保留用户数据**，不整体替换。
+
+    ⚠️ 以前是「重复导入 = 整条替换」，红心（liked）和手动改的分类（lang/style）会被一起冲掉。
+       用户点「更新」只是想让新视频进来，不该为此丢收藏。
+    ⚠️ 源里已经没有的条目**不删**：可能是作者删了，但用户已经标了红心 —— 删了就找不回来。
+       它们会被留在列表末尾（前端按原顺序展示）。
+    """
+    keep = ("liked", "lang", "style")
+    prev = {_pl_item_key(it): it for it in (old_items or [])}
+    out, added = [], 0
+    for it in new_items:
+        k = _pl_item_key(it)
+        old = prev.get(k)
+        if old:
+            for f in keep:
+                if f in old:
+                    it[f] = old[f]
+        else:
+            added += 1
+        out.append(it)
+    seen = {_pl_item_key(it) for it in out}
+    for it in (old_items or []):
+        if _pl_item_key(it) not in seen:
+            out.append(it)
+    return out, added
+
+
 def api_playlist_import(obj):
     """导入（或重复导入 = 更新）一张歌单。"""
+    url = str(obj.get("url") or "").strip()
+    fav = _pl_fav_id(url)
+    if fav:
+        # ---- 收藏夹 ----
+        doc = _playlists_doc()
+        pid = "f" + fav
+        old = [x for x in doc["lists"] if x.get("id") == pid]
+        try:
+            items = _pl_fav_items(fav, PLAYLIST_MAX_ITEMS)
+        except Exception as e:
+            return 502, {"error": "取收藏夹失败：%s" % bili_err(e)}
+        _pl_classify(items)
+        prev_items = (old[0].get("items") if old else None)
+        merged, added = _pl_merge(prev_items, items)
+        name = (old[0].get("name") if old else "") or ("收藏夹 " + fav)
+        entry = {"id": pid, "name": name, "source": "收藏夹 " + fav, "url": url,
+                 "imported_at": int(time.time()), "items": merged}
+        if old:
+            doc["lists"][doc["lists"].index(old[0])] = entry
+        else:
+            doc["lists"].append(entry)
+        ok, why = _pl_save(doc)
+        if not ok:
+            return 500, {"error": why}
+        print("[playlist] 收藏夹 %s：新抓 %d 首，新增 %d，合计 %d"
+              % (fav, len(items), added, len(merged)))
+        return 200, {"ok": True, "id": pid, "count": len(merged), "added": added,
+                     "source": "收藏夹 " + fav, "truncated": len(items) >= PLAYLIST_MAX_ITEMS,
+                     "updated": bool(old), "kind": "fav"}
     try:
-        bvid = _pl_resolve_bvid(obj.get("url"))
+        bvid = _pl_resolve_bvid(url)
     except Exception as e:
         return 400, {"error": str(e)}
     try:
@@ -2605,17 +2827,582 @@ def api_playlist_import(obj):
     doc = _playlists_doc()
     name = src if season_id else ((data.get("title") or src)[:40])
     old = [x for x in doc["lists"] if x.get("id") == pid]
+    prev_items = (old[0].get("items") if old else None)
+    merged, added = _pl_merge(prev_items, items)
     entry = {"id": pid, "name": name, "source": src, "url": obj.get("url") or "",
-             "imported_at": int(time.time()), "items": items}
+             "imported_at": int(time.time()), "items": merged}
     if old:
         doc["lists"][doc["lists"].index(old[0])] = entry
     else:
         doc["lists"].append(entry)
-    _write_json_file(PLAYLISTS_FILE, doc)
-    print("[playlist] 导入 %s：%d 首（%s%s）"
-          % (bvid, len(items), src, "，超上限已截断" if cut else ""))
-    return 200, {"ok": True, "id": pid, "count": len(items), "source": src,
-                 "truncated": cut, "updated": bool(old)}
+    ok, why = _pl_save(doc)
+    if not ok:
+        return 500, {"error": why}
+    print("[playlist] 导入 %s：新抓 %d 首，新增 %d，合计 %d（%s%s）"
+          % (bvid, len(items), added, len(merged), src, "，超上限已截断" if cut else ""))
+    return 200, {"ok": True, "id": pid, "count": len(merged), "added": added,
+                 "source": src, "truncated": cut, "updated": bool(old), "kind": "video"}
+
+
+# ---------------------------------------------------------------- DD 板块（vtb.cat）
+#
+# vtb.cat 的 actions 接口按 **B 站 UID** 查弹幕/留言记录（实测 `uid=<B站UID>` 直接可用，
+# `from_id` 就是该 UID），不需要登录。所以不用做任何 uid 映射。
+DD_API = "https://api.vtb.cat/actions"
+_DD_CACHE = {}              # url -> (ts, data)
+_DD_TTL = 60.0              # 该站自己给的 ttl 是 36 秒，这里放宽一点
+
+
+def dd_uid():
+    """DD 看播档案要的是**「看的人」**（登录者自己）的 UID，不是当前板块那位主播的。
+
+    vtb.cat 的 `actions?uid=` 返回的是「这个 UID 自己干了什么」——发过哪些弹幕、
+    给谁上过舰、在谁的直播间待过。所以：
+      · 「常去的主播榜」「互动流」「我看过的直播日历」= 登录者自己的记录；
+      · 用 cur_mid()（当前主播）取，就会显示「这个主播看过谁」——用户明确指出过这是错的。
+
+    ⚠️ 二者极易混淆（`cur_mid()` 是「被看的人」，这里要的是「看的人」），
+       改这块之前先确认自己拿的是哪一个。
+    """
+    try:
+        info = api_status()[1] or {}
+    except Exception:
+        info = {}
+    mid = str(info.get("mid") or "")
+    if mid.isdigit() and mid != "0":
+        return mid
+    # nav 没给（未登录 / 本地缓存过期）时退回 self_uid()，它自己再试一次
+    try:
+        u = self_uid()
+    except Exception:
+        u = 0
+    return str(u or "")
+
+
+def _dd_fetch(params):
+    """打 vtb.cat。带 60 秒缓存 —— 词云与查询会反复拉同一页。"""
+    url = DD_API + "?" + urllib.parse.urlencode(params)
+    now = time.time()
+    with _DYN_LOCK:
+        hit = _DD_CACHE.get(url)
+    if hit and now - hit[0] < _DD_TTL:
+        return hit[1]
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA, "Accept": "application/json"})
+    with DIRECT_OPENER.open(req, timeout=20) as r:
+        d = json.loads(r.read().decode("utf-8", "replace"))
+    with _DYN_LOCK:
+        _DD_CACHE[url] = (now, d)
+        if len(_DD_CACHE) > 60:
+            for k in [k2 for k2, v in _DD_CACHE.items() if now - v[0] > _DD_TTL]:
+                _DD_CACHE.pop(k, None)
+    return d
+
+
+def _dd_row(it):
+    """把 vtb.cat 的一条原始记录转成前端用的行（两个分支共用）。"""
+    return {"at": it.get("created_at") or "",
+            "name": it.get("from_name") or "",
+            "liver": str(it.get("liver_name") or ""),
+            "liver_id": str(it.get("liver_id") or ""),
+            "text": str(it.get("extra") or ""),
+            "kind": str(it.get("action_name") or ""),
+            "guard": int(it.get("guard_level") or 0),
+            "gift": str(it.get("gift_name") or ""),
+            "amount": int(it.get("gift_amount") or 0),
+            "medal": int(it.get("medal_level") or 0)}
+
+
+def _dd_keep(rows, kind):
+    """类型筛选（服务端做，前端过滤会把分页算错）。"""
+    if kind == "guard":
+        return [r for r in rows if r["guard"] > 0 or r["kind"] in ("guard", "sc_guard")]
+    if kind:
+        return [r for r in rows if r["kind"] == kind]
+    return rows
+
+
+def api_dd_actions(query):
+    """GET /api/dd/actions?keyword=&pn=&ps=&kind=&liver= —— 登录者自己的弹幕/礼物记录。
+
+    ⚠️ 带 `liver=` 时**必须跨页扫**：左榜是用最近 5 页（500 条）建出来的，
+       而最新 100 条里往往只有最近聊的那几位 —— 只筛当前页的话，点榜首会得到 0 条，
+       看起来就像点坏了（v1.0.90 实测踩到）。扫的页数与 profile 一致，缓存也复用。
+    """
+    mid = dd_uid()
+    if not mid.isdigit():
+        return 400, {"error": "DD 读的是你自己账号的记录：请先在「设置」里登录 B 站"}
+    try:
+        ps = max(1, min(100, int((query.get("ps") or ["50"])[0])))
+        pn = max(1, int((query.get("pn") or ["1"])[0]))
+    except ValueError:
+        return 400, {"error": "翻页参数不合法"}
+    order = (query.get("order") or ["time_desc"])[0]
+    if order not in ("time_desc", "time_asc"):
+        order = "time_desc"
+    kind = (query.get("kind") or [""])[0]
+    kw = (query.get("keyword") or [""])[0].strip()
+    liver = (query.get("liver") or [""])[0].strip()
+
+    if liver:
+        try:
+            scan = max(1, min(8, int((query.get("scan") or ["5"])[0])))
+        except ValueError:
+            scan = 5
+        pool = []
+        for p in range(1, scan + 1):
+            params = {"uid": mid, "pn": p, "ps": 100, "order": order}
+            if kw:
+                params["keyword"] = kw
+            try:
+                dd2 = _dd_fetch(params)
+            except Exception as e:
+                if p == 1:
+                    return 502, {"error": "vtb.cat 请求失败：%s" % str(e)[:80]}
+                break
+            pool += [_dd_row(it) for it in (dd2.get("data") or [])]
+        rows = _dd_keep([r for r in pool if r["liver"] == liver], kind)
+        total = len(rows)
+        page_rows = rows[(pn - 1) * ps: pn * ps]
+        return 200, {"ok": True, "total": total, "page": pn, "size": ps,
+                     "rows": page_rows, "uid": mid, "keyword": kw, "liver": liver}
+
+    params = {"uid": mid, "pn": pn, "ps": ps, "order": order}
+    if kw:
+        params["keyword"] = kw
+    try:
+        d = _dd_fetch(params)
+    except Exception as e:
+        return 502, {"error": "vtb.cat 请求失败：%s" % str(e)[:80]}
+    rows = _dd_keep([_dd_row(it) for it in (d.get("data") or [])], kind)
+    return 200, {"ok": True, "total": int(d.get("total") or 0),
+                 "page": pn, "size": ps, "rows": rows,
+                 "uid": mid, "keyword": kw, "liver": ""}
+
+
+# 中文没有分词库时的词频：2 字滑窗 + 停用词。够用、零依赖。
+_DD_STOP = set("""
+主播 直播 一个 这个 那个 什么 怎么 我们 你们 他们 她们 现在 可以 就是 不是 没有 还是
+真的 已经 因为 所以 但是 如果 这样 那样 知道 感觉 有点 好像 应该 时候 一下 一起 自己
+人家 老板 视频 弹幕 好看 好听 哈哈 哈哈哈 草草 好家伙 不会 不要 不用 不能 可以 意思
+""".split())
+
+
+def _dd_words(texts, topn=70):
+    """从一堆弹幕里数出高频中文词。"""
+    cnt = {}
+    for raw in texts:
+        s = str(raw or "")
+        s = re.sub(r"\[[^\]]{1,12}\]", " ", s)        # 去掉 [表情名]
+        s = re.sub(r"https?://\S+", " ", s)
+        s = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", " ", s)
+        for seg in s.split():
+            if re.fullmatch(r"[A-Za-z0-9]+", seg):
+                if len(seg) >= 2:
+                    cnt[seg.lower()] = cnt.get(seg.lower(), 0) + 1
+                continue
+            # 整段本身就是个短句时整个算一个词（弹幕多是「这都不给看」这种 5~8 字的短句，
+            # 只切 2 字窗会变成「这都/都不/不给/给看」四个碎片，读起来像乱码）
+            if 2 <= len(seg) <= 8:
+                if seg not in _DD_STOP:
+                    cnt[seg] = cnt.get(seg, 0) + 1
+            for i in range(len(seg) - 1):
+                w = seg[i:i + 2]
+                if w not in _DD_STOP:
+                    cnt[w] = cnt.get(w, 0) + 1
+    # 去碎片：2 字滑窗会把「咋这样」同时切出「咋这」「这样」，读起来像乱码。
+    # 长词先入选，被已入选的长词包含、且出现次数接近的 2 字词直接丢掉。
+    kept = {}
+    for w in sorted(cnt, key=lambda k: (-len(k), -cnt[k])):
+        if len(w) == 2 and any(w in lw and cnt[lw] >= cnt[w] * 0.8 for lw in kept):
+            continue
+        kept[w] = cnt[w]
+
+    # 阈值按样本量自适应：样本少时若还要求「出现 3 次」，就只有两三个词能上榜，
+    # 看上去像功能坏了（实测 36 条弹幕只出 2 个词）。样本多时才收紧，避免全是碎片。
+    min_n = 3 if len(texts) >= 200 else 2
+    out = [{"w": k, "n": v} for k, v in kept.items() if v >= min_n]
+    out.sort(key=lambda x: -x["n"])
+    return out[:topn]
+
+
+DD_FACES_FILE = os.path.join(ROOT, "data", "dd_faces.json")
+_FACES_LOCK = threading.Lock()
+
+
+def _faces_load():
+    try:
+        with open(DD_FACES_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def api_dd_faces(query):
+    """GET /api/dd/faces?uids=1,2,3 —— 一批 UID 的头像（左榜与互动流要用）。
+
+    头像基本不会变，所以**落盘缓存**（data/dd_faces.json）：
+    同一个主播只打一次，之后永远走本地。不然每次进 DD 都要为几十个主播打几十个请求，
+    既慢又容易把 B 站限流的火引到账号上。
+
+    走**直播域** `live_user/v1/Master/info`（与主站分开的冷却桶），并发 4。
+    """
+    raw = (query.get("uids") or [""])[0]
+    uids = [u for u in (raw.split(",")) if u.isdigit()][:80]
+    if not uids:
+        return 200, {"ok": True, "faces": {}}
+
+    with _FACES_LOCK:
+        cache = _faces_load()
+    out = {}
+    miss = []
+    for u in uids:
+        hit = cache.get(u)
+        if isinstance(hit, dict) and hit.get("face"):
+            out[u] = hit
+        else:
+            miss.append(u)
+
+    if miss:
+        def _one(u):
+            try:
+                d = bili_get("https://api.live.bilibili.com/live_user/v1/Master/info?uid=%s" % u,
+                             "https://live.bilibili.com/%s" % u, timeout=12)
+                info = ((d.get("data") or {}).get("info") or {})
+                face = info.get("face") or ""
+                if face:
+                    return u, {"face": face, "uname": info.get("uname") or ""}
+            except Exception:
+                pass
+            return u, None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+            for u, got in ex.map(_one, miss):
+                if got:
+                    out[u] = got
+                    cache[u] = got
+        # 只把成功的那部分写回（失败的下次再试，不要把 None 钉进缓存）
+        try:
+            os.makedirs(os.path.dirname(DD_FACES_FILE), exist_ok=True)
+            tmp = DD_FACES_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False)
+            os.replace(tmp, DD_FACES_FILE)
+        except OSError:
+            pass
+
+    return 200, {"ok": True, "faces": out}
+
+
+def api_dd_wordcloud(query):
+    """GET /api/dd/wordcloud?pages=5&ps=100 —— 拉最近若干页弹幕统计词频。"""
+    mid = dd_uid()
+    if not mid.isdigit():
+        return 400, {"error": "DD 读的是你自己账号的记录：请先在「设置」里登录 B 站"}
+    try:
+        pages = max(1, min(10, int((query.get("pages") or ["4"])[0])))
+        ps = max(10, min(100, int((query.get("ps") or ["100"])[0])))
+    except ValueError:
+        return 400, {"error": "参数不合法"}
+    texts, got = [], 0
+    for pn in range(1, pages + 1):
+        try:
+            d = _dd_fetch({"uid": mid, "pn": pn, "ps": ps, "order": "time_desc"})
+        except Exception as e:
+            if pn == 1:
+                return 502, {"error": "vtb.cat 请求失败：%s" % str(e)[:80]}
+            break
+        rows = d.get("data") or []
+        if not rows:
+            break
+        for it in rows:
+            t = str(it.get("extra") or "")
+            if t:
+                texts.append(t)
+        got += len(rows)
+        total = int(d.get("total") or 0)
+        if got >= total:
+            break
+    words = _dd_words(texts)
+    return 200, {"ok": True, "samples": len(texts), "total": got,
+                 "words": words, "uid": mid}
+
+
+# ---------------------------------------------------------------- DD：直播日历 / 粉丝趋势
+#
+# 两个数据源的实测结论（2026-10-24）：
+#   · vtb.cat actions 里的 `lives` **只按页附带**：每页带的是该 UID 那一页窗口里的场次，
+#     所以页数越多、合并出来越多（同一账号实测 pages=2 → 31 场、pages=3 → 53 场）。
+#     但上限受「该 UID 的 actions 总数」限制 —— 互动少的账号 ps=100 就只有 1 页，
+#     怎么翻都是 14 场，那不是 bug。
+#     字段够画日历：start_at / title / message（弹幕数）/ money / guard_money / cover / area。
+#   · ⚠️ `start_at` 是把**本地时间当 UTC 存的**：id=2354879 的 start_at 按本地读是 05:33，
+#     而 created_at 是 21:34+08:00 —— 必须用 utcfromtimestamp 读才对。
+#   · ⚠️ `end_at` 是脏数据（比 start_at 还早 9663 秒），**不能用它算时长**。
+#   · 粉丝数走 B 站 x/relation/stat（code=0，公开），**自己每天记一次**就够画趋势，
+#     不依赖 zeroroku。vtb.cat 没有粉丝历史。
+DD_FANS_DIR = os.path.join(ROOT, "data", "fans")
+
+
+def api_dd_profile(query):
+    """GET /api/dd/profile?pages=5 —— 某人的「看播档案」：常去的主播榜 + 四项统计。
+
+    ⚠️ vtb.cat 的 `actions?uid=` 返回的是**这个 UID 自己的互动记录**（`from_name` 恒等于
+       该 UID），不是"别人发给他的"。所以「24 个常驻舰」= **他常去/上舰的那些主播**，
+       数据来自每条记录的 `liver_name` / `liver_id` / `medal_level`（粉丝牌）。
+    实测字段：action_name(msg/gift/sc)、extra(内容)、gift_name/price/amount、
+              guard_level、medal_level、medal_name、liver_name、liver_id、live_room、live。
+    """
+    mid = dd_uid()
+    if not mid.isdigit():
+        return 400, {"error": "DD 读的是你自己账号的记录：请先在「设置」里登录 B 站"}
+    try:
+        pages = max(1, min(8, int((query.get("pages") or ["5"])[0])))
+    except ValueError:
+        return 400, {"error": "参数不合法"}
+
+    # 并发拉页：串行 5 页实测能拖到十几秒，前端那块就一直停在「载入中…」。
+    # vtb.cat 不是 B 站，没有 412 那套账号级限流，5 并发是安全的。
+    rows, total_actions = [], 0
+    def _page(pn):
+        return pn, _dd_fetch({"uid": mid, "pn": pn, "ps": 100, "order": "time_desc"})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(pages, 5)) as ex:
+        futs = [ex.submit(_page, pn) for pn in range(1, pages + 1)]
+        got = {}
+        for f in futs:
+            try:
+                pn, d = f.result()
+            except Exception as e:
+                if not got:
+                    return 502, {"error": "vtb.cat 请求失败：%s" % str(e)[:80]}
+                continue
+            got[pn] = d
+    for pn in sorted(got):
+        d = got[pn]
+        if pn == 1:
+            total_actions = int(d.get("total") or 0)
+        rows += (d.get("data") or [])
+
+    kinds = {"msg": 0, "gift": 0, "sc": 0, "guard": 0}
+    # 环形图要的是**互斥**的一份构成（一条记录只能落一格），
+    # 而 kinds 里的 guard 是「带舰长身份」的独立标记（会和 msg/gift 重叠），
+    # 直接拿 kinds 画环会把总数算多。所以另存一份按优先级归一的 mix。
+    mix = {"msg": 0, "gift": 0, "sc": 0, "guard": 0}
+    hours = [0] * 24
+    livers = {}
+    spend = 0.0
+    for x in rows:
+        an = str(x.get("action_name") or "")
+        if an == "msg":
+            kinds["msg"] += 1
+        elif an == "gift":
+            kinds["gift"] += 1
+        elif an == "sc":
+            kinds["sc"] += 1
+        gl = int(x.get("guard_level") or 0)
+        if gl > 0:
+            kinds["guard"] += 1
+        if an in ("guard", "sc_guard") or (gl > 0 and an not in ("msg", "gift", "sc")):
+            mix["guard"] += 1
+        elif an in ("msg", "gift", "sc"):
+            mix[an] += 1
+        # 出没时段：created_at 是带 +08:00 的 ISO 串，第 12~13 位就是本地小时
+        ts = str(x.get("created_at") or "")
+        try:
+            hours[int(ts[11:13])] = hours[int(ts[11:13])] + 1
+        except (ValueError, IndexError):
+            pass
+        money = float(x.get("gift_price") or 0) * float(x.get("gift_amount") or 0)
+        spend += money
+        name = str(x.get("liver_name") or "")
+        lid = str(x.get("liver_id") or "")
+        if not name:
+            continue
+        rec = livers.setdefault(lid or name, {"name": name, "id": lid, "n": 0,
+                                              "money": 0.0, "medal": 0,
+                                              "medal_name": "", "room": ""})
+        rec["n"] += 1
+        rec["money"] += money
+        rec["medal"] = max(rec["medal"], int(x.get("medal_level") or 0))
+        if not rec["medal_name"]:
+            rec["medal_name"] = str(x.get("medal_name") or "")
+        if not rec["room"]:
+            rec["room"] = str(x.get("live_room") or "")
+
+    board = sorted(livers.values(), key=lambda r: (-r["money"], -r["n"]))[:30]
+    total = sum(r["n"] for r in board) or 1
+    for r in board:
+        r["pct"] = round(r["n"] * 100.0 / total, 1)
+        r["money"] = round(r["money"], 1)
+    # 「最近出没」：样本里最新那条的时间（created_at 带时区，字符串比较即可）
+    last_at = ""
+    for x in rows:
+        t = str(x.get("created_at") or "")
+        if t > last_at:
+            last_at = t
+
+    follower = None
+    try:
+        d = bili_get("https://api.bilibili.com/x/relation/stat?vmid=%s" % mid,
+                     "https://space.bilibili.com/%s" % mid)
+        if d.get("code") == 0:
+            follower = int((d.get("data") or {}).get("follower") or 0)
+    except Exception:
+        pass
+
+    # 卡片上要显示的是**登录者自己**（不是当前主播），头像/昵称从登录态取
+    try:
+        me = api_status()[1] or {}
+    except Exception:
+        me = {}
+    # 「勋章」= 挂过的粉丝牌种类数（vtb.cat 那一栏是 28 这种数）
+    medals = len({(r.get("medal_name") or "", r.get("medal") or 0)
+                  for r in board if r.get("medal")})
+    first_at = ""
+    for x in rows:
+        t = str(x.get("created_at") or "")
+        if t and (not first_at or t < first_at):
+            first_at = t
+    return 200, {"ok": True, "uid": mid,
+                 "user": {"mid": mid,
+                          "uname": me.get("uname") or "",
+                          "face": me.get("face") or ""},
+                 "stats": {"follower": follower,           # 粉丝（B 站）
+                           "actions": total_actions,       # 互动总数
+                           "spend": round(spend, 1),       # 已抓样本里的打赏额
+                           "guards": kinds["guard"],       # 上舰次数
+                           "medals": medals,               # 粉丝牌种类
+                           "livers": len(board)},          # 常去的主播数
+                 "kinds": kinds,
+                 "mix": mix,                 # 互斥的互动构成（环形图用）
+                 "hours": hours,             # 24 小时出没分布（柱状图用）
+                 "board": board,
+                 "first": first_at,
+                 "last": last_at,
+                 "samples": len(rows)}
+
+
+def _dd_day(ts):
+    """把 start_at 解成 'YYYY-MM-DD'（按 UTC 读，见上面的说明）。"""
+    try:
+        return time.strftime("%Y-%m-%d", time.gmtime(int(ts)))
+    except (TypeError, ValueError):
+        return ""
+
+
+def api_dd_lives(query):
+    """GET /api/dd/lives?pages=3 —— 直播场次（翻页合并去重，按日期归组给日历用）。"""
+    mid = dd_uid()
+    if not mid.isdigit():
+        return 400, {"error": "DD 读的是你自己账号的记录：请先在「设置」里登录 B 站"}
+    try:
+        pages = max(1, min(6, int((query.get("pages") or ["3"])[0])))
+    except ValueError:
+        return 400, {"error": "参数不合法"}
+    seen = {}
+    # 并发拉页（与 profile 同理：串行 5 页会把日历拖到十几秒才出来）
+    def _page(pn):
+        return pn, _dd_fetch({"uid": mid, "pn": pn, "ps": 100, "order": "time_desc"})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(pages, 5)) as ex:
+        futs = [ex.submit(_page, pn) for pn in range(1, pages + 1)]
+        got = {}
+        for f in futs:
+            try:
+                pn, d = f.result()
+            except Exception as e:
+                if not got:
+                    return 502, {"error": "vtb.cat 请求失败：%s" % str(e)[:80]}
+                continue
+            got[pn] = d
+    for pn in sorted(got):
+        for x in (got[pn].get("lives") or []):
+            k = x.get("id") or "%s|%s" % (x.get("room_id"), x.get("start_at"))
+            seen[k] = x
+    rows = []
+    for x in seen.values():
+        ts = x.get("start_at")
+        if not ts:
+            continue
+        rows.append({"id": x.get("id"), "day": _dd_day(ts),
+                     "time": time.strftime("%H:%M", time.gmtime(int(ts))),
+                     "ts": int(ts),
+                     "title": str(x.get("title") or ""),
+                     "area": str(x.get("area") or ""),
+                     "cover": str(x.get("cover") or ""),
+                     "message": int(x.get("message") or 0),
+                     "money": round(float(x.get("money") or 0), 1),
+                     "guard": int(x.get("guard_money") or 0)})
+    rows.sort(key=lambda r: -r["ts"])
+    days = {}
+    for r in rows:
+        days.setdefault(r["day"], []).append(r)
+    # 墓碑：vtb.cat 里 deleted_at 非空的场次 = 已经被删掉的直播。
+    # 这是现成的"消失记录"，比自己去比对快照干净。
+    tomb = []
+    for x in seen.values():
+        if str(x.get("deleted_at") or "").strip():
+            ts = x.get("start_at")
+            tomb.append({"day": _dd_day(ts),
+                         "title": str(x.get("title") or ""),
+                         "deleted_at": str(x.get("deleted_at") or ""),
+                         "message": int(x.get("message") or 0)})
+    tomb.sort(key=lambda r: r.get("deleted_at") or "", reverse=True)
+    return 200, {"ok": True, "uid": mid, "total": len(rows),
+                 "days": days, "rows": rows[:80], "tomb": tomb}
+
+
+def _dd_fans_read(mid):
+    try:
+        with open(os.path.join(DD_FANS_DIR, mid + ".json"), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def api_dd_fans(query):
+    """GET /api/dd/fans —— 粉丝趋势：今天还没记就记一次，然后回整段历史。
+
+    ⚠️ 只记 B 站 `x/relation/stat` 的 follower。**一天一条**，多了没意义，
+       而且这是主站域接口 —— 记太勤会给自己找 412。
+    """
+    mid = dd_uid()
+    if not mid.isdigit():
+        return 400, {"error": "DD 读的是你自己账号的记录：请先在「设置」里登录 B 站"}
+    hist = _dd_fans_read(mid)
+    today = time.strftime("%Y-%m-%d")
+    if not hist or hist[-1].get("d") != today:
+        try:
+            d = bili_get("https://api.bilibili.com/x/relation/stat?vmid=%s" % mid,
+                         "https://space.bilibili.com/%s" % mid)
+            if d.get("code") != 0:
+                raise RuntimeError("code=%s" % d.get("code"))
+            n = int((d.get("data") or {}).get("follower") or 0)
+        except Exception as e:
+            # 记不到不影响展示历史：能画多少画多少
+            err = "今日粉丝数取不到（%s）" % str(e)[:60]
+            return 200, {"ok": True, "uid": mid, "points": hist, "error": err}
+        hist.append({"d": today, "n": n})
+        try:
+            os.makedirs(DD_FANS_DIR, exist_ok=True)
+            _write_json_file(os.path.join(DD_FANS_DIR, mid + ".json"), hist)
+        except OSError:
+            pass
+    # 日增减（给双轴图的柱状）
+    pts = []
+    prev = None
+    for p in hist:
+        n = int(p.get("n") or 0)
+        pts.append({"d": p.get("d"), "n": n, "delta": (n - prev) if prev is not None else 0})
+        prev = n
+    return 200, {"ok": True, "uid": mid, "points": pts,
+                 "today": pts[-1]["n"] if pts else 0,
+                 "d1": (pts[-1]["delta"] if pts else 0),
+                 "d7": (pts[-1]["n"] - pts[-8]["n"]) if len(pts) >= 8 else None,
+                 "d30": (pts[-1]["n"] - pts[-31]["n"]) if len(pts) >= 31 else None}
 
 
 def _parse_lrc(text):
@@ -2731,7 +3518,9 @@ def api_playlist_like(obj):
                 it["liked"] = True
             else:
                 it.pop("liked", None)
-            _write_json_file(PLAYLISTS_FILE, doc)
+            ok, why = _pl_save(doc)
+            if not ok:
+                return 500, {"error": why}
             return 200, {"ok": True, "liked": on}
     return 404, {"error": "歌不存在"}
 
@@ -2901,7 +3690,7 @@ def api_live_resolve(query):
     """把「房间号 / 直播间链接 / b23 短链」解析成监控室能直接播的卡片信息。"""
     try:
         mid, room = _resolve_room_input(query.get("input", [""])[0])
-        live = fetch_live_for(mid) if mid else None
+        live = fetch_live_for_cached(mid) if mid else None
     except Exception as e:
         return 502, {"error": "%s" % bili_err(e)}
     if not live:
@@ -2925,7 +3714,7 @@ def api_live_playinfo(query):
         return 200, playinfo_by_room(room)
     if mid and mid.isdigit() and mid != cur_mid():
         try:
-            live = fetch_live_for(mid)
+            live = fetch_live_for_cached(mid)
         except Exception as e:
             return 502, {"error": "开播状态获取失败：%s" % bili_err(e)}
         out = {"room_id": live.get("room_id") or "", "mid": mid}
@@ -2946,8 +3735,20 @@ def api_live_playinfo(query):
     try:
         live = fetch_live()
     except Exception as e:
-        out.update(living=False, error="开播状态获取失败：%s" % e)
-        return 200, out
+        # 状态查不到（多为限流）：**别直接判"未开播"** —— 直接试一次取流，
+        # 能拿到地址就说明确实在播，前端也就能正常接管播放器。
+        # 之前的写法在这里 return living=False，结果「状态被限流」被显示成「主播没播」，
+        # 用户看到的就是"未开播 + 黑屏"（2026-10-24 实测）。
+        try:
+            c = live_play_url(cur_room(), DEFAULT_LIVE_QN)
+            out.update(living=True, qualities=c.get("qualities") or [],
+                       current_qn=c.get("current_qn") or DEFAULT_LIVE_QN,
+                       error="开播状态查询失败（%s），但取流正常" % str(e)[:60])
+            return 200, out
+        except Exception as e2:
+            out.update(living=False, error="开播状态获取失败：%s；取流也失败：%s"
+                       % (str(e)[:50], str(e2)[:50]))
+            return 200, out
     out.update(living=bool(live.get("living")), title=live.get("title") or "",
                online=live.get("online") or 0, uname=live.get("uname") or "",
                face=live.get("face") or "", cover=live.get("cover") or "",
@@ -4902,8 +5703,13 @@ def fetch_live_for(mid):
     space/wbi/acc/info 无签名时风控 -352；空间投稿类接口 -799 限流。
     """
     mid = str(mid)
+    # ⚠️ **必须 fallback_anon**：这个接口本来就不需要登录态。
+    #    不传的话，直播域一旦进入冷却（密集请求也会打到它）就会直接抛异常，
+    #    上层把它当成「未开播」→ 前端不接管播放器 → 黑屏。
+    #    而监控室能播正是因为取流那边传了 fallback_anon（冷却期改匿名重试）。
     d = bili_get("https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids"
-                 "?uids[]=%s" % urllib.parse.quote(mid), "https://live.bilibili.com/")
+                 "?uids[]=%s" % urllib.parse.quote(mid), "https://live.bilibili.com/",
+                 fallback_anon=True)
     if d.get("code") != 0:
         raise RuntimeError("开播接口 code=%s %s" % (d.get("code"), d.get("message")))
     info = ((d.get("data") or {}).get(mid)) or {}
@@ -4928,6 +5734,27 @@ def fetch_live_for(mid):
         # live_time 未开播时是 0 或负数，前端据此判断「从未开播」还是「已播多久」
         "start": int(info.get("live_time") or 0),
     }
+
+
+# 开播状态的短缓存：监控室同时播 N 位时，每位每轮都要查一次 —— 没有缓存就是 N 个请求。
+# 30 秒足够：开播/下播不是秒级事件，而少发的请求是实打实的。
+_LIVE_FOR_CACHE = {}        # mid -> (ts, data)
+LIVE_FOR_TTL = 30.0
+
+
+def fetch_live_for_cached(mid):
+    """带 30 秒缓存的开播状态查询。异常不缓存（失败的下一轮照常重试）。"""
+    mid = str(mid or "")
+    now = time.time()
+    hit = _LIVE_FOR_CACHE.get(mid)
+    if hit and now - hit[0] < LIVE_FOR_TTL:
+        return hit[1]
+    d = fetch_live_for(mid)
+    _LIVE_FOR_CACHE[mid] = (now, d)
+    if len(_LIVE_FOR_CACHE) > 50:
+        for k in [k2 for k2, v in _LIVE_FOR_CACHE.items() if now - v[0] > LIVE_FOR_TTL]:
+            _LIVE_FOR_CACHE.pop(k, None)
+    return d
 
 
 def fetch_live():
@@ -5059,7 +5886,7 @@ class Handler(SimpleHTTPRequestHandler):
             # ban_left：B 站风控冷却还剩多少秒（0 = 正常）。
             # 前端靠它显示右上角那条「限流中」的提示 —— 否则用户只看到「加载失败」，
             # 不知道是网络坏了还是被限流、还要等多久。
-            _left = max(0, int(_BAN["until"] - time.time()))
+            _left = max(0, int(max(_BAN["until"], _BAN_LIVE["until"]) - time.time()))
             return self._json(200, {"app": APP_TAG, "lyrics": True,
                                     "build": read_build_stamp(), "ban_left": _left})
         if parsed.path == "/api/quit":
@@ -5070,6 +5897,18 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/playurl":
             code, obj = api_playurl(q)
             return self._json(code, obj)
+        if parsed.path == "/api/dd/actions":
+            return self._json(*api_dd_actions(q))
+        if parsed.path == "/api/dd/profile":
+            return self._json(*api_dd_profile(q))
+        if parsed.path == "/api/dd/lives":
+            return self._json(*api_dd_lives(q))
+        if parsed.path == "/api/dd/fans":
+            return self._json(*api_dd_fans(q))
+        if parsed.path == "/api/dd/wordcloud":
+            return self._json(*api_dd_wordcloud(q))
+        if parsed.path == "/api/dd/faces":
+            return self._json(*api_dd_faces(q))
         if parsed.path == "/api/lyrics":
             # ⚠️ 这是 **GET** 接口，必须放在 do_GET 里 —— 曾经误放进 do_POST，
             #    结果请求永远匹配不到、直接落到静态文件兜底返回 404（实测踩到）。

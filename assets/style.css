@@ -1079,7 +1079,9 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
 .mute-hint {
   position: absolute;
   left: 12px;
-  bottom: 46px;
+  /* ⚠️ 控制条高 50px，原来 46px 会让提示条压进控制条（实测 top=749 vs 控制条 768，
+     底边 772 直接盖住进度条）。抬到 58px，留 8px 间隙。 */
+  bottom: 58px;
   padding: 4px 11px;
   border-radius: 999px;
   /* 它压在视频画面上：去掉模糊后要更实一点，否则视频细节透上来会吃掉字 */
@@ -3905,4 +3907,480 @@ body.mv-playing .mv-disc { animation-play-state: running; }
 }
 @media (prefers-reduced-motion: reduce) {
   .seg-slider, .seg-switch label { transition: none; }
+}
+
+/* ---------------------------------------------------------------- DD 板块 */
+
+/* 与其他板块一致：左右两栏（词云 / 记录），窄屏上下堆叠 */
+.dd-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 14px 0 16px; }
+.dd-bar input {
+  padding: 7px 11px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.dd-bar input:focus { border-color: var(--red); }
+
+.dd-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 44%) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+.dd-h {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+  letter-spacing: .02em;
+}
+
+/* 词云：不做真"云形"排布 —— 用弹性换行 + 按词频缩放字号。
+   真云形要画布布局，收益不抵复杂度；这样已经能一眼看出哪些词更热。 */
+.dd-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+  padding: 18px;
+  min-height: 260px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  line-height: 1.25;
+}
+.dd-cloud span { white-space: nowrap; cursor: default; transition: color .15s; }
+.dd-cloud span:hover { color: var(--red); }
+/* 前三名换主题色，其余中性 —— 一眼分出主次 */
+.dd-cloud span.top1 { color: var(--red); font-weight: 700; }
+.dd-cloud span.top2 { color: var(--text); font-weight: 600; }
+.dd-cloud span.top3 { color: var(--text-2); font-weight: 600; }
+.dd-cloud span.rest { color: var(--muted); }
+
+.dd-list { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); overflow: hidden; }
+.dd-row {
+  display: flex;
+  gap: 10px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  align-items: baseline;
+}
+.dd-row:first-child { border-top: 0; }
+.dd-row time { flex: 0 0 88px; color: var(--muted-2); font-size: 11.5px; }
+.dd-row b { flex: 0 0 auto; max-width: 110px; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; font-weight: 500; color: var(--text-2); }
+.dd-row p { margin: 0; flex: 1 1 auto; min-width: 0; word-break: break-word; }
+.dd-empty { margin: 0; padding: 22px; text-align: center; color: var(--muted-2); font-size: 13px; }
+
+@media (max-width: 900px) {
+  .dd-grid { grid-template-columns: minmax(0, 1fr); }
+  .dd-cloud { min-height: 180px; }
+}
+
+/* ---------------------------------------------------------------- 独占页面（直播数据 / 墓碑）
+
+   这两个板块不放播放器，内容占满整行。但**绝不能打断正在进行的播放**：
+   `display: none` 会让部分浏览器暂停 `<video>`，所以这里把播放器**缩成 1px
+   但保持渲染**（display 不动、尺寸只缩不删），音频与播放进度都不受影响，
+   同时它不再占布局空间，`.wrap` 就能变成单列全宽。 */
+/* DD 板块整块全宽：三个子页（弹幕/查询、直播数据、墓碑）都在这里，
+   播放器同样缩成 1px 留在后台继续放，切页不打断。 */
+body.view-dd .wrap {
+  grid-template-columns: minmax(0, 1fr);
+}
+body.view-dd .col-right {
+  position: absolute;
+  top: 0; left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* DD 内部子标签（圆角胶囊，选中实心） */
+.dd-subtabs { display: flex; gap: 8px; margin: 14px 0 0; flex-wrap: wrap; }
+.dd-sub {
+  border: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--text-2);
+  border-radius: 999px;
+  padding: 6px 16px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.dd-sub:hover { color: var(--text); border-color: var(--muted-2); }
+.dd-sub.on {
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
+}
+.dd-panel[hidden] { display: none; }
+body.view-dd .views { grid-column: 1 / -1; }
+
+/* 直播数据：日历在左占大半，粉丝趋势在右（原来是上下堆叠，日历格子宽到 185px，
+   又稀又空；并排后格子约 110px，接近 vtb.cat 的密度）。 */
+.dl-cards {
+  display: grid; gap: 18px; margin-top: 16px;
+  grid-template-columns: minmax(0, 1.45fr) minmax(260px, 0.55fr);
+  align-items: start;
+}
+.dl-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 14px 16px 16px;
+}
+.dl-h { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.dl-h b { font-size: 13px; }
+.dl-h .sub { margin: 0; }
+.dl-nav { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); }
+
+/* 月历：7 列等宽，行高固定，日期格子里标场次数 */
+.dl-cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.dl-cal .dl-wd {
+  text-align: center; font-size: 11px; color: var(--muted-2); padding-bottom: 2px;
+}
+.dl-cell {
+  min-height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 6px;
+  font-size: 12px;
+  background: var(--panel-2);
+  cursor: default;
+  position: relative;
+}
+.dl-cell.blank { background: transparent; border-color: transparent; }
+.dl-cell.has { cursor: pointer; border-color: color-mix(in srgb, var(--red) 42%, var(--line)); }
+.dl-cell.has:hover { background: color-mix(in srgb, var(--red) 10%, var(--panel-2)); }
+.dl-cell.today { outline: 1px solid color-mix(in srgb, var(--red) 55%, transparent); }
+.dl-cell .d { color: var(--text-2); }
+.dl-cell .n {
+  display: inline-block; margin-top: 4px;
+  font-size: 10.5px; padding: 1px 6px; border-radius: 999px;
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  color: var(--red);
+}
+
+.dl-day { margin-top: 14px; }
+.dl-day .dl-row {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 7px 0; border-top: 1px solid var(--line); font-size: 12.5px;
+}
+.dl-day .dl-row:first-child { border-top: 0; }
+.dl-day time { flex: 0 0 44px; color: var(--muted-2); }
+.dl-day p { margin: 0; flex: 1 1 auto; min-width: 0; word-break: break-word; }
+.dl-day em { font-style: normal; color: var(--muted-2); font-size: 11.5px; }
+
+.dl-chart { height: 300px; width: 100%; }
+.dl-empty { margin: 0; padding: 18px; text-align: center; color: var(--muted-2); font-size: 12.5px; }
+@media (max-width: 760px) {
+  .dl-cal .dl-wd { font-size: 10px; }
+  .dl-cell { min-height: 44px; padding: 3px 4px; }
+  .dl-chart { height: 240px; }
+}
+
+/* ---------------------------------------------------------------- DD：看播档案布局
+   对照 vtb.cat：左「N 个常去」榜单，右「主播卡 + 四项统计 + 筛选 + 互动流」。 */
+.ddp-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 14px;
+  align-items: start;
+}
+
+.ddp-side {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.ddp-side-h {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line);
+}
+.ddp-side-h b { font-size: 12.5px; }
+.ddp-side-h .sub { margin: 0; font-size: 11px; }
+/* vtb.cat 左栏头上那三颗小按钮（排序 / 直降） */
+.ddp-side-ctrl { margin-left: auto; display: flex; gap: 6px; }
+.ddp-mini {
+  appearance: none; border: 1px solid var(--line-2); background: var(--panel-2);
+  color: var(--muted); font: inherit; font-size: 10.5px; padding: 2px 8px;
+  border-radius: 999px; cursor: pointer; transition: color .15s, border-color .15s;
+}
+.ddp-mini:hover { color: var(--text); border-color: var(--muted-2); }
+.ddp-mini.on { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+
+.ddp-board { max-height: 620px; overflow-y: auto; }
+.ddp-row {
+  /* 两行：上面「序号 头像 名字 金额 占比」，下面一条**整行宽**的占比细条。
+     原来 5 个元素挤在一行，左栏才 220px，细条被压到 20 多像素、等于没有。 */
+  display: grid;
+  grid-template-columns: 16px 24px minmax(0, 1fr) auto auto;
+  grid-template-areas: "i av nm mt pct" ". . bar bar bar";
+  align-items: center; column-gap: 8px; row-gap: 5px;
+  padding: 7px 12px; border-top: 1px solid var(--line);
+  cursor: pointer;
+}
+.ddp-row:first-child { border-top: 0; }
+.ddp-row:hover { background: var(--panel-2); }
+.ddp-row.on {
+  background: color-mix(in srgb, var(--red) 12%, var(--panel));
+  box-shadow: inset 2px 0 0 var(--red);
+}
+.ddp-row i {
+  grid-area: i; font-style: normal; font-size: 11px; color: var(--muted-2); text-align: right;
+}
+.ddp-av {
+  grid-area: av; width: 24px; height: 24px; border-radius: 50%; object-fit: cover;
+  background: var(--panel-2); flex: 0 0 auto;
+}
+.ddp-av-ph {
+  width: 24px; height: 24px; border-radius: 50%; background: var(--panel-2);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; color: var(--muted); flex: 0 0 auto;
+}
+.ddp-row .nm { grid-area: nm; font-size: 12.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ddp-row .mt { grid-area: mt; font-size: 11px; color: var(--muted-2); }
+/* 互动占比条：整行宽的一细条，和 vtb.cat 的百分比条同义 */
+.ddp-row .bar { grid-area: bar; height: 3px; border-radius: 2px; background: var(--panel-2); overflow: hidden; }
+.ddp-row .bar span { display: block; height: 100%; background: var(--red); border-radius: 2px; }
+.ddp-row .pct {
+  grid-area: pct; font-size: 10px; color: var(--muted-2); text-align: center;
+  border: 1px solid var(--line-2); border-radius: 999px; padding: 0 5px;
+  min-width: 40px; font-variant-numeric: tabular-nums;
+}
+
+.ddp-main { min-width: 0; }
+.ddp-hero {
+  display: flex; align-items: center; gap: 12px;
+  padding: 2px 2px 12px;
+}
+.ddp-face {
+  width: 44px; height: 44px; border-radius: 50%; object-fit: cover;
+  background: var(--panel-2); flex: 0 0 auto;
+}
+.ddp-hero-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ddp-hero-txt b { font-size: 15px; }
+.ddp-hero-txt .sub { margin: 0; }
+.ddp-times { margin-left: auto; text-align: right; font-size: 11px; color: var(--muted-2); }
+.ddp-times b { color: var(--text-2); font-weight: 500; }
+
+.ddp-stats {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+/* 四项统计：vtb.cat 是一排「色带块」——左侧色晕向右淡出，数字压在色带上 */
+.ddp-stat {
+  --band: var(--muted);
+  position: relative; border: 1px solid color-mix(in srgb, var(--band) 24%, var(--line));
+  border-radius: 10px; padding: 8px 12px 9px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--band) 18%, transparent), transparent 72%),
+              var(--panel);
+  display: flex; flex-direction: column; gap: 2px; overflow: hidden;
+}
+.ddp-stat.s-msg { --band: #63b3ed; }
+.ddp-stat.s-act { --band: #b794f4; }
+.ddp-stat.s-spend { --band: #f0a04b; }
+.ddp-stat.s-medal { --band: #68d391; }
+.ddp-stat span { font-size: 11px; color: var(--muted-2); }
+.ddp-stat b { font-size: 16px; font-weight: 600; letter-spacing: .2px; }
+.ddp-subline {
+  display: flex; gap: 16px; margin: 8px 2px 0;
+  font-size: 11.5px; color: var(--muted-2);
+}
+.ddp-subline b { color: var(--text-2); font-weight: 600; }
+
+.ddp-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+.ddp-bar select, .ddp-bar input {
+  padding: 5px 9px; border: 1px solid var(--line-2); border-radius: 8px;
+  background: var(--panel-2); color: var(--text); font: inherit; font-size: 12px;
+  color-scheme: dark light;
+}
+
+.ddp-feed-list { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); overflow: hidden; }
+/* 一条互动：发送者 | 类型 | 内容 | 主播（头像+名） | 时间 | 图标
+   六列定宽 —— 100 行里主播名长短不一，不定宽的话正文起始位置会参差。 */
+.ddp-item {
+  display: grid;
+  grid-template-columns: 96px 84px minmax(0, 1fr) 172px 128px 20px;
+  gap: 10px; align-items: center;
+  padding: 7px 12px; border-top: 1px solid var(--line); font-size: 12.5px;
+}
+.ddp-item:first-child { border-top: 0; }
+.ddp-item:hover { background: var(--panel-2); }
+.ddp-item .c-who { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ddp-item .c-kind { min-width: 0; }
+.ddp-item .c-body { min-width: 0; word-break: break-word; }
+.ddp-item .c-body em { font-style: normal; color: var(--muted-2); font-size: 11.5px; }
+.ddp-item .c-liver { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--text-2); }
+.ddp-item .c-liver b {
+  font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ddp-av.sm { width: 18px; height: 18px; }
+.ddp-av-ph.sm { width: 18px; height: 18px; font-size: 9px; }
+.ddp-item .c-time { font-size: 11px; color: var(--muted-2); text-align: right;
+  font-variant-numeric: tabular-nums; }
+.ddp-item .c-ico { text-align: center; }
+.ddp-item .c-ico a { color: var(--muted-2); text-decoration: none; font-size: 13px; }
+.ddp-item .c-ico a:hover { color: var(--red); }
+
+/* 列表 / 卡片视图切换（vtb.cat 那两个单选框） */
+.ddp-view {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11.5px; color: var(--muted); cursor: pointer; user-select: none;
+}
+.ddp-view input { accent-color: var(--red); margin: 0; }
+
+/* 卡片视图：一场直播一张卡，卡内是当天的互动时间线 */
+.ddp-cards { display: flex; flex-direction: column; gap: 10px; }
+.dd-card {
+  border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+  overflow: hidden;
+  animation: ddCardIn .34s ease both; animation-delay: calc(var(--i, 0) * 40ms);
+}
+@keyframes ddCardIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+.dd-card-h {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 12px; align-items: center;
+  padding: 10px 12px; border-bottom: 1px solid var(--line);
+}
+.dd-card-t { font-size: 13px; font-weight: 500; grid-column: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd-card-d { font-size: 11px; color: var(--muted-2); grid-column: 1; }
+.dd-card-m { font-size: 11px; color: var(--muted-2); grid-column: 1; }
+.dd-card-m b { color: var(--text-2); }
+.dd-card-l {
+  grid-column: 2; grid-row: 1 / span 3;
+  display: flex; align-items: center; gap: 6px; color: var(--text-2);
+}
+.dd-card-l b { font-weight: 500; }
+.dd-card-list { margin: 0; padding: 5px 12px 9px; list-style: none; }
+.dd-card-list li {
+  display: grid; grid-template-columns: 54px 92px 66px minmax(0, 1fr);
+  gap: 8px; padding: 3px 0; font-size: 11.5px; color: var(--text-2);
+}
+.dd-card-list time { color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.dd-card-list .k { color: var(--muted); }
+.dd-card-list .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd-card-list li.more { display: block; color: var(--muted-2); }
+.ddp-badge.msg { border-color: rgba(99,179,237,.45); color: #8cc7f0; }
+.ddp-badge {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--line-2); color: var(--muted);
+}
+.ddp-badge.gift { border-color: rgba(255,176,66,.45); color: #ffc266; }
+.ddp-badge.sc { border-color: rgba(91,155,239,.5); color: #7fb3ff; }
+.ddp-badge.guard { border-color: rgba(70,199,132,.45); color: #63d69b; }
+
+/* 词云：纯 DOM 排版（ECharts 核心包没有 wordcloud 扩展）。
+   用 flex 换行而不是绝对定位 —— 窄屏也不会溢出成横向滚动条。 */
+.ddp-cloud { margin: 10px 0 0; padding: 12px 14px; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--panel); }
+.ddp-cloud-h { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; }
+.ddp-cloud-h b { font-size: 12.5px; font-weight: 600; }
+.ddp-cloud-body { display: flex; flex-wrap: wrap; gap: 2px 12px; align-items: baseline; line-height: 1.25; }
+.ddp-cloud-body span { font-weight: 600; cursor: default; }
+.ddp-cloud-body span:hover { text-decoration: underline; text-decoration-thickness: 1px; }
+
+/* ------------------------------------------------ DD：可视化 + 动效
+   两块：互动构成（ECharts 环形）+ 出没时段（24 根 CSS 柱）。
+   ⚠️ 柱子的高度用 inline style 给（数据相关），动画只用 transform，避免逐帧改布局。 */
+.ddp-viz {
+  display: grid; grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
+  gap: 12px; margin: 12px 0 2px;
+}
+.ddp-viz-card {
+  border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+  padding: 10px 12px 8px; min-width: 0;
+}
+.ddp-viz-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.ddp-viz-h b { font-size: 12.5px; font-weight: 600; }
+.ddp-viz-h .sub { margin: 0; font-size: 11px; }
+
+.ddp-ring-body { display: flex; align-items: center; gap: 10px; }
+.ddp-ring { width: 104px; height: 104px; flex: 0 0 104px; }
+.ddp-legend { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 auto; }
+.ddp-lg { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); }
+.ddp-lg i { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 8px; }
+.ddp-lg b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ddp-lg em { font-style: normal; color: var(--muted-2); font-size: 10.5px; margin-left: auto;
+  font-variant-numeric: tabular-nums; }
+
+.ddp-hours { display: flex; align-items: flex-end; gap: 3px; height: 104px; }
+.ddp-hour {
+  flex: 1 1 0; min-width: 0; height: 100%;
+  display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 3px;
+}
+.ddp-hour b {
+  width: 100%; border-radius: 2px 2px 0 0;
+  background: color-mix(in srgb, var(--red) 42%, transparent);
+  transform-origin: bottom;
+  animation: ddpBarIn .5s cubic-bezier(.22, 1, .36, 1) both;
+  animation-delay: calc(var(--i, 0) * 12ms);
+}
+.ddp-hour.peak b { background: var(--red); }
+.ddp-hour:hover b { filter: brightness(1.3); }
+.ddp-hour em { font-style: normal; font-size: 9.5px; color: var(--muted-2); height: 11px; }
+@keyframes ddpBarIn { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+
+/* 榜单：整行淡入 + 占比条从左侧长出 + 粉丝牌小标 */
+.ddp-row { animation: ddpRowIn .34s ease both; animation-delay: calc(var(--i, 0) * 26ms); }
+@keyframes ddpRowIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.ddp-row .bar span {
+  width: var(--w, 0%); transform-origin: left;
+  animation: ddBarGrow .55s cubic-bezier(.22, 1, .36, 1) both;
+  animation-delay: calc(var(--i, 0) * 26ms + 90ms);
+}
+@keyframes ddBarGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.ddp-row .nm .medal {
+  font-style: normal; margin-left: 6px; padding: 0 5px; border-radius: 999px;
+  border: 1px solid var(--line-2); color: var(--muted); font-size: 10px; white-space: nowrap;
+}
+
+/* 互动流：逐条淡入（只给前 30 条延迟，后面的立即出现，避免长列表等半天） */
+.ddp-item { animation: ddpItemIn .3s ease both; animation-delay: calc(var(--i, 0) * 12ms); }
+@keyframes ddpItemIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+/* 数字滚动期间用等宽数字，宽度不会抖 */
+.ddp-stat b.counting, .ddp-lg b.counting { font-variant-numeric: tabular-nums; }
+
+/* 日历：格子按场次热力着色 + 入场缩放 + 选中描边 */
+.dl-cell {
+  animation: ddCellIn .3s ease both;
+  animation-delay: calc(var(--i, 0) * 7ms);
+  transition: transform .16s ease, border-color .16s ease;
+}
+@keyframes ddCellIn { from { opacity: 0; transform: translateY(3px) scale(.98); } to { opacity: 1; transform: none; } }
+.dl-cell.has::after {
+  content: ''; position: absolute; inset: 0; border-radius: 8px;
+  background: var(--red); opacity: calc(var(--h, 0) * .55);
+  pointer-events: none;
+}
+.dl-cell.has .d { color: var(--text); }
+.dl-cell.has .n { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.dl-cell.has .d, .dl-cell.has .n { position: relative; z-index: 1; }
+.dl-cell.has:hover { transform: translateY(-2px); border-color: var(--red); }
+.dl-cell.sel { border-color: var(--red); box-shadow: 0 0 0 1px var(--red) inset; }
+
+@media (max-width: 1080px) {
+  .ddp-viz { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .ddp-item .who { flex-basis: 104px; }
+}
+
+@media (max-width: 900px) {
+  .ddp-grid { grid-template-columns: minmax(0, 1fr); }
+  .ddp-board { max-height: 260px; }
+  .ddp-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
