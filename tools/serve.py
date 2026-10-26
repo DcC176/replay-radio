@@ -296,6 +296,16 @@ def unpack_web(appdir):
                 f.write("释放网页文件失败：%s\n" % e)
         except OSError:
             pass
+        # ⚠️ 拷贝失败 ≠ 没有数据。dst 里已经有上一版网页与用户的主播表/分段，
+        #    继续用它（哪怕版本是旧的）远好过退回内置空壳 —— 后者会让界面直接变成
+        #    「还没有主播」，用户以为数据全丢了（实测：某个文件被占用时就是这样）。
+        if os.path.exists(os.path.join(dst, "index.html")):
+            try:
+                with open(os.path.join(appdir, "log.txt"), "a", encoding="utf-8") as f:
+                    f.write("释放未完成，继续使用已有的 www（网页版本可能偏旧）\n")
+            except OSError:
+                pass
+            return dst
         return None
 
 
@@ -776,6 +786,13 @@ def _series_warmup():
         for st in load_stations():
             if str(st.get("series_id") or "").strip():
                 continue                    # 手填过就尊重它，不去打扰接口
+            left = ban_left()
+            if left > 0:
+                # 已经限流就别再一个个去撞：本轮到此为止（series_kick 幂等，下次启动会补）
+                print("[series] 跳过本轮：B 站限流冷却中，还剩 %d 秒" % int(left))
+                break
+            # 与「清单重抓」互斥：两个都是连续几十次请求的重活，同时跑最容易撞 412
+            got = _meta_gate(wait=30)
             try:
                 r = resolve_series(st, allow_network=True)
                 print("[series] %-8s → %s  %s" % (
@@ -786,6 +803,9 @@ def _series_warmup():
                                           r.get("total") or 0))))
             except Exception as e:
                 print("[series] %s 失败：%s" % (st.get("id"), e))
+            finally:
+                if got:
+                    _meta_gate_release()
             time.sleep(4.0)
     finally:
         with _SERIES_WARM_LOCK:
@@ -1111,6 +1131,16 @@ BAN_COOLDOWN = 120        # 第一次撞 412 的冷却（秒）
 #    到一个半小时点 → 试探一次又 412 → 再锁 120 秒 → 用户看到"倒计时结束但限流没结束"。
 #    所以改成**指数退避**：120 → 240 → 480 → …，封顶 30 分钟；只要有一次请求成功就归零。
 BAN_MAX = 1800
+
+
+def ban_left(url="https://api.bilibili.com/"):
+    """这个域名距离 412 冷却结束还有多少秒（0 = 没在冷却）。
+
+    冷却期内**主动不要发请求**：日志里 67 次「后台重抓失败：B 站风控冷却中」全是
+    在冷却期反复发起重抓造成的 —— 既不解决问题，还可能把惩罚窗口越撑越长。
+    """
+    ban = _ban_of(url)
+    return max(0.0, float(ban.get("until") or 0) - time.time())
 
 # ---------------- 元数据请求限速与去重 ----------------
 #
@@ -5489,11 +5519,28 @@ def api_protocol_status():
 #   · 一份都没有（首次访问该主播）才同步抓 —— 这一步的等待无法避免。
 # 新鲜度对这份数据没有苛刻要求：它是「有哪些回放」，一天也变不了几次，
 # 页面上显示的「实时数据 HH:MM」直接来自 generated_at，用户看得见。
-PROGRAMS_STALE_AFTER = 60          # 秒：比这更新就直接用，连一次上游请求都不发
+PROGRAMS_STALE_AFTER = 600         # 秒：比这更新就直接用，连一次上游请求都不发
+                                   # （原为 60。清单一天变不了几次，60 秒会逼着每次翻页都重抓，
+                                   #   实测正是 startup 阶段那波请求把账号打进 412 的）
 _PROGRAMS_BUILDING = {}            # sid -> True（同一主播同时只允许一个重抓在跑）
 _PROGRAMS_BUILD_LOCK = threading.Lock()
+_PROGRAMS_NEXT_TRY = {}            # sid -> 最早可以再试的时刻（限流/忙时退避，避免每次轮询都撞）
 _PROGRAMS_LOW = {}                 # sid -> 第一次发现「腰斩」的时刻（见 _programs_build）
 _PROGRAMS_LOW_CONFIRM = 1800       # 秒：同一份残缺清单持续这么久才认（限流不会持续半小时）
+# 元数据重活互斥：清单重抓与「发现回放系列」都会连续打几十次接口，同时跑正是
+# startup 阶段最容易撞 412 的组合。谁占不到这把锁就错开（清单让路、系列等一会）。
+_META_GATE = threading.Lock()
+
+
+def _meta_gate(wait=0.0):
+    return _META_GATE.acquire(timeout=wait) if wait > 0 else _META_GATE.acquire(blocking=False)
+
+
+def _meta_gate_release():
+    try:
+        _META_GATE.release()
+    except RuntimeError:
+        pass
 
 
 def programs_cache_file(st=None):
@@ -5603,9 +5650,28 @@ def _programs_build(sid, st, label):
 
 
 def _programs_rebuild(sid, st):
-    """后台重抓。失败只记日志 —— 已经在服务的那份继续用。"""
+    """后台重抓。失败只记日志 —— 已经在服务的那份继续用。
+
+    ⚠️ 进来先过两道闸（v1.0.91）：
+       ① 限流冷却期内**直接不试**，只把下次可试时间往后推；
+       ② 别的元数据重活（系列发现）正在跑 → 让路，10 秒后再试。
+    这两道闸是为了消掉日志里那 67 次「后台重抓失败：风控冷却中」——
+    冷却期重试不但拿不到数据，还可能把惩罚窗口越撑越长。
+    """
     try:
-        _programs_build(sid, st, "后台重抓完成")
+        left = ban_left()
+        if left > 0:
+            _PROGRAMS_NEXT_TRY[sid] = time.time() + left
+            print("[programs] %s 跳过重抓：B 站限流冷却中，还剩 %d 秒" % (sid, int(left)))
+            return
+        if not _meta_gate():
+            _PROGRAMS_NEXT_TRY[sid] = time.time() + 10
+            print("[programs] %s 跳过重抓：另一个元数据任务正在跑，10 秒后再试" % sid)
+            return
+        try:
+            _programs_build(sid, st, "后台重抓完成")
+        finally:
+            _meta_gate_release()
     except Exception as e:
         print("[programs] %s 后台重抓失败：%s" % (sid, e))
     finally:
@@ -5664,13 +5730,23 @@ def api_programs(refresh=False, hard=False):
         out["stale"] = age > PROGRAMS_STALE_AFTER
         out["age"] = int(max(0.0, age))
         if out["stale"]:
-            # 先把旧的给出去，重抓丢到后台 —— 这就是「切换板块不卡」的关键
-            with _PROGRAMS_BUILD_LOCK:
-                if not _PROGRAMS_BUILDING.get(sid):
-                    _PROGRAMS_BUILDING[sid] = True
-                    threading.Thread(target=_programs_rebuild, args=(sid, st),
-                                     daemon=True).start()
-                    out["refreshing"] = True
+            left = ban_left()
+            busy_until = float(_PROGRAMS_NEXT_TRY.get(sid) or 0)
+            if left > 0:
+                # 冷却期内**不发上游请求**，把「还要等多久」明确给前端 ——
+                # 前端据此把重试推迟到冷却结束，而不是每 4 秒来一次空撞。
+                out["degraded"] = "ban"
+                out["retry_after"] = int(left)
+            elif now < busy_until:
+                out["retry_after"] = int(busy_until - now)
+            else:
+                # 先把旧的给出去，重抓丢到后台 —— 这就是「切换板块不卡」的关键
+                with _PROGRAMS_BUILD_LOCK:
+                    if not _PROGRAMS_BUILDING.get(sid):
+                        _PROGRAMS_BUILDING[sid] = True
+                        threading.Thread(target=_programs_rebuild, args=(sid, st),
+                                         daemon=True).start()
+                        out["refreshing"] = True
         return 200, out
 
     # 一份都没有：只能同步抓（首次访问该主播，避免不了等一次）

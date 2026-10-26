@@ -5447,6 +5447,8 @@
             + ' ' + hhmm(g);
       }
     }
+    // 412 冷却期里服务端供的是上次那份清单：说清楚原因，别让用户以为是坏了
+    if (state.meta.degraded) when += ' · B 站限流中，先用上次清单';
     el.meta.textContent = '数据源：' + (state.meta.up_name || '')
       + ' · 系列「直播回放」 · ' + state.meta.count + ' 个节目' + when;
   }
@@ -6016,6 +6018,8 @@
       if (ids.length === 1) {
         return loadOne(ids[0], timeoutMs).then(function (d) {
           if (!d || !d.programs || !d.programs.length) throw new Error('清单为空');
+          // 把「限流降级」透传到 meta，让时间行能写出「B 站限流中，先用上次清单」
+          if (d.meta && d.degraded) d.meta.degraded = d.degraded;
           return d;
         });
       }
@@ -6099,8 +6103,13 @@
             return;
           }
           var r = boot(d);
-          // 服务端明确说「这份旧了、正在后台重抓」→ 给它几秒，再取一次
-          if (d && d.stale) refreshSoon(4000);
+          /* 服务端说「这份旧了」时再取一次：
+             · 正常（后台正在重抓）→ 4 秒后问一次
+             · 限流冷却中（degraded=ban）→ 等冷却结束再问，别每 4 秒来一次空撞 */
+          if (d && d.stale) {
+            var wait = d.retry_after ? Math.min(d.retry_after, 600) : 4;
+            refreshSoon(wait * 1000);
+          }
           return r;
         })
         .catch(fail);
