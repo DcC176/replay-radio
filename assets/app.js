@@ -6775,6 +6775,62 @@
       window.addEventListener('pointermove', moveTo);
       window.addEventListener('pointerup', stop);
     });
+    /* 非自由布局：整格按住就能拖，松手与目标格**互换位置**（顺序记在 localStorage）。
+       6px 阈值 —— 否则「点独奏 / 放大 / 拉音量」这些点击会被当成拖动吃掉。
+       聚焦状态下把某一格拖到主画面上（或把主画面拖到别的格上）= 换主画面。 */
+    var mdrag = null;
+    function msCellAt(x, y) {
+      var el = document.elementFromPoint(x, y);
+      return (el && el.closest) ? el.closest('.ms-cell') : null;
+    }
+    function clearDrop() {
+      Array.prototype.forEach.call(
+        document.querySelectorAll('#multi-grid .ms-cell.drop-target'),
+        function (x) { x.classList.remove('drop-target'); });
+    }
+    grid.addEventListener('pointerdown', function (e) {
+      if (multiLayout === 'free' || e.button !== 0) return;
+      var cell = e.target.closest ? e.target.closest('.ms-cell') : null;
+      if (!cell) return;
+      if (e.target.closest('.ms-btns, .ms-qn, .ms-vol, .ms-h')) return;
+      mdrag = { cell: cell, x: e.clientX, y: e.clientY, on: false, over: null };
+    });
+    window.addEventListener('pointermove', function (e) {
+      if (!mdrag) return;
+      var dx = e.clientX - mdrag.x, dy = e.clientY - mdrag.y;
+      if (!mdrag.on) {
+        if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+        mdrag.on = true;
+        mdrag.cell.classList.add('dragging');
+        mdrag.cell.style.zIndex = '30';
+      }
+      mdrag.cell.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+      var over = msCellAt(e.clientX, e.clientY);
+      if (over === mdrag.cell) over = null;
+      if (over !== mdrag.over) {
+        clearDrop();
+        if (over) over.classList.add('drop-target');
+        mdrag.over = over;
+      }
+    });
+    window.addEventListener('pointerup', function () {
+      if (!mdrag) return;
+      var cell = mdrag.cell, over = mdrag.over, moved = mdrag.on;
+      cell.style.transform = '';
+      cell.style.zIndex = '';
+      cell.classList.remove('dragging');
+      clearDrop();
+      mdrag = null;
+      if (!moved || !over || over === cell) return;
+      var lead = grid.querySelector('.ms-cell.lead');
+      if (lead && (cell === lead || over === lead)) {
+        var other = (cell === lead) ? over : cell;
+        multiFocusId = other.getAttribute('data-id');
+      } else {
+        multiSwap(cell.getAttribute('data-id'), over.getAttribute('data-id'));
+      }
+      multiRelayout();
+    });
     var rf = document.getElementById('multi-refresh');
     if (rf) rf.addEventListener('click', function () {
       // 「关注的直播」下只刷名单、**不动画面墙**：走 renderMulti 会先 multiTeardown 把正在播的
@@ -6810,6 +6866,8 @@
             document.querySelectorAll('#multi-layout [data-ml]'), function (x) {
               x.classList.toggle('on', x === b);
             });
+          // 选了具体宫格 = 退出聚焦：否则聚焦优先，点「四分」看起来像没反应
+          if (multiLayout !== 'free') multiFocusId = '';
           // 布局只管「怎么排」：换布局不碰已经在播的直播间。
           // （以前这里会把超出上限的那几路取消勾选并关掉，切一下布局就丢人 —— 用户反馈）
           applyMultiLayout();
@@ -6901,15 +6959,25 @@
     store.set('xl_mf_custom', multiCustom);
   }
 
-  /* 布局改成「每次重算」：列数、行高、跨列、聚焦、自由定位全部写在 grid 的行内样式上。
-     以前只给 grid 挂 g1/g2/… 类、每格固定 16:9 —— 2 路时只占上面一行，下面空一大片。
-     现在按**当前路数**排（2 路左右、3 路上 1 下 2、4 路四宫格…），并把可用高度均分。
-     调用点：切布局、路数变化（加/取消一路）、进入监控室、窗口尺寸变化。 */
-  function multiCols(n) {
+  /* 布局引擎（v1.0.92 重写）：**等比马赛克**。
+
+     两条硬约束：
+       ① 每格都是 16:9 —— 格子与视频同比例，contain 才不会有黑边；
+       ② 整墙按「列×行」算出一块矩形再居中，多出来的空白留在页面背景上，
+          而不是把格子拉变形（原来 auto-fill + 1fr 就是这么产生黑边的）。
+
+     聚焦（点 ⤢）时主画面占 2×2 —— 2×2 的宽高比仍是 16:9，所以主画面同样没有黑边；
+     其余格子按「先右列、后底部」的顺序环绕它，与参考图一致。
+     调用点：切布局、路数变化、聚焦、拖拽换位、窗口尺寸变化。 */
+  // 缝隙取 4px 而不是 8：主画面跨 2×2，缝会被算进它的外框 ——
+  // (2w+g)/(2h+g) 只有在 g=0 时才是严格的 16:9；g=4 时误差 0.4%（约 1.7px，看不出来），
+  // g=8 会到 0.8%（约 3.6px，边缘能看出细黑条）。
+  var MULTI_GAP = 4;                 // 必须与 CSS 的 .multi-grid gap 一致
+
+  function multiCols(n) {            // 自动/自由布局用的列数：让整墙比例贴近 16:9
     if (n <= 1) return 1;
-    if (n <= 4) return 2;      // 2 路左右；3 路让第 1 格跨两列 → 上 1 下 2；4 路四宫格
-    if (n <= 9) return 3;
-    return 4;
+    var c = Math.round(Math.sqrt(n * 16 / 9));
+    return Math.max(1, Math.min(4, c));
   }
 
   /* 画面墙该有多高：从 grid 在文档里的位置一直铺到视口底部，但要给右下角那个
@@ -6957,13 +7025,112 @@
     store.set('xl_mf_rects', multiFreeRects);
   }
 
+  /* 聚焦版网格：主画面占 4 格，所以容量 = 列×行 − 4。
+     在「能装下 n−1 个陪衬」的方案里挑空洞最少、比例最接近 16:9 的那个。 */
+  function multiFocusPlan(n) {
+    var best = null;
+    for (var rows = 2; rows <= 5; rows++) {
+      for (var cols = 3; cols <= 5; cols++) {
+        var cap = cols * rows - 4;
+        if (cap < n - 1) continue;
+        var holes = cap - (n - 1);
+        var aspect = (cols * 16) / (rows * 9);
+        var score = holes * 10 + Math.abs(aspect - 16 / 9);
+        if (!best || score < best.score) best = { cols: cols, rows: rows, score: score };
+      }
+    }
+    return best || { cols: 3, rows: Math.max(2, n - 1) };
+  }
+
+  function multiPlan(n) {
+    if (multiFocusId && n > 1 && multiLayout !== 'free') {
+      var f = multiFocusPlan(n);
+      return { cols: f.cols, rows: f.rows, main: true };
+    }
+    if (multiLayout === 'auto') {
+      var c = multiCols(n);
+      return { cols: c, rows: Math.ceil(n / c), main: false };
+    }
+    var fixed = { g1: 1, g2: 2, g4: 2, g6: 3, g9: 3 }[multiLayout] || multiCols(n);
+    return { cols: fixed, rows: Math.ceil(n / fixed), main: false };
+  }
+
+  /* 按显示顺序分配 (行,列)：聚焦时跳过主画面那 2×2，剩下的格子依次填 */
+  function multiAssign(order, plan, mainCell) {
+    var slots = [], r, c;
+    for (r = 1; r <= plan.rows; r++) {
+      for (c = 1; c <= plan.cols; c++) {
+        if (plan.main && r <= 2 && c <= 2) continue;
+        slots.push([r, c]);
+      }
+    }
+    var k = 0;
+    return order.map(function (cell) {
+      if (plan.main && cell === mainCell) return [1, 1];
+      return slots[k++] || null;
+    });
+  }
+
+  /* 一格的像素尺寸：先按宽度铺满，再看高度够不够，取小的那个 —— 天然 16:9 */
+  function multiTileSize(plan, availW, availH) {
+    var freeW = Math.max(0, availW - MULTI_GAP * (plan.cols - 1));
+    var freeH = Math.max(0, availH - MULTI_GAP * (plan.rows - 1));
+    var w = freeW / plan.cols;
+    var h = w * 9 / 16;
+    if (h * plan.rows > freeH) {
+      h = freeH / plan.rows;
+      w = h * 16 / 9;
+    }
+    return { w: Math.max(80, Math.floor(w)), h: Math.max(45, Math.floor(h)) };
+  }
+
+  /* 显示顺序：用户在墙上拖过的顺序（记忆在 localStorage），没记录的按 DOM 顺序接在后面 */
+  var multiOrder = store.get('xl_mf_order', []) || [];
+
+  function multiOrderCells(cells) {
+    var idx = {};
+    (multiOrder || []).forEach(function (id, i) { idx[id] = i; });
+    return cells.slice().sort(function (a, b) {
+      var ia = idx[a.getAttribute('data-id')], ib = idx[b.getAttribute('data-id')];
+      if (ia == null && ib == null) return 0;
+      if (ia == null) return 1;
+      if (ib == null) return -1;
+      return ia - ib;
+    });
+  }
+
+  function multiSwap(a, b) {
+    var cells = Array.prototype.slice.call(document.querySelectorAll('#multi-grid .ms-cell'));
+    var ids = multiOrderCells(cells).map(function (c) { return c.getAttribute('data-id'); });
+    var ia = ids.indexOf(a), ib = ids.indexOf(b);
+    if (ia < 0 || ib < 0) return;
+    ids[ia] = b; ids[ib] = a;
+    multiOrder = ids;
+    store.set('xl_mf_order', ids);
+  }
+
+  /* 换位后做一次 FLIP：先量旧位置，重排后再从旧位置滑过去（纯 transform，不动布局） */
+  function multiRelayout() {
+    var cells = Array.prototype.slice.call(document.querySelectorAll('#multi-grid .ms-cell'));
+    var before = cells.map(function (c) { return c.getBoundingClientRect(); });
+    applyMultiLayout();
+    cells.forEach(function (c, i) {
+      var a = before[i], b = c.getBoundingClientRect();
+      var dx = a.left - b.left, dy = a.top - b.top;
+      if (!dx && !dy) return;
+      if (!c.animate) return;
+      c.animate([{ transform: 'translate(' + dx + 'px,' + dy + 'px)' }, { transform: 'none' }],
+        { duration: 260, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+    });
+  }
+
   function applyMultiLayout() {
     var grid = document.getElementById('multi-grid');
     if (!grid) return;
-    var cells = grid.querySelectorAll('.ms-cell');
+    var cells = Array.prototype.slice.call(grid.querySelectorAll('.ms-cell'));
     var n = cells.length;
-    var i, c, box, cols, narrow;
-    // 聚焦的那格可能已经被取消勾选删掉了；只剩一格时聚焦也没有意义
+    var i, c;
+    // 聚焦的那格可能已经被取消勾选删掉了；只剩一格时聚焦没有意义
     if (multiFocusId && !grid.querySelector('.ms-cell[data-id="' + multiFocusId + '"]')) {
       multiFocusId = '';
     }
@@ -6973,10 +7140,13 @@
     grid.classList.toggle('free', multiLayout === 'free');
     grid.style.gridTemplateColumns = '';
     grid.style.gridTemplateRows = '';
+    grid.style.justifyContent = '';
+    grid.style.alignContent = '';
     for (i = 0; i < cells.length; i++) {
       c = cells[i];
       c.classList.remove('lead');
       c.style.gridColumn = '';
+      c.style.gridRow = '';
       c.style.left = c.style.top = c.style.width = c.style.height = '';
       c.style.zIndex = '';
     }
@@ -6984,7 +7154,7 @@
 
     if (multiLayout === 'free') {
       for (i = 0; i < cells.length; i++) {
-        box = freeRectFor(cells[i].getAttribute('data-id'), i, n);
+        var box = freeRectFor(cells[i].getAttribute('data-id'), i, n);
         cells[i].style.left = box.x + '%';
         cells[i].style.top = box.y + '%';
         cells[i].style.width = box.w + '%';
@@ -6994,24 +7164,36 @@
       return;
     }
 
-    narrow = window.innerWidth < 820;      // 窄屏一律单列，别把格子挤成一条缝
-    if (multiFocusId) {
-      var lead = grid.querySelector('.ms-cell[data-id="' + multiFocusId + '"]');
-      lead.classList.add('lead');          // order:-1 → 自动落到第一行
-      cols = narrow ? 1 : Math.min(n - 1, 4);
-      if (cols < 1) cols = 1;
-      grid.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
-      grid.style.gridTemplateRows = '1.9fr';   // 主画面约占 2/3，其余行均分剩下的
-      lead.style.gridColumn = '1 / -1';
-    } else if (multiLayout === 'auto') {
-      cols = narrow ? 1 : multiCols(n);
-      grid.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
-      if (!narrow && n === 3) cells[0].style.gridColumn = '1 / -1';
-    } else {
-      cols = narrow ? 1 : ({ g1: 1, g2: 2, g4: 2, g6: 3, g9: 3 }[multiLayout] || 1);
-      grid.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+    sizeMultiGrid();                                  // 先定可用高度，再按它算格子尺寸
+    var plan = multiPlan(n);
+    var size = multiTileSize(plan, grid.clientWidth, grid.clientHeight);
+    grid.style.gridTemplateColumns = 'repeat(' + plan.cols + ', ' + size.w + 'px)';
+    grid.style.gridTemplateRows = 'repeat(' + plan.rows + ', ' + size.h + 'px)';
+    // 行数太多（比如单列 N 路）时内容比容器高：这时从顶部排、允许滚动，居中会把第一行顶出去
+    var needH = size.h * plan.rows + MULTI_GAP * (plan.rows - 1);
+    grid.style.alignContent = (needH > grid.clientHeight + 1) ? 'start' : 'center';
+
+    var order = multiOrderCells(cells);
+    var mainCell = null;
+    if (plan.main) {
+      mainCell = order.filter(function (x) {
+        return x.getAttribute('data-id') === multiFocusId;
+      })[0] || order[0];
+      mainCell.classList.add('lead');
     }
-    sizeMultiGrid();
+    var poss = multiAssign(order, plan, mainCell);
+    order.forEach(function (cell, k) {
+      var p = poss[k];
+      if (!p) {                       // 网格装不下（理论上不会）：先藏起来，别叠在一起
+        cell.style.display = 'none';
+        return;
+      }
+      cell.style.display = '';
+      // 主画面占 2×2：2×2 的宽高比仍是 16:9，所以放大后同样没有黑边
+      var isMain = (plan.main && cell === mainCell);
+      cell.style.gridRow = isMain ? (p[0] + ' / span 2') : p[0];
+      cell.style.gridColumn = isMain ? (p[1] + ' / span 2') : p[1];
+    });
   }
 
   function multiRestartCell(cell) {   // 单路画质切换：只重连这一格，别的路不动

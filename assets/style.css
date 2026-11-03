@@ -2663,18 +2663,34 @@ body.view-multi .col-right { display: none; }
    时改成墙内滚动，别把格子压成一条缝。 */
 .multi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  grid-auto-rows: minmax(120px, 1fr);
-  gap: 12px;
+  /* 列宽/行高由 JS 按「每格 16:9」算成 px 写进来，居中摆放 ——
+     只要格子与视频同比例，contain 就不会产生任何黑边。
+     这里不写 auto-fill：那会把格子拉成任意比例（原来黑边的来源）。 */
+  justify-content: center;
+  align-content: center;
+  gap: 4px;            /* 与 JS 的 MULTI_GAP 一致：主画面跨 2×2 时缝会算进它的外框 */
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   overflow: auto;
 }
-/* 聚焦：被点的那格 order:-1 自动落到第一行，并跨满整行（列数/行高同样由 JS 写） */
+/* 聚焦：主画面占 2×2（仍是 16:9），红框标出是哪一路 */
 .multi-grid .ms-cell.lead {
-  order: -1;
   box-shadow: inset 0 0 0 2px var(--red);
+}
+/* 非自由布局：整格可按住拖动，松手与目标格互换位置 */
+.multi-grid:not(.free) .ms-cell { cursor: grab; }
+.multi-grid:not(.free) .ms-cell.dragging {
+  cursor: grabbing;
+  pointer-events: none;          /* 让 elementFromPoint 落在下面的格子上 */
+  z-index: 30;
+  outline: 2px dashed var(--red);
+  outline-offset: -2px;
+  opacity: .9;
+}
+.multi-grid:not(.free) .ms-cell.drop-target {
+  outline: 2px solid var(--red);
+  outline-offset: -2px;
 }
 
 /* 自由布局：卡片绝对定位，左/上/宽/高都是画布的百分比（记忆在 localStorage） */
