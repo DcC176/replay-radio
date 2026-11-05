@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>下载统计 · 噼里啪啦</title>
+<style>
+  :root{
+    --bg:#08080a; --card:#111116; --card2:#17171d; --line:rgba(255,255,255,.08);
+    --line2:rgba(255,255,255,.16); --fg:#ececf1; --muted:#a2a2ad; --dim:#6e6e7a;
+    --red:#f5475b; --amber:#f2a63b; --green:#4caf7d;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  a{color:inherit}
+  .wrap{max-width:1060px;margin:0 auto;padding:40px 24px 80px}
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;
+    padding-bottom:22px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:24px;letter-spacing:-.01em}
+  h1 span{color:var(--dim);font-weight:400;font-size:14px;display:block;margin-top:6px;font-family:var(--mono)}
+  .actions{display:flex;align-items:center;gap:10px}
+  button{font:inherit;cursor:pointer;border-radius:9px;border:1px solid var(--line2);
+    background:var(--card);color:var(--fg);padding:8px 15px;transition:.2s}
+  button:hover{background:var(--card2);border-color:rgba(255,255,255,.28)}
+  button:disabled{opacity:.5;cursor:default}
+  .stamp{font-family:var(--mono);font-size:12px;color:var(--dim)}
+
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:26px 0 8px}
+  .kpi{background:linear-gradient(160deg,var(--card2),var(--card) 60%);border:1px solid var(--line);
+    border-radius:14px;padding:16px 18px}
+  .kpi .k{font-size:12px;color:var(--dim);font-family:var(--mono);letter-spacing:.04em}
+  .kpi .v{font-size:30px;font-weight:700;letter-spacing:-.02em;margin-top:6px;line-height:1.1}
+  .kpi .v small{font-size:13px;font-weight:500;color:var(--muted);margin-left:4px}
+  .kpi .d{font-size:12px;color:var(--muted);margin-top:4px}
+
+  section{margin-top:34px}
+  h2{font-size:15px;margin:0 0 14px;color:var(--muted);font-weight:600;
+    display:flex;align-items:center;gap:10px}
+  h2::before{content:"";width:18px;height:1px;background:var(--red)}
+
+  .list{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--card)}
+  .row{display:grid;grid-template-columns:96px 1fr 74px 92px;gap:14px;align-items:center;
+    padding:12px 18px;border-top:1px solid var(--line)}
+  .row:first-child{border-top:0}
+  .row:hover{background:var(--card2)}
+  .tag{font-family:var(--mono);font-size:13px}
+  .bar{height:6px;border-radius:99px;background:rgba(255,255,255,.07);overflow:hidden}
+  .bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--red),var(--amber));
+    transform-origin:left center;transition:width .6s cubic-bezier(.2,.7,.2,1)}
+  .num{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+  .date{text-align:right;font-family:var(--mono);font-size:12px;color:var(--dim)}
+  .latest{color:var(--green);font-size:11px;font-family:var(--mono);margin-left:6px}
+
+  canvas{width:100%;height:200px;display:block;border:1px solid var(--line);border-radius:14px;
+    background:var(--card)}
+  .empty{padding:26px;text-align:center;color:var(--dim);font-size:13px;border:1px dashed var(--line2);
+    border-radius:14px}
+  .note{margin-top:26px;font-size:12.5px;color:var(--dim);line-height:1.8}
+  .note code{font-family:var(--mono);background:var(--card2);padding:1px 6px;border-radius:5px;
+    border:1px solid var(--line)}
+  .err{border:1px solid rgba(245,71,91,.4);background:rgba(245,71,91,.08);color:#ffb3bd;
+    padding:12px 16px;border-radius:12px;font-size:13.5px;margin-top:18px}
+  @media (max-width:820px){
+    .cards{grid-template-columns:repeat(2,1fr)}
+    .row{grid-template-columns:84px 1fr 60px;gap:10px}
+    .date{display:none}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>下载统计 <span id="repoLine">repo / —</span></h1>
+    </div>
+    <div class="actions">
+      <span class="stamp" id="stamp">载入中…</span>
+      <button id="reload">刷新</button>
+    </div>
+  </div>
+
+  <div id="err"></div>
+
+  <div class="cards">
+    <div class="kpi"><div class="k">累计下载</div><div class="v" id="kTotal">—</div><div class="d" id="kTotalNote">全部版本 EXE 之和</div></div>
+    <div class="kpi"><div class="k">最新版</div><div class="v" id="kLatest">—</div><div class="d" id="kLatestNote">—</div></div>
+    <div class="kpi"><div class="k">版本数</div><div class="v" id="kVers">—</div><div class="d" id="kVersNote">有产物的 Release</div></div>
+    <div class="kpi"><div class="k">平均每版</div><div class="v" id="kAvg">—</div><div class="d">累计 ÷ 版本数</div></div>
+  </div>
+
+  <section>
+    <h2>各版本下载量</h2>
+    <div class="list" id="list"><div class="empty">载入中…</div></div>
+  </section>
+
+  <section>
+    <h2>累计趋势</h2>
+    <canvas id="trend" width="1040" height="200"></canvas>
+    <div class="empty" id="trendEmpty" style="display:none">
+      还没有历史快照。跑一次 <code>python tools/site_stats.py</code> 生成本地快照，
+      之后每次运行都会追加一行，趋势线才会出现。
+    </div>
+  </section>
+
+  <p class="note">
+    数据源：GitHub Releases 的 <code>download_count</code>，每 6 小时由 GitHub 统计一次，含重复下载与镜像抓取，<b>不等于独立用户数</b>。<br />
+    浏览器直接调 <code>api.github.com</code>，未登录时每 IP 每小时 60 次配额，额度用完等整点重置即可。<br />
+    这个页面不放到导航里，也带 <code>noindex</code>；数据本身只有版本号与次数，不含任何访问者信息。
+  </p>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var REPO = "DcC176/replay-radio";
+  var $ = function(id){ return document.getElementById(id); };
+
+  function fmt(n){ return (n == null ? "—" : n.toLocaleString("zh-CN")); }
+  function day(iso){ return (iso || "").slice(0, 10); }
+
+  function render(releases){
+    var rows = releases.map(function(r){
+      var dl = (r.assets || []).filter(function(a){ return /\.exe$/i.test(a.name); })
+        .reduce(function(s, a){ return s + (a.download_count || 0); }, 0);
+      return { tag: r.tag_name, date: day(r.published_at), dl: dl,
+               latest: !!r.tag_name };
+    }).filter(function(r){ return r.dl >= 0; });
+
+    var total = rows.reduce(function(s, r){ return s + r.dl; }, 0);
+    var max = Math.max.apply(null, rows.map(function(r){ return r.dl; }).concat([1]));
+    var latest = rows[0];
+
+    $("kTotal").textContent = fmt(total);
+    $("kLatest").textContent = fmt(latest ? latest.dl : 0);
+    $("kLatestNote").textContent = latest ? latest.tag + " · " + latest.date : "—";
+    $("kVers").textContent = fmt(rows.length);
+    $("kVersNote").textContent = "共 " + rows.length + " 个 Release";
+    $("kAvg").textContent = rows.length ? (total / rows.length).toFixed(1) : "0";
+
+    $("list").innerHTML = rows.map(function(r, i){
+      var pct = r.dl ? Math.max(2, Math.round(r.dl / max * 100)) : 0;
+      return '<div class="row">' +
+        '<div class="tag">' + r.tag + (i === 0 ? '<span class="latest">latest</span>' : '') + '</div>' +
+        '<div class="bar"><i style="width:' + pct + '%"></i></div>' +
+        '<div class="num">' + fmt(r.dl) + '</div>' +
+        '<div class="date">' + r.date + '</div>' +
+      '</div>';
+    }).join("") || '<div class="empty">没有找到带 EXE 的 Release</div>';
+  }
+
+  function drawTrend(points){
+    var cv = $("trend"), ctx = cv.getContext("2d");
+    var W = cv.width, H = cv.height, pad = 26;
+    ctx.clearRect(0, 0, W, H);
+    if (!points || points.length < 2) return false;
+
+    var xs = points.map(function(p, i){ return i; });
+    var ys = points.map(function(p){ return p.total; });
+    var maxY = Math.max.apply(null, ys) || 1;
+    var stepX = (W - pad * 2) / Math.max(1, points.length - 1);
+    var px = function(i){ return pad + i * stepX; };
+    var py = function(v){ return H - pad - (v / maxY) * (H - pad * 2); };
+
+    // grid
+    ctx.strokeStyle = "rgba(255,255,255,.06)";
+    ctx.lineWidth = 1;
+    for (var g = 0; g <= 3; g++){
+      var yy = pad + g * (H - pad * 2) / 3;
+      ctx.beginPath(); ctx.moveTo(pad, yy); ctx.lineTo(W - pad, yy); ctx.stroke();
+    }
+    // area
+    var grad = ctx.createLinearGradient(0, pad, 0, H - pad);
+    grad.addColorStop(0, "rgba(245,71,91,.28)");
+    grad.addColorStop(1, "rgba(245,71,91,0)");
+    ctx.beginPath();
+    ctx.moveTo(px(0), H - pad);
+    points.forEach(function(p, i){ ctx.lineTo(px(i), py(p.total)); });
+    ctx.lineTo(px(points.length - 1), H - pad);
+    ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+    // line
+    ctx.beginPath();
+    points.forEach(function(p, i){ i ? ctx.lineTo(px(i), py(p.total)) : ctx.moveTo(px(i), py(p.total)); });
+    ctx.strokeStyle = "#f5475b"; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke();
+    // dots + labels
+    ctx.fillStyle = "#f2a63b";
+    points.forEach(function(p, i){
+      ctx.beginPath(); ctx.arc(px(i), py(p.total), 2.6, 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.fillStyle = "rgba(255,255,255,.55)";
+    ctx.font = "11px ui-monospace,monospace";
+    ctx.fillText(String(maxY), pad, pad - 8);
+    ctx.fillText(points[0].date, pad, H - 8);
+    ctx.textAlign = "right";
+    ctx.fillText(points[points.length - 1].date + " · " + points[points.length - 1].total, W - pad, H - 8);
+    return true;
+  }
+
+  function setErr(msg){
+    $("err").innerHTML = msg ? '<div class="err">' + msg + '</div>' : "";
+  }
+
+  function load(){
+    var btn = $("reload");
+    btn.disabled = true;
+    $("stamp").textContent = "请求中…";
+    setErr("");
+
+    fetch("https://api.github.com/repos/" + REPO + "/releases?per_page=100", {
+      headers: { "Accept": "application/vnd.github+json" }
+    }).then(function(r){
+      if (r.status === 403) throw new Error("rate");
+      if (!r.ok) throw new Error("http " + r.status);
+      return r.json();
+    }).then(function(list){
+      $("repoLine").textContent = REPO + " · " + list.length + " 个 Release";
+      render(list);
+      $("stamp").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    }).catch(function(e){
+      $("list").innerHTML = '<div class="empty">取数失败</div>';
+      $("stamp").textContent = "失败";
+      if (String(e.message) === "rate") {
+        setErr("GitHub API 配额用完（未登录 60 次/小时）。等整点重置，或在本机开一个令牌再刷新。");
+      } else {
+        setErr("请求 GitHub 失败：" + e.message + "。检查网络/代理后点「刷新」。");
+      }
+    }).then(function(){
+      btn.disabled = false;
+    });
+  }
+
+  fetch("history.json", { cache: "no-store" }).then(function(r){
+    if (!r.ok) throw new Error("none");
+    return r.json();
+  }).then(function(h){
+    var pts = (h && h.snapshots || []).slice().sort(function(a, b){ return a.date < b.date ? -1 : 1; });
+    if (!drawTrend(pts)) { $("trend").style.display = "none"; $("trendEmpty").style.display = "block"; }
+  }).catch(function(){
+    $("trend").style.display = "none";
+    $("trendEmpty").style.display = "block";
+  });
+
+  $("reload").addEventListener("click", load);
+  load();
+})();
+</script>
+</body>
+</html>
