@@ -50,11 +50,24 @@ html[data-theme="light"] { color-scheme: light; }
   --line-2: rgba(var(--ink), .16);
   --text: #f2f2f4;
   --text-2: #c9c9d1;                            /* 次级文字（比 muted 亮一档） */
-  --muted: #8b8b93;
-  --muted-2: #62626a;
+  --muted: #9a9aa2;                             /* 与 --muted-2 拉开一档：
+                                                  后者提亮到 #8a8a92 后两者只差 1 级，层级看不出来 */
+  --muted-2: #8a8a92;                          /* 原 #62626a：在 #101013 上只有 2.59:1，
+                                                  12.5px 的说明文字（#stat / 时间戳）读不清 */
   --red: #ff3b4e;
   --red-soft: rgba(255, 59, 78, .14);
   --radius: 14px;
+  /* 字号阶梯：只留 6 档，相邻档至少差 1px，并且**靠字重和颜色一起分层**。
+     改之前 CSS 里有 21 个字号，其中 10 / 10.5 / 11 / 11.5 / 12 / 12.5 / 13
+     七档全挤在 3px 里 —— 0.5px 的差在屏上分辨不出来，等于「CSS 里有层级、
+     画面上没有」。列表主行与它下面的日期也同为 400 字重，只差 2px。
+     下面所有组件按角色取这里的一档，不再各写各的小数。 */
+  --fs-hero: 42px;                              /* 页面身份：当前主播名 */
+  --fs-h1: 30px;                                /* 板块标题（DD / 频道页） */
+  --fs-h2: 17px;                                /* 卡片、区块标题 */
+  --fs-body: 14px;                              /* 正文 / 列表主行 / 按钮 */
+  --fs-sub: 13px;                               /* 次级：日期、计数、说明 */
+  --fs-fine: 12px;                              /* 最小档：表头、注脚、徽章 */
   /* 滚动条：全站共用一套规格。系统默认滚动条在深色页面上是一条亮灰的粗条，
      长列表那一栏（本场分段 / 节目单 / 弹幕）尤其扎眼。 */
   --sb-w: 10px;                                 /* 槽位总宽 */
@@ -90,7 +103,7 @@ html[data-theme="light"] { color-scheme: light; }
   --text: #1a1a1f;
   --text-2: #4a4a55;
   --muted: #55555f;
-  --muted-2: #75757f;
+  --muted-2: #6a6a74;                          /* 浅色同理：原色在纸白底上 4.4:1，压线不合格 */
   --red: #d81e33;
   --red-soft: rgba(216, 30, 51, .10);
   --on-red: #ffffff;
@@ -282,6 +295,14 @@ body { min-height: 100vh; }
 }
 
 .tb-right { display: flex; justify-content: flex-end; gap: 8px; white-space: nowrap; }
+
+/* 1440 这类宽度：右侧按钮的文案会把顶栏撑出 43px 的横向滚动条（实测右边缘
+   1473 > 视口 1430），每个板块都会多出一条横向滚动。把「主播B站空间」的文案
+   收成纯图标即可收回；1600 以上仍显示文字。 */
+@media (max-width: 1600px) {
+  .tb-right .gbtxt { display: none; }
+  .tb-right .ghost-btn { padding: 6px 9px; }
+}
 .ghost-btn {
   display: inline-flex;
   align-items: center;
@@ -556,22 +577,38 @@ body:not(.theater):not(.view-broadcast) .col-right .player-box {
   margin-bottom: 12px;
 }
 
-.stat { font-size: 12.5px; color: var(--muted-2); }
+.stat { font-size: var(--fs-sub); color: var(--muted-2); font-variant-numeric: tabular-nums; }
 .stat b { color: var(--text-2); font-weight: 500; }
 
-.sorts { display: inline-flex; gap: 2px; margin-left: 10px; }
-.sort {
-  border: 0;
-  background: transparent;
-  color: var(--muted-2);
-  font-size: 12.5px;
-  font-family: inherit;
-  padding: 3px 8px;
-  border-radius: 6px;
+.sorts { display: inline-flex; margin-left: 10px; vertical-align: middle; }
+/* 排序按钮：原生 select 撑起来的胶囊，点开就是「最新（倒序）/ 最早（顺序）/ 高能」。 */
+.sort-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.4;
   cursor: pointer;
 }
-.sort:hover { color: var(--text-2); }
-.sort.active { color: var(--red); background: var(--red-soft); }
+.sort-pick:hover { border-color: var(--red); color: var(--text); }
+.sort-pick:focus-within { border-color: var(--red); }
+.sort-pick svg { width: 13px; height: 13px; flex: none; }
+.sort-pick select {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 0 2px 0 0;
+  outline: none;
+  cursor: pointer;
+}
+.sort-pick select option { background: var(--panel-2); color: var(--text); }
 
 .pager { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); }
 .pager button {
@@ -592,16 +629,18 @@ body:not(.theater):not(.view-broadcast) .col-right .player-box {
 .list { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .list th {
   padding: 0 12px 11px;
-  font-size: 12px;
+  font-size: var(--fs-fine);
   font-weight: 500;
   color: var(--muted-2);
   text-align: left;
+  /* 表头不靠「再小一号」退后：12px 已是下限，改用字距 + 颜色区分角色 */
+  letter-spacing: .04em;
   border-bottom: 1px solid var(--line);
 }
 .list td {
-  padding: 13px 12px;
+  padding: 12px;
   border-bottom: 1px solid rgba(var(--ink), .055);
-  font-size: 13.5px;
+  font-size: var(--fs-body);
   vertical-align: middle;
 }
 .list tbody tr { transition: background .12s; }
@@ -613,7 +652,7 @@ body:not(.theater):not(.view-broadcast) .col-right .player-box {
 .col-cat { width: 78px; }
 .col-dur { width: 74px; }
 .col-dm { width: 88px; }
-.col-act { width: 82px; }
+.col-act { width: 88px; }
 
 .cell-title { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .cell-title img {
@@ -628,17 +667,26 @@ body:not(.theater):not(.view-broadcast) .col-right .player-box {
 .cell-title .tt .n {
   display: block;
   color: var(--text);
+  /* 主行比次级重一档：以前两者同为 400、只差 2px，扫读时名字与日期分不开 */
+  font-weight: 500;
+  line-height: 1.35;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.cell-title .tt .d { display: block; font-size: 11.5px; color: var(--muted-2); margin-top: 2px; }
+.cell-title .tt .d {
+  display: block;
+  font-size: var(--fs-sub);
+  color: var(--muted-2);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;       /* 日期与分P数逐行对齐，扫读时列不会抖 */
+}
 
 .tag {
   display: inline-block;
   padding: 3px 10px;
   border-radius: 999px;
-  font-size: 11.5px;
+  font-size: var(--fs-fine);
   background: rgba(var(--ink), .06);
   color: var(--text-2);
 }
@@ -653,30 +701,46 @@ body:not(.theater):not(.view-broadcast) .col-right .player-box {
 .mono { color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .play-btn {
-  padding: 5px 15px;
+  /* 列宽 88 − td 两侧内边距 24 = 64px 可用。两个字 26px + 左右内边距 26 + 边框 2 = 54，
+     放得下；以前内边距给到 16（合计 60）时正好被挤成「播 / 放」两行。 */
+  padding: 6px 13px;
+  white-space: nowrap;
   border-radius: 999px;
   border: 1px solid var(--line-2);
   background: transparent;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: var(--fs-sub);
   font-family: inherit;
   cursor: pointer;
   transition: all .15s;
 }
 .play-btn:hover { border-color: var(--red); color: var(--red); }
 
-.empty { padding: 46px 0; text-align: center; color: var(--muted-2); font-size: 13px; }
+.empty { padding: 46px 0; text-align: center; color: var(--muted-2); font-size: var(--fs-sub); }
 
 /* 节目单：日期分隔行 */
 tr.day-row td {
   padding: 22px 12px 8px;
-  font-size: 12px;
+  font-size: var(--fs-fine);
   color: var(--muted-2);
   border-bottom: 0;
 }
 tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
 .time-cell { color: var(--text); font-variant-numeric: tabular-nums; }
-.time-cell small { display: block; font-size: 11px; color: var(--muted-2); margin-top: 2px; }
+.time-cell small {
+  display: block;
+  font-size: var(--fs-fine);
+  color: var(--muted-2);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+/* 正在播的那一行：红点 + 倒计时。96px 的列宽放不下「直播中 · 剩 14:58」整句。 */
+.time-cell .tc-live { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.time-cell .tc-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: var(--red);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 18%, transparent);
+}
 
 /* 分类卡片（.cat-*）已于 v1.0.33 随「分类」板块一并移除 */
 
@@ -1552,6 +1616,10 @@ body.theater .chapters-panel { display: none; }
 
 /* 右下角悬浮按钮 + 展开面板。收起时只有一个小胶囊，不遮挡视频；
    全屏（body.theater）下同样保留，因为看视频时更需要知道有没有开播。 */
+/* DD 看的是「你自己」的档案，右下角这颗胶囊讲的是「当前主播」在不在播 —— 既无关，
+   又正好压在互动流右侧的时间/条数上（实测遮挡 120×26px）。其余视图保留。 */
+body.view-dd .status-dock { display: none; }
+
 .status-dock {
   position: fixed;
   right: 20px;
@@ -1765,7 +1833,7 @@ body.theater .chapters-panel { display: none; }
 .status-item-meta { font-size: 11px; color: var(--muted); }
 
 .status-new {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--text);
   background: var(--red);
@@ -2623,7 +2691,7 @@ body.view-multi .col-right { display: none; }
   overflow: hidden; white-space: nowrap;
 }
 .mf-live {
-  font-size: 10px; flex: none;
+  font-size: 11px; flex: none;
   color: var(--on-red); background: var(--red);
   border-radius: 4px; padding: 1px 4px;
 }
@@ -2678,6 +2746,11 @@ body.view-multi .col-right { display: none; }
 .multi-grid .ms-cell.lead {
   box-shadow: inset 0 0 0 2px var(--red);
 }
+/* 「填满」布局（7 路以上、宫格铺不满时）：格子按 px 绝对定位，由 JS 算好；
+   副画面用 cover 吃掉多余比例，所以墙上不留空格（用户 2026-11-05 选定）。 */
+.multi-grid.filling { display: block; position: relative; }
+.multi-grid.filling .ms-cell { position: absolute; }
+.multi-grid.filling .ms-cell:not(.lead) video { object-fit: cover; }
 /* 非自由布局：整格可按住拖动，松手与目标格互换位置 */
 .multi-grid:not(.free) .ms-cell { cursor: grab; }
 .multi-grid:not(.free) .ms-cell.dragging {
@@ -2743,6 +2816,10 @@ body.view-multi .col-right { display: none; }
   background: #07070b;
   border: 1px solid var(--line);
   min-height: 0;
+  /* 让「没有画面」状态能按格子自己的尺寸取字号（cqw）。
+     一块 900×580 的格子和一块 335×188 的格子用同一套 px 字号，前者会显得空。
+     size 容器只影响子元素取值，格子的宽高仍由 grid / 绝对定位决定。 */
+  container-type: size;
 }
 .ms-cell video {
   width: 100%; height: 100%;
@@ -2762,6 +2839,17 @@ body.view-multi .col-right { display: none; }
   background: linear-gradient(transparent, rgba(0, 0, 0, .78));
   font-size: 12px;
   color: #eee;
+  /* 默认隐藏，鼠标移到这一格才浮出来（用户 2026-11-05 要求：不悬停时别压住画面）。
+     pointer-events 一起关掉 —— 只是 opacity:0 的话，看不见的按钮还能被点到。 */
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .16s ease;
+}
+.ms-cell:hover .ms-bar,
+.ms-cell:focus-within .ms-bar,
+.ms-cell.dragging .ms-bar {
+  opacity: 1;
+  pointer-events: auto;
 }
 .ms-btns .ms-btn { opacity: .92; }
 .ms-btns .ms-btn:hover { opacity: 1; }
@@ -2802,16 +2890,60 @@ body.view-multi .col-right { display: none; }
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: clamp(7px, 1.2cqw, 14px);
   color: var(--muted);
-  font-size: 13px;
-  background: radial-gradient(ellipse at center, rgba(20, 20, 28, .7), #07070b 72%);
+  font-size: var(--fs-sub);
+  background: radial-gradient(ellipse at center, rgba(20, 20, 28, .72), #07070b 74%);
   text-align: center;
-  padding: 16px;
+  padding: clamp(12px, 2cqw, 26px);
 }
-.ms-off b { color: var(--text); font-weight: 600; font-size: 15px; }
-.ms-off .ms-off-sub { font-size: 12px; color: var(--muted-2); }
+/* 头像：整块格子的视觉锚点。取不到头像时 faceHtml 会换成首字母，不会破图。 */
+.ms-off .ms-av {
+  width: clamp(46px, 9.5cqw, 86px);
+  height: clamp(46px, 9.5cqw, 86px);
+  border-radius: 50%;
+  overflow: hidden;
+  flex: none;
+  box-shadow: 0 0 0 1px rgba(var(--ink), .12), 0 8px 24px rgba(0, 0, 0, .45);
+}
+.ms-off .ms-av-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ms-off .ms-av-img-ph {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--panel-2); color: var(--muted);
+  font-weight: 600; font-size: clamp(18px, 4cqw, 34px);
+}
+.ms-off b {
+  color: var(--text);
+  font-weight: 600;
+  font-size: clamp(15px, 2.4cqw, 26px);
+  line-height: 1.25;
+  max-width: 90%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 状态行：一个点 + 说明。点让「未开播」读起来是状态，而不是一句无关的话。 */
+.ms-off .ms-off-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 88%;
+  font-size: clamp(12px, 1.15cqw, 15px);
+  color: var(--muted-2);
+  line-height: 1.5;
+}
+.ms-off .ms-off-sub em { font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ms-off .ms-dot {
+  width: .46em; height: .46em; border-radius: 50%; flex: none;
+  background: var(--muted-2);
+  box-shadow: 0 0 0 3px rgba(var(--ink), .05);
+}
 .ms-cell.loading .ms-off { color: var(--muted-2); }
+.ms-cell.loading .ms-off .ms-dot { animation: msDotPulse 1.4s ease-in-out infinite; }
+@keyframes msDotPulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .ms-cell.loading .ms-off .ms-dot { animation: none; }
+}
 
 /* ---------- 混合播放（同时点亮多位板块） ---------- */
 
@@ -4080,7 +4212,7 @@ body.view-dd .views { grid-column: 1 / -1; }
 .dl-cell .d { color: var(--text-2); }
 .dl-cell .n {
   display: inline-block; margin-top: 4px;
-  font-size: 10.5px; padding: 1px 6px; border-radius: 999px;
+  font-size: 11.5px; padding: 1px 7px; border-radius: 999px;
   background: color-mix(in srgb, var(--red) 18%, transparent);
   color: var(--red);
 }
@@ -4103,6 +4235,46 @@ body.view-dd .views { grid-column: 1 / -1; }
   .dl-chart { height: 240px; }
 }
 
+/* 未登录 / 取不到档案：整页换成一个带动作的状态页，而不是满屏空卡片 */
+.dd-gate {
+  max-width: 560px;
+  margin: 26px 0 0;
+  padding: 30px 32px 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background:
+    radial-gradient(120% 100% at 0% 0%, color-mix(in srgb, var(--red) 7%, transparent), transparent 58%),
+    var(--panel);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+.dd-gate-mark {
+  width: 44px; height: 44px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted);
+  background: rgba(var(--ink), .05);
+  border: 1px solid var(--line);
+}
+.dd-gate-mark svg { width: 22px; height: 22px; }
+.dd-gate b { font-size: var(--fs-h2); font-weight: 600; color: var(--text); }
+.dd-gate p {
+  margin: 0;
+  max-width: 32em;
+  font-size: var(--fs-body);
+  line-height: 1.65;
+  color: var(--muted);
+}
+.dd-gate p b { font-size: inherit; font-weight: 500; color: var(--text-2); }
+.dd-gate .btn { margin-top: 6px; }
+/* ⚠️ 类选择器里的 display 会盖掉 [hidden] 的 UA 默认值（同为 0,1,0 时按先后），
+   不写这一条，登录正常时这块卡片也会一直显示。 */
+.dd-gate[hidden] { display: none; }
+/* 状态页出现时，子标签与两个面板一起收起 —— 空壳卡片（"—" / "暂无"）只会让人以为坏了 */
+#view-dd.gated .dd-subtabs,
+#view-dd.gated .dd-panel { display: none; }
+
 /* ---------------------------------------------------------------- DD：看播档案布局
    对照 vtb.cat：左「N 个常去」榜单，右「主播卡 + 四项统计 + 筛选 + 互动流」。 */
 .ddp-grid {
@@ -4124,12 +4296,12 @@ body.view-dd .views { grid-column: 1 / -1; }
   padding: 10px 12px; border-bottom: 1px solid var(--line);
 }
 .ddp-side-h b { font-size: 12.5px; }
-.ddp-side-h .sub { margin: 0; font-size: 11px; }
+.ddp-side-h .sub { margin: 0; font-size: var(--fs-fine); }
 /* vtb.cat 左栏头上那三颗小按钮（排序 / 直降） */
 .ddp-side-ctrl { margin-left: auto; display: flex; gap: 6px; }
 .ddp-mini {
   appearance: none; border: 1px solid var(--line-2); background: var(--panel-2);
-  color: var(--muted); font: inherit; font-size: 10.5px; padding: 2px 8px;
+  color: var(--muted); font: inherit; font-size: var(--fs-fine); padding: 3px 9px;
   border-radius: 999px; cursor: pointer; transition: color .15s, border-color .15s;
 }
 .ddp-mini:hover { color: var(--text); border-color: var(--muted-2); }
@@ -4153,7 +4325,7 @@ body.view-dd .views { grid-column: 1 / -1; }
   box-shadow: inset 2px 0 0 var(--red);
 }
 .ddp-row i {
-  grid-area: i; font-style: normal; font-size: 11px; color: var(--muted-2); text-align: right;
+  grid-area: i; font-style: normal; font-size: var(--fs-fine); color: var(--muted-2); text-align: right;
 }
 .ddp-av {
   grid-area: av; width: 24px; height: 24px; border-radius: 50%; object-fit: cover;
@@ -4164,14 +4336,15 @@ body.view-dd .views { grid-column: 1 / -1; }
   display: inline-flex; align-items: center; justify-content: center;
   font-size: 11px; color: var(--muted); flex: 0 0 auto;
 }
-.ddp-row .nm { grid-area: nm; font-size: 12.5px;
+.ddp-row .nm { grid-area: nm; font-size: var(--fs-sub);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ddp-row .mt { grid-area: mt; font-size: 11px; color: var(--muted-2); }
+.ddp-row .mt { grid-area: mt; font-size: var(--fs-fine); color: var(--muted-2);
+  font-variant-numeric: tabular-nums; }
 /* 互动占比条：整行宽的一细条，和 vtb.cat 的百分比条同义 */
 .ddp-row .bar { grid-area: bar; height: 3px; border-radius: 2px; background: var(--panel-2); overflow: hidden; }
 .ddp-row .bar span { display: block; height: 100%; background: var(--red); border-radius: 2px; }
 .ddp-row .pct {
-  grid-area: pct; font-size: 10px; color: var(--muted-2); text-align: center;
+  grid-area: pct; font-size: var(--fs-fine); color: var(--muted-2); text-align: center;
   border: 1px solid var(--line-2); border-radius: 999px; padding: 0 5px;
   min-width: 40px; font-variant-numeric: tabular-nums;
 }
@@ -4188,7 +4361,7 @@ body.view-dd .views { grid-column: 1 / -1; }
 .ddp-hero-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ddp-hero-txt b { font-size: 15px; }
 .ddp-hero-txt .sub { margin: 0; }
-.ddp-times { margin-left: auto; text-align: right; font-size: 11px; color: var(--muted-2); }
+.ddp-times { margin-left: auto; text-align: right; font-size: var(--fs-sub); color: var(--muted-2); }
 .ddp-times b { color: var(--text-2); font-weight: 500; }
 
 .ddp-stats {
@@ -4208,7 +4381,7 @@ body.view-dd .views { grid-column: 1 / -1; }
 .ddp-stat.s-act { --band: #b794f4; }
 .ddp-stat.s-spend { --band: #f0a04b; }
 .ddp-stat.s-medal { --band: #68d391; }
-.ddp-stat span { font-size: 11px; color: var(--muted-2); }
+.ddp-stat span { font-size: var(--fs-fine); color: var(--muted-2); }
 .ddp-stat b { font-size: 16px; font-weight: 600; letter-spacing: .2px; }
 .ddp-subline {
   display: flex; gap: 16px; margin: 8px 2px 0;
@@ -4230,21 +4403,21 @@ body.view-dd .views { grid-column: 1 / -1; }
   display: grid;
   grid-template-columns: 96px 84px minmax(0, 1fr) 172px 128px 20px;
   gap: 10px; align-items: center;
-  padding: 7px 12px; border-top: 1px solid var(--line); font-size: 12.5px;
+  padding: 8px 12px; border-top: 1px solid var(--line); font-size: var(--fs-sub);
 }
 .ddp-item:first-child { border-top: 0; }
 .ddp-item:hover { background: var(--panel-2); }
 .ddp-item .c-who { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ddp-item .c-kind { min-width: 0; }
 .ddp-item .c-body { min-width: 0; word-break: break-word; }
-.ddp-item .c-body em { font-style: normal; color: var(--muted-2); font-size: 11.5px; }
+.ddp-item .c-body em { font-style: normal; color: var(--muted-2); font-size: var(--fs-fine); }
 .ddp-item .c-liver { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--text-2); }
 .ddp-item .c-liver b {
   font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .ddp-av.sm { width: 18px; height: 18px; }
-.ddp-av-ph.sm { width: 18px; height: 18px; font-size: 9px; }
-.ddp-item .c-time { font-size: 11px; color: var(--muted-2); text-align: right;
+.ddp-av-ph.sm { width: 18px; height: 18px; font-size: 10px; }
+.ddp-item .c-time { font-size: var(--fs-fine); color: var(--muted-2); text-align: right;
   font-variant-numeric: tabular-nums; }
 .ddp-item .c-ico { text-align: center; }
 .ddp-item .c-ico a { color: var(--muted-2); text-decoration: none; font-size: 13px; }
@@ -4291,7 +4464,7 @@ body.view-dd .views { grid-column: 1 / -1; }
 .dd-card-list li.more { display: block; color: var(--muted-2); }
 .ddp-badge.msg { border-color: rgba(99,179,237,.45); color: #8cc7f0; }
 .ddp-badge {
-  font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  font-size: var(--fs-fine); padding: 2px 8px; border-radius: 999px;
   border: 1px solid var(--line-2); color: var(--muted);
 }
 .ddp-badge.gift { border-color: rgba(255,176,66,.45); color: #ffc266; }
@@ -4320,8 +4493,8 @@ body.view-dd .views { grid-column: 1 / -1; }
   padding: 10px 12px 8px; min-width: 0;
 }
 .ddp-viz-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
-.ddp-viz-h b { font-size: 12.5px; font-weight: 600; }
-.ddp-viz-h .sub { margin: 0; font-size: 11px; }
+.ddp-viz-h b { font-size: var(--fs-sub); font-weight: 600; }
+.ddp-viz-h .sub { margin: 0; font-size: var(--fs-fine); }
 
 .ddp-ring-body { display: flex; align-items: center; gap: 10px; }
 .ddp-ring { width: 104px; height: 104px; flex: 0 0 104px; }
@@ -4329,7 +4502,7 @@ body.view-dd .views { grid-column: 1 / -1; }
 .ddp-lg { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); }
 .ddp-lg i { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 8px; }
 .ddp-lg b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
-.ddp-lg em { font-style: normal; color: var(--muted-2); font-size: 10.5px; margin-left: auto;
+.ddp-lg em { font-style: normal; color: var(--muted-2); font-size: var(--fs-fine); margin-left: auto;
   font-variant-numeric: tabular-nums; }
 
 .ddp-hours { display: flex; align-items: flex-end; gap: 3px; height: 104px; }
@@ -4346,7 +4519,8 @@ body.view-dd .views { grid-column: 1 / -1; }
 }
 .ddp-hour.peak b { background: var(--red); }
 .ddp-hour:hover b { filter: brightness(1.3); }
-.ddp-hour em { font-style: normal; font-size: 9.5px; color: var(--muted-2); height: 11px; }
+.ddp-hour em { font-style: normal; font-size: 11.5px; color: var(--muted-2); height: 14px;
+  font-variant-numeric: tabular-nums; }
 @keyframes ddpBarIn { from { transform: scaleY(0); } to { transform: scaleY(1); } }
 
 /* 榜单：整行淡入 + 占比条从左侧长出 + 粉丝牌小标 */
@@ -4360,7 +4534,7 @@ body.view-dd .views { grid-column: 1 / -1; }
 @keyframes ddBarGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 .ddp-row .nm .medal {
   font-style: normal; margin-left: 6px; padding: 0 5px; border-radius: 999px;
-  border: 1px solid var(--line-2); color: var(--muted); font-size: 10px; white-space: nowrap;
+  border: 1px solid var(--line-2); color: var(--muted); font-size: 11px; white-space: nowrap;
 }
 
 /* 互动流：逐条淡入（只给前 30 条延迟，后面的立即出现，避免长列表等半天） */
@@ -4396,6 +4570,7 @@ body.view-dd .views { grid-column: 1 / -1; }
 }
 
 @media (max-width: 900px) {
+
   .ddp-grid { grid-template-columns: minmax(0, 1fr); }
   .ddp-board { max-height: 260px; }
   .ddp-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

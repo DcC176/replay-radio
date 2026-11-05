@@ -197,9 +197,9 @@ window.__BOOT_T0 = Date.now();
   <nav class="tb-tabs">
     <!-- 激活标签的那颗红色胶囊：不属于任何标签，而是在标签之间滑过去 -->
     <i class="tb-pill" id="tb-pill" aria-hidden="true"></i>
-    <a class="tab" data-view="live" href="#/live">24 小时频道</a>
+    <a class="tab" data-view="live" href="#/live">录播</a>
     <a class="tab" data-view="broadcast" href="#/broadcast">直播间</a>
-    <a class="tab" data-view="schedule" href="#/schedule">节目单</a>
+    <a class="tab" data-view="schedule" href="#/schedule">24 小时频道</a>
     <a class="tab" data-view="playlist" href="#/playlist">歌单</a>
     <a class="tab" data-view="multi" href="#/multi">监控室</a>
     <a class="tab" data-view="dynamic" href="#/dynamic">动态</a>
@@ -292,8 +292,20 @@ window.__BOOT_T0 = Date.now();
         <div>
           <span class="stat" id="stat">—</span>
           <span class="sorts">
-            <button class="sort active" data-sort="date">最新</button>
-            <button class="sort" data-sort="score">高能</button>
+            <!-- 排序收成**一个按钮**（原生 select 撑起来的），点开就能看到全部方式：
+                倒序 / 顺序 / 高能。以前是三个平铺的小字，容易被当成标签而不是可点的。 -->
+            <label class="sort-pick" title="排序方式">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M7 4v15"/><path d="M4 16l3 3 3-3"/>
+                <path d="M17 20V5"/><path d="M14 8l3-3 3 3"/>
+              </svg>
+              <select id="sort-mode" aria-label="排序方式">
+                <option value="date">最新（倒序）</option>
+                <option value="date-asc">最早（顺序）</option>
+                <option value="score">高能</option>
+              </select>
+            </label>
           </span>
         </div>
         <div class="pager">
@@ -314,7 +326,7 @@ window.__BOOT_T0 = Date.now();
           </tr>
         </thead>
         <tbody id="rows">
-          <tr><td colspan="5" class="empty">正在载入节目单…</td></tr>
+          <tr><td colspan="5" class="empty">正在载入录播…</td></tr>
         </tbody>
       </table>
 
@@ -327,6 +339,9 @@ window.__BOOT_T0 = Date.now();
           <button class="btn small ghost on" data-msrc="stations" type="button">我的板块</button>
           <button class="btn small ghost" data-msrc="following" type="button">关注的直播</button>
         </div>
+        <!-- 收起左侧主播列表：收起后画面墙吃满整行，能多排几路。
+             只有「关注的直播」有左栏，切到「我的板块」时这个按钮会隐藏。 -->
+        <button class="btn small ghost" id="multi-side-toggle" type="button" hidden>‹ 收起列表</button>
         <button class="btn small ghost" id="multi-add" type="button">＋ 添加直播间</button>
         <button class="btn small ghost" id="multi-refresh" type="button">刷新开播状态</button>
         <div class="multi-layout" id="multi-layout">
@@ -422,7 +437,7 @@ window.__BOOT_T0 = Date.now();
       <div class="actions">
         <!-- 时间范围：互斥单选，用 radio 驱动滑动指示器（参考 smooth-option-switcher 的做法）。
              ⚠️ radio 必须在 label **之前** —— 样式靠 `:checked ~ label` 兄弟选择器选中文字颜色。 -->
-        <div class="seg-switch" id="horizon-switch" role="radiogroup" aria-label="节目单时间范围">
+        <div class="seg-switch" id="horizon-switch" role="radiogroup" aria-label="24 小时频道时间范围">
           <input type="radio" name="horizon" id="hz-24" data-horizon="86400" value="86400" checked>
           <input type="radio" name="horizon" id="hz-72" data-horizon="259200" value="259200">
           <input type="radio" name="horizon" id="hz-all" data-horizon="0" value="0">
@@ -494,6 +509,24 @@ window.__BOOT_T0 = Date.now();
       <div class="dd-subtabs" id="dd-subtabs">
         <button class="dd-sub on" type="button" data-sub="feed">看播档案</button>
         <button class="dd-sub" type="button" data-sub="cal">直播数据</button>
+      </div>
+
+      <!-- 未登录 / 取不到档案时的唯一出口。
+           以前同一个原因被写进三处（左栏、筛选条右侧、互动流空态），
+           整页仍是满屏的空壳卡片（"—"、"暂无"），既没告诉你怎么解决也不像成品。 -->
+      <div class="dd-gate" id="dd-gate" hidden>
+        <div class="dd-gate-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3.5" y="5" width="17" height="14" rx="3"/>
+            <circle cx="9" cy="10" r="1.6"/>
+            <path d="M4 17c1.6-2 3.4-2.9 5-2.9s3.4.9 5 2.9"/>
+            <path d="M15.5 9.5h3.5M15.5 13h2.5"/>
+          </svg>
+        </div>
+        <b id="dd-gate-title">还没登录 B 站</b>
+        <p id="dd-gate-text">DD 看播档案读的是<b>你自己账号</b>在 vtb.cat 上的记录，没登录就取不到。</p>
+        <button class="btn primary" id="dd-gate-go" type="button">去设置里登录</button>
       </div>
 
       <div class="dd-panel" id="ddp-feed">

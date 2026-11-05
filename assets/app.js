@@ -1,6 +1,6 @@
 /* 噼里啪啦
  * 频道位置 = ((now - epoch) + drift) mod cycleLength
- * 节目单是「种子 + 时间」的纯函数，任何时刻打开都会落到同一个位置。
+ * 频道排片是「种子 + 时间」的纯函数，任何时刻打开都会落到同一个位置。
  */
 (function () {
   'use strict';
@@ -1071,7 +1071,13 @@
       + (ddPState.kind ? '&kind=' + encodeURIComponent(ddPState.kind) : '')
       + (ddPState.liver ? '&liver=' + encodeURIComponent(ddPState.liver) : '');
     fetch(q).then(function (r) { return r.json(); }).then(function (d) {
-      if (!d || d.error) { ddTxt('ddp-stat', (d && d.error) || '查询失败'); return; }
+      if (!d || d.error) {
+        // 已经进入「未登录」状态页时，原因由那一页说明；再往筛选条写一遍就变成两处重复
+        var v = document.getElementById('view-dd');
+        if (v && v.classList.contains('gated')) return;
+        ddTxt('ddp-stat', (d && d.error) || '查询失败');
+        return;
+      }
       ddPState.rows = d.rows || [];
       ddPaintRows();
       ddPState.hasMore = d.page * d.size < d.total;
@@ -1121,12 +1127,34 @@
   /* 取不到档案时**必须把原因放到页面上**：只在筛选条右侧写一句，
      左栏会一直停在「载入中…」，用户只会以为这页坏了（未登录是常见情况）。 */
   function ddProfileFail(msg) {
-    msg = msg || '档案加载失败';
-    ddTxt('ddp-stat', msg);
-    var box = document.getElementById('ddp-board');
-    if (box) box.innerHTML = '<p class="dl-empty">' + esc(msg) + '</p>';
-    var feed = document.getElementById('ddp-feed-list');
-    if (feed) feed.innerHTML = '<p class="dl-empty">这里显示的是你自己账号的记录，登录后再进来。</p>';
+    msg = String(msg || '档案加载失败');
+    /* 原因只写一次。以前左栏、筛选条右侧、互动流空态各写一遍同一句话，
+       而四块统计和两张图仍是「—」和空卡，看起来像坏了而不是「还没登录」。 */
+    var isLogin = msg.indexOf('登录') >= 0;
+    ddTxt('ddp-stat', '');
+    ddTxt('dd-gate-title', isLogin ? '还没登录 B 站' : '档案暂时取不到');
+    var text = document.getElementById('dd-gate-text');
+    if (text) {
+      text.innerHTML = isLogin
+        ? 'DD 看播档案读的是<b>你自己账号</b>在 vtb.cat 上的记录，没登录就取不到。'
+        : esc(msg) + ' —— 可以稍后重试，或先确认网络与 B 站接口是否正常。';
+    }
+    var go = document.getElementById('dd-gate-go');
+    if (go) {
+      go.textContent = isLogin ? '去设置里登录' : '重试一次';
+      go.setAttribute('data-mode', isLogin ? 'login' : 'retry');
+    }
+    var gate = document.getElementById('dd-gate');
+    if (gate) gate.hidden = false;
+    var view = document.getElementById('view-dd');
+    if (view) view.classList.add('gated');
+  }
+
+  function ddProfileOk() {
+    var gate = document.getElementById('dd-gate');
+    if (gate) gate.hidden = true;
+    var view = document.getElementById('view-dd');
+    if (view) view.classList.remove('gated');
   }
 
   function ddpLoadProfile() {
@@ -1134,6 +1162,7 @@
     ddPState.loaded = true;
     fetch('/api/dd/profile?pages=5').then(function (r) { return r.json(); }).then(function (d) {
       if (!d || d.error) { ddProfileFail(d && d.error); return; }
+      ddProfileOk();
       ddPState.board = d.board || [];
       ddRenderBoard();
       ddRenderStats(d);
@@ -1143,6 +1172,13 @@
   }
 
   function bindDD() {
+    /* 状态页上的唯一出口：未登录 → 去设置；其他失败 → 重新拉一次 */
+    var gateGo = document.getElementById('dd-gate-go');
+    if (gateGo) gateGo.addEventListener('click', function () {
+      if (gateGo.getAttribute('data-mode') === 'login') { location.hash = '#/settings'; return; }
+      ddPState.loaded = false;
+      ddpLoadProfile();
+    });
     var go = document.getElementById('ddp-go');
     if (go) go.addEventListener('click', function () { ddPState.loaded = true; ddpQuery(1); });
     var kw = document.getElementById('ddp-kw');
@@ -1597,7 +1633,7 @@
     segIndex: -1,
     playingKey: null,
     view: 'live',
-    horizon: 86400,        // 节目单视界（秒）；0 = 整个循环
+    horizon: 86400,        // 排片视界（秒）；0 = 整个循环
     skip: store.get('xl_skip', false),      // 跳过空白片段
     marking: false,
     chapKey: '',                            // 当前片段标识，用于避免每秒重渲染
@@ -2311,7 +2347,9 @@
     });
     list.sort(state.sort === 'score'
       ? function (a, b) { return b.score - a.score || b.pubdate - a.pubdate; }
-      : function (a, b) { return b.pubdate - a.pubdate; });
+      : state.sort === 'date-asc'
+        ? function (a, b) { return a.pubdate - b.pubdate; }
+        : function (a, b) { return b.pubdate - a.pubdate; });
     return list;
   }
 
@@ -2341,7 +2379,7 @@
     }
   }
 
-  /* ---------------------------------------------------------- 节目单视图 */
+  /* ------------------------------------------------------ 24 小时频道视图 */
 
   function renderSchedule() {
     if (!state.cycle || !state.cycle.segments.length) {
@@ -2381,8 +2419,12 @@
       }
       var p = r.seg.program;
       var partNote = p.parts.length > 1 ? ' · 分P ' + r.seg.page + '/' + p.parts.length : '';
+      /* 「直播中 · 剩 14:58」原来用一句话写，96px 的时间列放不下、被折成两三行
+         （12px 时实测需要 ~111px）。改成「状态点 + 剩 mm:ss」：点表示正在播，
+         文字只剩倒计时，一行放得下，也不用再读一遍「直播中」三个字。 */
       var timeCell = r.live
-        ? '<span class="time-cell">' + hhmm(d) + '<small>直播中 · 剩 '
+        ? '<span class="time-cell">' + hhmm(d)
+            + '<small class="tc-live"><i class="tc-dot" aria-hidden="true"></i>剩 '
             + fmtClock(r.seg.duration - (t0 - r.start)) + '</small></span>'
         : '<span class="time-cell">' + hhmm(d) + '</span>';
       html += '<tr class="' + (r.live ? 'live-row' : '') + '" data-bvid="' + p.bvid + '">'
@@ -2434,7 +2476,7 @@
       ].join('')),
 
       block('频道怎么工作', [
-        '<p>节目单不是一份固定列表，而是时间的纯函数：</p>',
+        '<p>频道排片不是一份固定列表，而是时间的纯函数：</p>',
         '<p><code>position = ((now - epoch) + drift) mod cycleLength</code></p>',
         '<p>其中 <code>epoch</code> 固定为 2026-09-25 00:00（UTC+8），'
           + '<code>cycleLength</code> 是全部素材时长之和（' + hours + ' 小时）。'
@@ -2888,7 +2930,7 @@
     { id: 'theater', name: '宽屏模式切换', run: function () { clickSel('#btn-theater'); } },
     { id: 'fullscreen', name: '全屏切换', run: function () { clickSel('#ctrl-fs'); } },
     { id: 'random', name: '随机换一场', run: function () { clickSel('#btn-random'); } },
-    { id: 'gotoLive', name: '切到 24 小时频道', run: function () { location.hash = '#/live'; } },
+    { id: 'gotoLive', name: '切到录播', run: function () { location.hash = '#/live'; } },
     { id: 'gotoBroadcast', name: '切到直播间', run: function () { location.hash = '#/broadcast'; } }
   ];
 
@@ -3064,7 +3106,7 @@
 
     el.segRun.addEventListener('click', function () {
       var p = state.all && state.all[0];
-      if (!p) { el.segState.textContent = '节目单还没载入'; return; }
+      if (!p) { el.segState.textContent = '录播清单还没载入'; return; }
       postJSON('/api/segments/run', { bvid: p.bvid }).then(function (d) {
         el.segState.textContent = d.error ? d.error : ('已排队：' + p.title);
         segPoll();
@@ -5050,16 +5092,15 @@
       renderList();
     });
 
-    document.querySelectorAll('.sort').forEach(function (b) {
-      b.addEventListener('click', function () {
-        state.sort = b.getAttribute('data-sort');
-        document.querySelectorAll('.sort').forEach(function (x) {
-          x.className = 'sort' + (x.getAttribute('data-sort') === state.sort ? ' active' : '');
-        });
+    var sortSel = document.getElementById('sort-mode');
+    if (sortSel) {
+      sortSel.value = state.sort;
+      sortSel.addEventListener('change', function () {
+        state.sort = sortSel.value;
         state.page = 1;
         renderList();
       });
-    });
+    }
 
     el.prev.addEventListener('click', function () {
       if (state.page > 1) { state.page--; renderList(); }
@@ -5510,7 +5551,7 @@
 
   function fail(err) {
     hideBootVeil();                      // 出错也要收掉，不能让动画一直盖着错误提示
-    el.rows.innerHTML = emptyRow(5, '未找到节目单数据。请先运行：<br><br>'
+    el.rows.innerHTML = emptyRow(5, '未找到录播数据。请先运行：<br><br>'
       + '<code>python tools/collect.py</code>');
     el.npTitle.textContent = '无数据';
     el.npMeta.textContent = String(err && err.message || err || '');
@@ -6555,11 +6596,27 @@
       + '<span class="ms-btns">'
       + '<select class="ms-qn" data-act="qn" title="这一路的画质"></select>'
       + '<input class="ms-vol" data-act="vol" type="range" min="0" max="100" value="0" title="这一路的音量">'
-      + '<button class="ms-btn" data-act="solo" type="button" title="只开这一路的声音">🔇</button>'
-      + '<button class="ms-btn" data-act="full" type="button" title="这一路全屏">⛶</button>'
-      + '<button class="ms-btn" data-act="zoom" type="button" title="聚焦 / 取消聚焦">⤢</button>'
+      // 图标按钮必须有 aria-label：只有 title 时读屏器只会念出 emoji 本身
+      + '<button class="ms-btn" data-act="solo" type="button" aria-label="只开这一路的声音"'
+      + ' aria-pressed="false" title="只开这一路的声音">🔇</button>'
+      + '<button class="ms-btn" data-act="full" type="button" aria-label="这一路全屏"'
+      + ' title="这一路全屏">⛶</button>'
+      + '<button class="ms-btn" data-act="zoom" type="button" aria-label="聚焦或取消聚焦这一路"'
+      + ' aria-pressed="false" title="聚焦 / 取消聚焦">⤢</button>'
       + '</span></div>'
       + msHandlesHtml();
+  }
+
+  /* 格子的「没有画面」状态：头像 + 名字 + 带状态点的说明。
+     以前只有一个 15px 的名字加一行 12px 小字，铺满整面墙时（只有一位主播）
+     就是一块 900×580 的黑板。头像和字号现在跟着格子尺寸走（容器查询）。 */
+  function msOffHtml(name, face, status) {
+    return '<div class="ms-off">'
+      + '<span class="ms-av">' + faceHtml(face, 'ms-av-img', name) + '</span>'
+      + '<b>' + esc(name) + '</b>'
+      + '<span class="ms-off-sub"><i class="ms-dot" aria-hidden="true"></i>'
+      + '<em>' + esc(status || '正在获取开播状态…') + '</em></span>'
+      + '</div>';
   }
 
   function multiCellHtml(s) {
@@ -6568,8 +6625,7 @@
     return '<div class="ms-cell loading' + (picked ? ' picked' : '') + '"'
       + ' data-id="' + esc(s.id) + '" style="--lc:' + esc(accent) + '">'
       + '<video muted playsinline></video>'
-      + '<div class="ms-off"><b>' + esc(s.short || s.name) + '</b>'
-      + '<span class="ms-off-sub">正在获取开播状态…</span></div>'
+      + msOffHtml(s.short || s.name, s.face, '正在获取开播状态…')
       + msBarHtml(s.tag || '', s.short || s.name, accent) + '</div>';
   }
 
@@ -6592,7 +6648,10 @@
       if (stateEl) stateEl.textContent = text;
       if (off) {
         off.style.display = '';
-        sub.textContent = text;
+        // ⚠️ 只写 <em>：整块 textContent 会把状态点一起删掉，下一次就只剩一行字
+        var em = sub && sub.querySelector('em');
+        if (em) em.textContent = text;
+        else if (sub) sub.textContent = text;
       }
       cell.classList.remove('loading');
     }
@@ -6666,6 +6725,7 @@
       if (b) {
         b.classList.toggle('on', audible);
         b.textContent = audible ? '🔊' : '🔇';
+        b.setAttribute('aria-pressed', audible ? 'true' : 'false');
       }
       c.classList.toggle('muted-off', audible);
     });
@@ -6849,6 +6909,7 @@
           if (next === multiSrc) return;
           multiSrc = next;
           store.set('xl_mf_src', multiSrc);
+          mfNote('');                 // 上一来源的「N 路…」不要带到新来源上
           Array.prototype.forEach.call(
             document.querySelectorAll('#multi-src [data-msrc]'), function (x) {
               x.classList.toggle('on', x === b);
@@ -6875,6 +6936,13 @@
       });
     var add = document.getElementById('multi-add');
     if (add) add.addEventListener('click', multiAdd);
+    var sToggle = document.getElementById('multi-side-toggle');
+    if (sToggle) sToggle.addEventListener('click', function () {
+      multiSideHidden = !multiSideHidden;
+      store.set('xl_mf_side_hidden', multiSideHidden);
+      applyMultiSide();
+      applyMultiLayout();          // 左栏收起/展开会改画面墙宽度：格子尺寸必须重算
+    });
     var side = document.getElementById('multi-side');
     if (side) {
       /* 用 pointerdown 而不是 click：左栏会被后台刷新（关注列表定时重取）
@@ -6906,8 +6974,7 @@
     multiTeardown();
     applyMultiLayout();
     if (multiSrc === 'following') { renderMultiFollowing(force); return; }
-    var side = document.getElementById('multi-side');
-    if (side) side.hidden = true;
+    applyMultiSide();
     fetchStations().then(function (list) {
       // 名单是异步回来的：等它回来时用户可能已经切走了 —— 这时不该再接流
       if (state.view !== 'multi') return;
@@ -6916,6 +6983,7 @@
         return;
       }
       grid.innerHTML = list.map(multiCellHtml).join('');
+      bindFaceFallback(grid);           // 离线格的头像取不到时换首字母，不留破图
       var note = document.getElementById('multi-note');
       if (note) {
         note.textContent = list.length + ' 路 · 声音默认关闭，点 🔊 独奏；点 ⤢ 聚焦';
@@ -6934,6 +7002,7 @@
      默认不自动播：每路直播都是一条常驻流，本机到 B 站实测只有 1~1.4 MB/s，
      多路低清也会挤爆 —— 点左栏把它加进墙，同时最多 4 路。 */
   var multiSrc = store.get('xl_mf_src', 'stations') || 'stations';   // 来源也记住，刷新后回到上次那一边
+  var multiSideHidden = store.get('xl_mf_side_hidden', false) || false;  // 左栏是否收起（记住）
   var multiFollowOn = store.get('xl_mf_on', {}) || {};     // mid -> true（已在监控墙里的）
   var multiFollowList = [];
   var multiCustom = store.get('xl_mf_custom', []) || [];   // 手动添加的直播间（「＋ 添加直播间」）
@@ -7025,43 +7094,157 @@
     store.set('xl_mf_rects', multiFreeRects);
   }
 
-  /* 聚焦版网格：主画面占 4 格，所以容量 = 列×行 − 4。
-     在「能装下 n−1 个陪衬」的方案里挑空洞最少、比例最接近 16:9 的那个。 */
-  function multiFocusPlan(n) {
+  /* 选网格：按「单格能铺多大」挑，而不是按「墙的宽高比像不像 16:9」。
+
+     旧评分是 `空洞×10 + |(cols*16)/(rows*9) − 16/9|`，于是
+       7 路 → 4×2（墙只占 50% 高度）、8~9 路 → 3×4（墙只占 59% 宽度）、
+       4 路 → 3×2（每格 451px，明明两列能到 535px）；
+     用户反馈的「空地太多」与「>6 路排版变样」都出在这里。
+
+     现在直接算每种网格下单格的像素宽，取最大的那个 —— 等价于「铺出来的面积最大」。
+     格子仍是 16:9，所以多出来的边只会留在整面墙外面，不会变成格内黑边。
+     同尺寸时挑空洞少的（洞 = 网格总格数 − 实际占用格数）。
+     withMain=true 表示主画面占 2×2（吃 4 格），总格数要 ≥ n+3。
+
+     ⚠️ **优先只排 3 行**（用户 2026-11-05 要求：副画面固定一排，不要第二排）。
+     3 行装不下（>15 路）时才放宽到 6 行 —— 那时不加行就真的塞不进去了。 */
+  function multiBestPlan(n, availW, availH, withMain, maxCols) {
+    var need = withMain ? n + 3 : n;
     var best = null;
-    for (var rows = 2; rows <= 5; rows++) {
-      for (var cols = 3; cols <= 5; cols++) {
-        var cap = cols * rows - 4;
-        if (cap < n - 1) continue;
-        var holes = cap - (n - 1);
-        var aspect = (cols * 16) / (rows * 9);
-        var score = holes * 10 + Math.abs(aspect - 16 / 9);
-        if (!best || score < best.score) best = { cols: cols, rows: rows, score: score };
+    var colCap = maxCols || 6;
+    for (var pass = 0; pass < 2 && !best; pass++) {
+      var maxRows = (pass === 0) ? 3 : 6;
+      for (var cols = 1; cols <= colCap; cols++) {
+        for (var rows = 1; rows <= maxRows; rows++) {
+          if (withMain && (cols < 2 || rows < 2)) continue;
+          var cells = cols * rows;
+          if (cells < need) continue;
+          var t = multiTileSize(cols, rows, availW, availH);
+          var score = t.w * 1000 - (cells - need);   // 主序：单格更大；次序：空洞更少
+          if (!best || score > best.score) {
+            best = { cols: cols, rows: rows, main: withMain, score: score };
+          }
+        }
       }
     }
-    return best || { cols: 3, rows: Math.max(2, n - 1) };
+    return best || { cols: 6, rows: Math.ceil(need / 6), main: withMain };
   }
 
-  function multiPlan(n) {
+  /* 「填满」布局（用户 2026-11-05 选定的取法）：
+     主画面严格 16:9、不裁切，占左上；副画面排成**底部一排 + 右侧一列**。
+     底排的格子按 16:9 定高度（不裁），右列用「剩下的宽度」铺满、纵向均分，
+     多出来的比例由 cover 裁掉 —— 这样整面墙**没有空格**。
+     只在「3 行宫格铺不满」时启用（7 路以上），能铺满时仍用 16:9 的宫格。 */
+  /* 底排几个、右列几个：**按「两排格子都最接近 16:9」挑**，不再写死 round(m/4)。
+
+     写死的公式在宽屏上会挑出竖的右列：1312×700 的墙、8 个陪衬 →
+     kR=2 时右列 286×285（ar 1.00，16:9 的画面被裁掉近一半），
+     10 个陪衬时 ar 只有 0.77（竖条）。改成遍历 kR，取 |右列 ar − 16:9| 最小的那个，
+     同分时挑底排格子更大的。右列个数最多 5 —— 再多就该换宫格了。 */
+  function multiFillGeom(n, availW, availH) {
+    var g = MULTI_GAP;
+    var m = n - 1;
+    var best = null;
+    var maxK = Math.min(5, m - 1);
+    for (var kR = 1; kR <= maxK; kR++) {
+      var kB = m - kR;
+      if (kB < 1) continue;
+      var tileW = (availW - g * (kB - 1)) / kB;
+      var stripH = tileW * 9 / 16;
+      var mainH = availH - stripH - g;
+      var mainW = mainH * 16 / 9;
+      var colW = availW - mainW - g;
+      if (colW < 140) {                  // 主画面太宽会把右列挤没：按右列最小宽反推
+        mainW = Math.max(200, availW - g - 140);
+        mainH = mainW * 9 / 16;
+        stripH = Math.max(60, availH - mainH - g);
+        colW = availW - mainW - g;
+      }
+      if (mainH < 120 || stripH < 60 || colW < 140) continue;
+      var rh = (mainH - g * (kR - 1)) / kR;
+      if (rh < 60) continue;
+      // 底排与右列各自偏离 16:9 多少（底排通常严格 16:9，越界的只可能是反推那条路）
+      var score = Math.abs(colW / rh - 16 / 9) + Math.abs(tileW / stripH - 16 / 9);
+      if (!best || score < best.score - 1e-9 ||
+          (Math.abs(score - best.score) < 1e-9 && tileW > best.tileW)) {
+        best = { kB: kB, kR: kR, tileW: tileW, stripH: stripH,
+                 mainW: mainW, mainH: mainH, colW: colW, score: score };
+      }
+    }
+    return best;
+  }
+
+  function layoutMultiFill(grid, n, availW, availH, cells) {
+    var geo = multiFillGeom(n, availW, availH);
+    if (!geo) return false;
+    var order = multiOrderCells(cells);
+    var main = order.filter(function (x) {
+      return x.getAttribute('data-id') === multiFocusId;
+    })[0] || order[0];
+    main.classList.add('lead');
+    var subs = order.filter(function (x) { return x !== main; });
+    var hR = (geo.mainH - MULTI_GAP * (geo.kR - 1)) / geo.kR;
+    grid.classList.add('filling');
+    main.style.left = '0px';
+    main.style.top = '0px';
+    main.style.width = geo.mainW + 'px';
+    main.style.height = geo.mainH + 'px';
+    subs.forEach(function (c, i) {
+      if (i < geo.kB) {                       // 底排
+        c.style.left = (i * (geo.tileW + MULTI_GAP)) + 'px';
+        c.style.top = (availH - geo.stripH) + 'px';
+        c.style.width = geo.tileW + 'px';
+        c.style.height = geo.stripH + 'px';
+      } else {                                // 右侧一列
+        var j = i - geo.kB;
+        c.style.left = (geo.mainW + MULTI_GAP) + 'px';
+        c.style.top = (j * (hR + MULTI_GAP)) + 'px';
+        c.style.width = geo.colW + 'px';
+        c.style.height = hR + 'px';
+      }
+    });
+    return true;
+  }
+
+  function multiPlan(n, availW, availH) {
     if (multiFocusId && n > 1 && multiLayout !== 'free') {
-      var f = multiFocusPlan(n);
-      return { cols: f.cols, rows: f.rows, main: true };
+      /* 聚焦时副画面必须读作「一条底排 + 一列右侧」。宫格能做到这件事的唯一形态是
+         **3 列**（主画面 2×2 → 右侧只剩 1 列）+ **3 行**（底排只剩 1 排），容量 5 个陪衬。
+         4 列时右侧会变成两列、4 行时下方会变成两排 —— 都是用户明确禁止的。
+
+         以前这里靠 `空洞 或 覆盖率<85%` 触发填满布局，于是**宽屏**下 4×3 的覆盖率
+         刚好过线（实测 1400×700 的墙 → 0.847），9 路就走回 4×3 —— 右侧出现 2×2
+         （用户 2026-11-05 截图反馈）。改成结构性判断：陪衬 >5 一律「底排 + 右列」。 */
+      var m = n - 1;
+      if (m > 5) {
+        var geo = multiFillGeom(n, availW, availH);
+        if (geo) return { fill: true, cols: 0, rows: 0, main: true };
+      }
+      // 6 路以内（陪衬 ≤5）：3 列 × 3 行本来就正好，格子是纯 16:9、不裁切。
+      return multiBestPlan(n, availW, availH, true, m >= 3 ? 3 : 6);
     }
-    if (multiLayout === 'auto') {
-      var c = multiCols(n);
-      return { cols: c, rows: Math.ceil(n / c), main: false };
-    }
-    var fixed = { g1: 1, g2: 2, g4: 2, g6: 3, g9: 3 }[multiLayout] || multiCols(n);
+    if (multiLayout === 'auto') return multiBestPlan(n, availW, availH, false);
+    var fixed = { g1: 1, g2: 2, g4: 2, g6: 3, g9: 3 }[multiLayout];
+    if (!fixed) return multiBestPlan(n, availW, availH, false);
     return { cols: fixed, rows: Math.ceil(n / fixed), main: false };
   }
 
-  /* 按显示顺序分配 (行,列)：聚焦时跳过主画面那 2×2，剩下的格子依次填 */
+  /* 按显示顺序分配 (行,列)。
+     聚焦时主画面固定在左上 2×2，副画面**先铺满最底下一排**，再往上加右侧的列 ——
+     这样副画面永远读作「一条底排 + 一列右侧」，不会在右边堆出 2×2 的小画面块
+     （用户 2026-11-05：副画面固定一排，别加第二排）。 */
   function multiAssign(order, plan, mainCell) {
     var slots = [], r, c;
-    for (r = 1; r <= plan.rows; r++) {
+    if (plan.main) {
       for (c = 1; c <= plan.cols; c++) {
-        if (plan.main && r <= 2 && c <= 2) continue;
-        slots.push([r, c]);
+        if (!(plan.rows <= 2 && c <= 2)) slots.push([plan.rows, c]);   // 底排
+      }
+      for (c = 3; c <= plan.cols; c++) {
+        for (r = plan.rows - 1; r >= 1; r--) slots.push([r, c]);        // 右侧各列（自下而上）
+      }
+    } else {
+      for (r = 1; r <= plan.rows; r++) {
+        for (c = 1; c <= plan.cols; c++) slots.push([r, c]);
       }
     }
     var k = 0;
@@ -7072,13 +7255,13 @@
   }
 
   /* 一格的像素尺寸：先按宽度铺满，再看高度够不够，取小的那个 —— 天然 16:9 */
-  function multiTileSize(plan, availW, availH) {
-    var freeW = Math.max(0, availW - MULTI_GAP * (plan.cols - 1));
-    var freeH = Math.max(0, availH - MULTI_GAP * (plan.rows - 1));
-    var w = freeW / plan.cols;
+  function multiTileSize(cols, rows, availW, availH) {
+    var freeW = Math.max(0, availW - MULTI_GAP * (cols - 1));
+    var freeH = Math.max(0, availH - MULTI_GAP * (rows - 1));
+    var w = freeW / cols;
     var h = w * 9 / 16;
-    if (h * plan.rows > freeH) {
-      h = freeH / plan.rows;
+    if (h * rows > freeH) {
+      h = freeH / rows;
       w = h * 16 / 9;
     }
     return { w: Math.max(80, Math.floor(w)), h: Math.max(45, Math.floor(h)) };
@@ -7138,6 +7321,7 @@
     if (multiLayout === 'free') multiFocusId = '';   // 自由布局用拖动缩放，不用聚焦
 
     grid.classList.toggle('free', multiLayout === 'free');
+    grid.classList.remove('filling');
     grid.style.gridTemplateColumns = '';
     grid.style.gridTemplateRows = '';
     grid.style.justifyContent = '';
@@ -7165,8 +7349,15 @@
     }
 
     sizeMultiGrid();                                  // 先定可用高度，再按它算格子尺寸
-    var plan = multiPlan(n);
-    var size = multiTileSize(plan, grid.clientWidth, grid.clientHeight);
+    var plan = multiPlan(n, grid.clientWidth, grid.clientHeight);
+    if (plan.fill) {
+      if (layoutMultiFill(grid, n, grid.clientWidth, grid.clientHeight, cells)) return;
+      // 万一某个尺寸下算不出「底排 + 右列」的几何（墙太窄/太矮），退回 3 列宫格：
+      // 不能带着 cols=0 往下走，multiTileSize 会除零。
+      plan = multiBestPlan(n, grid.clientWidth, grid.clientHeight, true, 3);
+      grid.classList.remove('filling');
+    }
+    var size = multiTileSize(plan.cols, plan.rows, grid.clientWidth, grid.clientHeight);
     grid.style.gridTemplateColumns = 'repeat(' + plan.cols + ', ' + size.w + 'px)';
     grid.style.gridTemplateRows = 'repeat(' + plan.rows + ', ' + size.h + 'px)';
     // 行数太多（比如单列 N 路）时内容比容器高：这时从顶部排、允许滚动，居中会把第一行顶出去
@@ -7254,11 +7445,25 @@
     if (n) n.textContent = text || '';
   }
 
+  /* 左栏（关注主播列表）的显隐统一走这里：
+       · 「我的板块」没有列表（整墙就是全部主播）→ 藏起来，按钮也藏；
+       · 「关注的直播」→ 按用户上次的收起状态决定，按钮文案跟着变。 */
+  function applyMultiSide() {
+    var side = document.getElementById('multi-side');
+    var btn = document.getElementById('multi-side-toggle');
+    var hasSide = (multiSrc === 'following');
+    if (side) side.hidden = !hasSide || multiSideHidden;
+    if (btn) {
+      btn.hidden = !hasSide;
+      btn.textContent = multiSideHidden ? '› 展开列表' : '‹ 收起列表';
+      btn.title = multiSideHidden ? '展开左侧主播列表' : '收起左侧主播列表，画面墙铺满整行';
+    }
+  }
+
   function multiFollowCellHtml(s) {
     return '<div class="ms-cell loading" data-id="' + esc(s.mid) + '" style="--lc:#8a8a95">'
       + '<video muted playsinline></video>'
-      + '<div class="ms-off"><b>' + esc(s.uname) + '</b>'
-      + '<span class="ms-off-sub">正在获取开播状态…</span></div>'
+      + msOffHtml(s.uname, s.face, '正在获取开播状态…')
       + msBarHtml('关注', s.uname, '#8a8a95') + '</div>';
   }
 
@@ -7300,8 +7505,14 @@
     var picked = mfPicked();
     // 墙上这批格子（mid@room）与上次一模一样时**不重建**：重建 = multiTeardown 把每路直播
     // 都销毁再重连，刷新一次要黑屏好几秒。名单没变就别动它（只有静默刷新才会传 keepIfSame）。
+    // ⚠️ 还要比对「墙上现在真的有哪些 id」：只看指纹的话，从「我的板块」切过来时
+    // 指纹是空的、而墙上还留着别人家的格子，会被判成「没变」而一直留在那儿。
     var key = mfPickedKeyNow();
-    if (keepIfSame && key === mfPickedKey && grid.querySelector('.ms-cell')) return;
+    var haveIds = [].map.call(grid.querySelectorAll('.ms-cell'), function (c) {
+      return c.getAttribute('data-id');
+    }).join(',');
+    var wantIds = picked.map(function (s) { return String(s.mid); }).join(',');
+    if (keepIfSame && key === mfPickedKey && haveIds === wantIds && grid.querySelector('.ms-cell')) return;
     mfPickedKey = key;
     multiTeardown();
     applyMultiLayout();
@@ -7312,6 +7523,7 @@
       return;
     }
     grid.innerHTML = picked.map(multiFollowCellHtml).join('');
+    bindFaceFallback(grid);
     picked.forEach(function (s) {
       var cell = grid.querySelector('.ms-cell[data-id="' + s.mid + '"]');
       if (cell) startMultiFollowCell(s, cell);
@@ -7372,7 +7584,7 @@
   function renderFollowList() {
     var side = document.getElementById('multi-side');
     if (!side) return;
-    side.hidden = false;
+    applyMultiSide();
     var list = mfAllList();
     if (!list.length) {
       side.innerHTML = '<p class="sub" style="padding:10px">关注列表里现在没有人在播；'
@@ -7404,7 +7616,7 @@
     if (!side || !grid) return;
     var seq = ++mfReqSeq;
     if (!quiet) {
-      side.hidden = false;
+      applyMultiSide();
       if (force && mfAllList().length) {
         mfNote('正在刷新开播状态…');       // 手动刷新：名单留着别闪，只在状态栏提示
       } else {
