@@ -28,7 +28,7 @@ html[data-theme="light"]{
   --red-soft:rgba(245,71,91,.1);
 }
 html,body{margin:0}
-body{background:var(--bg);color:var(--fg);font-family:var(--font);font-size:16px;line-height:1.65;
+body{background:var(--bg);color:var(--fg);font-family:var(--font);font-size:16px;line-height:1.65;font-variant-numeric:tabular-nums;
   -webkit-font-smoothing:antialiased;overflow-x:hidden;transition:background .3s,color .3s}
 a{color:inherit;text-decoration:none}
 img{display:block;max-width:100%}
@@ -45,7 +45,7 @@ h1,h2,h3,p{margin:0}
 .brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:.2px}
 .brand svg{width:28px;height:28px;flex:none}
 .brand b{font-size:15px}
-.brand span{font-size:11px;color:var(--dim);font-family:var(--mono);letter-spacing:.08em;
+.brand span{font-size:12px;color:var(--dim);font-family:var(--mono);letter-spacing:.08em;
   border:1px solid var(--line);border-radius:999px;padding:2px 7px}
 .nav-links{display:flex;gap:4px;margin-left:auto}
 .nav-links a{font-size:14px;color:var(--muted);padding:7px 12px;border-radius:8px;transition:.2s}
@@ -91,7 +91,7 @@ html[data-theme="light"] .spot{background:radial-gradient(circle,rgba(245,71,91,
 h1{font-size:clamp(32px,4.6vw,60px);line-height:1.12;letter-spacing:-.02em;font-weight:700;margin:12px 0 0}
 h1 em{font-style:normal;background:linear-gradient(96deg,var(--red) 8%,var(--amber) 82%);
   -webkit-background-clip:text;background-clip:text;color:transparent}
-.lede{margin:12px auto 0;font-size:clamp(15px,1.4vw,18.5px);color:var(--muted);max-width:40em;line-height:1.66}
+.lede{margin:12px auto 0;font-size:clamp(15px,1.4vw,18px);color:var(--muted);max-width:40em;line-height:1.66}
 .cta{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:10px}
 .btn{display:inline-flex;align-items:center;gap:9px;height:54px;padding:0 28px;border-radius:12px;
   font-size:15px;font-weight:600;border:1px solid transparent;cursor:pointer;transition:transform .18s,box-shadow .25s,background .25s,border-color .25s}
@@ -106,7 +106,7 @@ h1 em{font-style:normal;background:linear-gradient(96deg,var(--red) 8%,var(--amb
 .btn.ghost{background:color-mix(in srgb,var(--card) 80%,transparent);border-color:var(--line-strong);color:var(--fg)}
 .btn.ghost:hover{background:var(--card-2);border-color:color-mix(in srgb,var(--fg) 26%,transparent);transform:translateY(-2px)}
 .meta-row{display:flex;flex-wrap:wrap;justify-content:center;gap:20px;margin:0;padding:0;list-style:none;
-  font-size:13.5px;color:var(--dim);font-family:var(--mono)}
+  font-size:14px;color:var(--dim);font-family:var(--mono)}
 .meta-row li{display:flex;align-items:center;gap:6px}
 .meta-row li::before{content:"";width:4px;height:4px;border-radius:50%;background:var(--dim)}
 
@@ -128,8 +128,8 @@ html[data-theme="light"] .win{box-shadow:0 30px 64px -34px rgba(20,20,40,.4)}
 
 .hero-foot{margin-top:clamp(10px,1.6vh,20px);display:flex;flex-direction:column;align-items:center;gap:10px}
 .linkchips{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
-.linkchip{display:inline-flex;align-items:center;gap:7px;height:44px;padding:0 17px;border-radius:10px;
-  border:1px solid var(--line-strong);color:var(--muted);font-size:14px;font-weight:500;
+.linkchip{display:inline-flex;align-items:center;gap:7px;height:38px;padding:0 17px;border-radius:10px;
+  border:1px solid var(--line);color:var(--muted);font-size:13px;font-weight:400;
   background:color-mix(in srgb,var(--card) 70%,transparent);
   transition:transform .2s,color .2s,border-color .2s,background .2s}
 .linkchip svg{width:16px;height:16px;flex:none}
@@ -162,7 +162,7 @@ h2{font-size:clamp(24px,3.2vw,36px);line-height:1.25;letter-spacing:-.01em;font-
 .card p{margin-top:8px;font-size:14px;color:var(--muted);line-height:1.7}
 .card:hover .ic{color:var(--amber);background:rgba(242,166,59,.12);border-color:rgba(242,166,59,.26)}
 .pillrow{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
-.pillrow span{font-family:var(--mono);font-size:12px;color:var(--dim);border:1px solid var(--line);
+.pillrow span{font-family:var(--mono);font-size:13px;color:var(--dim);border:1px solid var(--line);
   border-radius:999px;padding:6px 12px;background:color-mix(in srgb,var(--card) 55%,transparent)}
 
 .gallery{columns:2;column-gap:16px;margin-top:38px}
@@ -173,9 +173,9 @@ h2{font-size:clamp(24px,3.2vw,36px);line-height:1.25;letter-spacing:-.01em;font-
   box-shadow:0 30px 66px -28px rgba(0,0,0,.92)}
 html[data-theme="light"] .gal:hover{box-shadow:0 30px 66px -30px rgba(20,20,40,.35)}
 .gal img{width:100%;height:auto}
-.gal figcaption{position:absolute;left:0;right:0;bottom:0;padding:26px 16px 12px;font-size:13px;color:#e8e8ee;
+.gal figcaption{position:absolute;left:0;right:0;bottom:0;padding:26px 16px 12px;font-size:14px;font-weight:500;color:#e8e8ee;
   background:linear-gradient(transparent,rgba(6,6,9,.88));display:flex;justify-content:space-between;gap:12px}
-.gal figcaption span{color:#9a9aa6;font-family:var(--mono);font-size:11px}
+.gal figcaption span{color:#9a9aa6;font-family:var(--mono);font-size:12px;font-weight:400;letter-spacing:.04em}
 
 /* ---------- download ---------- */
 .dl{position:relative;border:1px solid var(--line-strong);border-radius:20px;overflow:hidden;
@@ -185,11 +185,11 @@ html[data-theme="light"] .gal:hover{box-shadow:0 30px 66px -30px rgba(20,20,40,.
 .dl-top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:20px 24px;border-bottom:1px solid var(--line)}
 .dl-tabs{display:flex;gap:4px;padding:4px;border:1px solid var(--line);border-radius:11px;background:color-mix(in srgb,var(--bg) 60%,transparent)}
 .dl-tabs button{height:34px;padding:0 16px;border:0;border-radius:8px;background:transparent;color:var(--muted);
-  font-family:var(--font);font-size:13.5px;font-weight:500;cursor:pointer;transition:.2s;display:flex;align-items:center;gap:7px}
+  font-family:var(--font);font-size:14px;font-weight:500;cursor:pointer;transition:.2s;display:flex;align-items:center;gap:7px}
 .dl-tabs button svg{width:15px;height:15px}
 .dl-tabs button[aria-selected="true"]{background:var(--card-2);color:var(--fg);box-shadow:0 1px 0 rgba(255,255,255,.06) inset,0 2px 8px rgba(0,0,0,.35)}
 .dl-tabs button:hover:not([aria-selected="true"]){color:var(--fg)}
-.detect{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--dim);display:flex;align-items:center;gap:7px}
+.detect{margin-left:auto;font-family:var(--mono);font-size:13px;color:var(--dim);display:flex;align-items:center;gap:7px}
 .detect b{color:var(--muted);font-weight:500}
 .dl-body{padding:24px}
 .asset{display:grid;grid-template-columns:auto 1fr auto;gap:18px;align-items:center;padding:18px 20px;
@@ -198,19 +198,19 @@ html[data-theme="light"] .gal:hover{box-shadow:0 30px 66px -30px rgba(20,20,40,.
   border:1px solid var(--line);color:var(--muted)}
 .os-ic svg{width:22px;height:22px}
 .asset h4{margin:0;font-size:15px;font-weight:600;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.asset h4 code{font-family:var(--mono);font-size:12.5px;color:var(--muted);background:var(--card-2);
+.asset h4 code{font-family:var(--mono);font-size:13px;color:var(--muted);background:var(--card-2);
   border:1px solid var(--line);border-radius:6px;padding:2px 7px}
 .asset ul{display:flex;flex-wrap:wrap;gap:16px;margin:9px 0 0;padding:0;list-style:none;
-  font-size:12.5px;color:var(--dim);font-family:var(--mono)}
+  font-size:13px;color:var(--dim);font-family:var(--mono)}
 .asset-act{display:flex;align-items:center;gap:10px;justify-content:flex-end}
 .asset .btn{height:46px;min-width:136px;justify-content:center;padding:0 22px;font-size:14px;border-radius:10px}
-.asset .btn.sm{min-width:0;height:46px;padding:0 18px;font-size:13.5px}
+.asset .btn.sm{min-width:0;height:46px;padding:0 18px;font-size:14px}
 .warn{margin-top:14px;padding:12px 16px;border-radius:10px;font-size:13px;color:var(--amber);
   background:rgba(242,166,59,.08);border:1px solid rgba(242,166,59,.22);display:none}
 .warn.on{display:block}
 .mirrors{margin-top:22px;border-top:1px solid var(--line);padding-top:18px}
 .mirrors-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.mirrors-head p{font-size:12.5px;color:var(--dim);font-family:var(--mono)}
+.mirrors-head p{font-size:13px;color:var(--dim);font-family:var(--mono)}
 .link-btn{background:none;border:0;color:var(--muted);font-family:var(--font);font-size:13px;cursor:pointer;
   display:inline-flex;align-items:center;gap:6px;padding:4px}
 .link-btn:hover{color:var(--fg)}
@@ -218,7 +218,7 @@ html[data-theme="light"] .gal:hover{box-shadow:0 30px 66px -30px rgba(20,20,40,.
 .mirror{display:flex;align-items:center;gap:10px;padding:11px 14px;border:1px solid var(--line);
   border-radius:10px;font-size:13px;background:color-mix(in srgb,var(--bg) 30%,transparent)}
 .mirror .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mirror .lat{font-family:var(--mono);font-size:12px;color:var(--dim)}
+.mirror .lat{font-family:var(--mono);font-size:13px;color:var(--dim)}
 .mirror .lat.ok{color:#4caf7d}.mirror .lat.bad{color:#d9534f}.mirror .lat.run{color:var(--muted)}
 
 /* ---------- faq ---------- */
@@ -276,9 +276,18 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
   .detect{margin-left:0;width:100%}
   .cta .btn{flex:1 1 100%;justify-content:center}
   .dl-body{padding:18px}
-  .meta-row{gap:8px 14px;font-size:12px}
-  .meta-row li:last-child{display:none}
+  .meta-row{gap:8px 14px;font-size:13px}
   .frame-bar{height:28px}
+}
+/* 200% 缩放等极矮视口：主下载按钮必须仍在首屏内（只压缩竖向占位，不改构图与入口） */
+@media (max-height:560px){
+  .hero{align-items:flex-start;padding:10px 0 14px}
+  h1{font-size:clamp(26px,3.2vw,34px);margin-top:8px}
+  .lede{margin-top:8px;line-height:1.5}
+  .hero-stack{margin-top:6px}
+  .win{margin:0}
+  .win.main{width:min(36vw,260px)}
+  .hero-foot{margin-top:8px}
 }
 </style>
 </head>
@@ -358,7 +367,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
         </a>
       </div>
       <ul class="meta-row">
-        <li>免费 · 开源</li><li>单文件 EXE</li><li>数据不出本机</li><li>Windows 10 / 11</li>
+        <li>免费 · 开源</li><li>Windows 10 / 11</li>
       </ul>
     </div>
   </div>
@@ -481,7 +490,6 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
             <ul>
               <li id="assetVer">版本 v1.0.68</li>
               <li id="assetSize">体积约 55 MB</li>
-              <li>免安装 · 单文件</li>
               <li>SHA256 见 Release 页</li>
             </ul>
           </div>
