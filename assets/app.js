@@ -6619,12 +6619,22 @@
       + '</div>';
   }
 
+  /* 格子左上角的「最小化」：与底栏同一条显隐规则（悬停 / 键盘聚焦才浮出）。
+     用 SVG 而不是字符/emoji：它是窗口操作，跟底栏那三个媒体操作不是一类。 */
+  function msMinHtml() {
+    return '<button class="ms-btn ms-min" data-act="min" type="button"'
+      + ' aria-label="最小化这一路" title="最小化（随时可恢复）">'
+      + '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"'
+      + ' stroke-linecap="round" aria-hidden="true"><path d="M3.5 8h9"/></svg></button>';
+  }
+
   function multiCellHtml(s) {
     var accent = s.accent || '#8a8a95';
     var picked = ST_SET.indexOf(s.id) >= 0;
     return '<div class="ms-cell loading' + (picked ? ' picked' : '') + '"'
       + ' data-id="' + esc(s.id) + '" style="--lc:' + esc(accent) + '">'
       + '<video muted playsinline></video>'
+      + msMinHtml()
       + msOffHtml(s.short || s.name, s.face, '正在获取开播状态…')
       + msBarHtml(s.tag || '', s.short || s.name, accent) + '</div>';
   }
@@ -6740,7 +6750,118 @@
     applyMultiLayout();
   }
 
+  /* ---------------------------------------------------------- 最小化 / 恢复
+
+     隐藏的是「窗口」而不是这一路：格子留在 DOM 里、视频照常跑，恢复时立刻有画面。
+     隐藏前先把声音关掉 —— 否则画面没了、声音还在，用户找不到是哪儿在响。
+     恢复入口挂在工具条（只有真隐藏了才出现），点开能逐个恢复或全部恢复。 */
+
+  function hiddenIds() {
+    var grid = document.getElementById('multi-grid');
+    if (!grid) return [];
+    return Array.prototype.filter.call(grid.querySelectorAll('.ms-cell'), function (c) {
+      return multiHidden[c.getAttribute('data-id')];
+    }).map(function (c) { return c.getAttribute('data-id'); });
+  }
+
+  function multiMinimize(cell) {
+    var id = cell.getAttribute('data-id');
+    if (!id || multiHidden[id]) return;
+    var v = cell.querySelector('video');
+    if (v) v.muted = true;
+    var solo = cell.querySelector('[data-act="solo"]');
+    if (solo) {
+      solo.classList.remove('on');
+      solo.textContent = '🔇';
+      solo.setAttribute('aria-pressed', 'false');
+    }
+    cell.classList.add('ms-mining');            // 退场：稍微缩一下再让出位置
+    setTimeout(function () {
+      cell.classList.remove('ms-mining');
+      multiHidden[id] = true;
+      if (multiFocusId === id) multiFocusId = '';
+      applyMultiLayout();
+    }, 150);
+  }
+
+  function multiRestore(id) {
+    if (!multiHidden[id]) return;
+    delete multiHidden[id];
+    applyMultiLayout();
+    var cell = document.querySelector('#multi-grid .ms-cell[data-id="' + id + '"]');
+    if (cell) {
+      cell.classList.add('just-back');          // 回来的那格闪一下，方便定位
+      setTimeout(function () { cell.classList.remove('just-back'); }, 700);
+    }
+  }
+
+  /* 工具条上的「已隐藏 N 路」：列表按当前墙上的格子算，切换来源后不会留下脏计数 */
+  function renderHiddenChip() {
+    var btn = document.getElementById('multi-hidden-btn');
+    if (!btn) return;
+    var pop = document.getElementById('multi-hidden-pop');
+    var ids = hiddenIds();
+    btn.hidden = !ids.length;
+    btn.textContent = '已隐藏 ' + ids.length + ' 路';
+    if (!ids.length && pop) {
+      pop.hidden = true;
+      btn.setAttribute('aria-expanded', 'false');
+    }
+  }
+
+  function renderHiddenPop() {
+    var pop = document.getElementById('multi-hidden-pop');
+    if (!pop) return;
+    var ids = hiddenIds();
+    if (!ids.length) {
+      pop.innerHTML = '<div class="mh-head"><b>没有隐藏的直播间</b></div>';
+      return;
+    }
+    pop.innerHTML = '<div class="mh-head"><b>已隐藏 ' + ids.length + ' 路</b>'
+      + '<button class="mh-all" type="button" data-restore-all="1">全部恢复</button></div>'
+      + ids.map(function (id) {
+        var c = document.querySelector('#multi-grid .ms-cell[data-id="' + id + '"]');
+        // 名字在底栏的 .ms-name 里（不是 .ms-off 里的 <b>），取错了会显示成一串 UID
+        var nm = c && c.querySelector('.ms-bar .ms-name');
+        return '<button class="mh-item" type="button" data-restore="' + esc(id) + '">'
+          + '<span>' + esc(nm ? nm.textContent : id) + '</span><em>恢复</em></button>';
+      }).join('');
+  }
+
+  function bindHiddenBar() {
+    var btn = document.getElementById('multi-hidden-btn');
+    var pop = document.getElementById('multi-hidden-pop');
+    if (!btn || !pop || btn.getAttribute('data-bound') === '1') return;
+    btn.setAttribute('data-bound', '1');
+    function close() {
+      pop.hidden = true;
+      btn.setAttribute('aria-expanded', 'false');
+    }
+    btn.addEventListener('click', function (ev) {
+      ev.stopPropagation();                     // 别让下面的 document 监听立刻又关掉
+      if (pop.hidden) { renderHiddenPop(); pop.hidden = false; btn.setAttribute('aria-expanded', 'true'); }
+      else close();
+    });
+    pop.addEventListener('click', function (ev) {
+      if (ev.target.closest('[data-restore-all]')) {
+        hiddenIds().forEach(function (id) { delete multiHidden[id]; });
+        close();
+        applyMultiLayout();
+        return;
+      }
+      var one = ev.target.closest('[data-restore]');
+      if (one) { close(); multiRestore(one.getAttribute('data-restore')); }
+    });
+    document.addEventListener('click', function (ev) {
+      if (!pop.hidden && !ev.target.closest('.mh-wrap')) close();
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && !pop.hidden) close();
+    });
+  }
+
   function bindMulti() {
+    bindHiddenBar();
     var grid = document.getElementById('multi-grid');
     if (!grid || grid.getAttribute('data-bound') === '1') return;
     grid.setAttribute('data-bound', '1');
@@ -6751,6 +6872,7 @@
       if (!cell) return;
       var act = btn.getAttribute('data-act');
       if (act === 'solo') multiSolo(cell);
+      if (act === 'min') multiMinimize(cell);
       if (act === 'zoom') multiFocus(cell);
       if (act === 'full') {
         var v = cell.querySelector('video');
@@ -6783,7 +6905,7 @@
       if (multiLayout !== 'free') return;
       var cell = e.target.closest ? e.target.closest('.ms-cell') : null;
       if (!cell) return;
-      if (e.target.closest('.ms-btn, .ms-qn, .ms-vol')) return;
+      if (e.target.closest('.ms-btn, .ms-qn, .ms-vol, .ms-min')) return;
       var hd = (e.target.getAttribute && e.target.getAttribute('data-hd')) || '';
       e.preventDefault();
       var box = grid.getBoundingClientRect();
@@ -6852,7 +6974,7 @@
       if (multiLayout === 'free' || e.button !== 0) return;
       var cell = e.target.closest ? e.target.closest('.ms-cell') : null;
       if (!cell) return;
-      if (e.target.closest('.ms-btns, .ms-qn, .ms-vol, .ms-h')) return;
+      if (e.target.closest('.ms-btns, .ms-qn, .ms-vol, .ms-h, .ms-min')) return;
       mdrag = { cell: cell, x: e.clientX, y: e.clientY, on: false, over: null };
     });
     window.addEventListener('pointermove', function (e) {
@@ -7007,7 +7129,10 @@
   var multiFollowList = [];
   var multiCustom = store.get('xl_mf_custom', []) || [];   // 手动添加的直播间（「＋ 添加直播间」）
   var multiLayout = store.get('xl_mf_layout', 'auto') || 'auto';
-  var multiFocusId = '';                                    // 聚焦中的那格（不记忆：刷新后回到均分）
+  var multiFocusId = '';
+  /* 被「最小化」的那几路：data-id → true。只在本次会话内有效 ——
+     刷新页面就全部回来，符合「暂时隐藏」的语义。 */
+  var multiHidden = {};                                    // 聚焦中的那格（不记忆：刷新后回到均分）
   var multiFreeRects = store.get('xl_mf_rects', {}) || {};  // 自由布局：id -> {x,y,w,h}，单位百分比
   var multiFreeZ = 0;                                       // 拖动时把当前那张浮到最上面
   var FREE_MIN_W = 14, FREE_MIN_H = 16;                     // 再小就看不清画面了
@@ -7065,6 +7190,7 @@
     grid.style.height = h + 'px';
     var side = document.getElementById('multi-side');
     if (side && !side.hidden) side.style.maxHeight = h + 'px';   // 左栏跟画面墙一样高
+    return h;
   }
 
   /* 自由布局里每格的位置尺寸，单位是画布的百分比 —— 窗口变了也等比跟着走。
@@ -7084,7 +7210,7 @@
   function saveFreeRects(grid) {
     Array.prototype.forEach.call(grid.querySelectorAll('.ms-cell'), function (c) {
       var id = c.getAttribute('data-id');
-      if (!id) return;
+      if (!id || !c.style.left) return;      // 被最小化的没有内联位置，别覆盖它的记忆
       multiFreeRects[id] = {
         x: parseFloat(c.style.left) || 0, y: parseFloat(c.style.top) || 0,
         w: parseFloat(c.style.width) || FREE_MIN_W,
@@ -7310,9 +7436,29 @@
   function applyMultiLayout() {
     var grid = document.getElementById('multi-grid');
     if (!grid) return;
-    var cells = Array.prototype.slice.call(grid.querySelectorAll('.ms-cell'));
+    var all = Array.prototype.slice.call(grid.querySelectorAll('.ms-cell'));
+    /* 被最小化的不参与排版：n 只用「还看得见的」那几路，其余照常留在 DOM 里
+       （视频不停，恢复时立刻有画面 —— 语义是「隐藏窗口」，不是「关掉这一路」）。 */
+    var cells = all.filter(function (x) {
+      return !multiHidden[x.getAttribute('data-id')];
+    });
     var n = cells.length;
     var i, c;
+    // 全部最小化：网格让位给一句说明，别留一块空黑墙
+    var allHidden = all.length > 0 && n === 0;
+    var emptyEl = document.getElementById('multi-empty');
+    if (emptyEl) emptyEl.hidden = !allHidden;
+    if (allHidden) {
+      /* 先把墙高算出来（这时网格还在，offsetTop 才准），再把空间让给说明块 ——
+         否则空态只有内容高度，页面剩下大半是空的。 */
+      var wallH = sizeMultiGrid();
+      if (emptyEl) emptyEl.style.minHeight = Math.max(260, wallH || 0) + 'px';
+      grid.style.display = 'none';
+      renderHiddenChip();
+      return;
+    }
+    grid.style.display = '';
+    renderHiddenChip();
     // 聚焦的那格可能已经被取消勾选删掉了；只剩一格时聚焦没有意义
     if (multiFocusId && !grid.querySelector('.ms-cell[data-id="' + multiFocusId + '"]')) {
       multiFocusId = '';
@@ -7326,13 +7472,14 @@
     grid.style.gridTemplateRows = '';
     grid.style.justifyContent = '';
     grid.style.alignContent = '';
-    for (i = 0; i < cells.length; i++) {
-      c = cells[i];
+    for (i = 0; i < all.length; i++) {
+      c = all[i];
       c.classList.remove('lead');
       c.style.gridColumn = '';
       c.style.gridRow = '';
       c.style.left = c.style.top = c.style.width = c.style.height = '';
       c.style.zIndex = '';
+      c.style.display = multiHidden[c.getAttribute('data-id')] ? 'none' : '';
     }
     if (!n) { sizeMultiGrid(); return; }
 
@@ -7463,6 +7610,7 @@
   function multiFollowCellHtml(s) {
     return '<div class="ms-cell loading" data-id="' + esc(s.mid) + '" style="--lc:#8a8a95">'
       + '<video muted playsinline></video>'
+      + msMinHtml()
       + msOffHtml(s.uname, s.face, '正在获取开播状态…')
       + msBarHtml('关注', s.uname, '#8a8a95') + '</div>';
   }

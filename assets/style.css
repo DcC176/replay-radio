@@ -1906,14 +1906,29 @@ body.view-broadcast.theater .wrap {
   overflow: hidden;
   align-items: stretch;
 }
-/* 播放器按「可用高度允许的最大 16:9」定宽，绝不超出列宽，也绝不顶破一屏 */
-body.view-broadcast .player-box,
-body.view-broadcast.theater .player-box {
-  grid-column: 1;
-  grid-row: 1;
+/* 播放器按「可用高度允许的最大 16:9」定宽，绝不超出列宽，也绝不顶破一屏。
+
+   ⚠️ 播放器的父级是 `aside.col-right`，**它才是网格项**：把 align-self 写在
+   `.player-box` 上不会生效（旧版就是如此，画面一直贴着这一栏的顶）。
+   垂直居中要写在 `.col-right` 上，并且必须把它的 `position: sticky; top: 76px`
+   一起关掉 —— 那 76px 会把这栏再往下顶一截（实测 1920x1080 下多出 19px）。
+
+   ⚠️ 高度预算里的 95 是「网格行实际可用高度」的扣除项，不是拍脑袋的 120：
+   5px（wrap 的余量）+ 上内边距 14px + 下内边距 76px（给右下角「主播状态」浮标
+   留的位置）。旧版减 120 时，算出的播放器比行高还高，底下那条控件栏被
+   `.wrap` 的 overflow:hidden 裁掉 —— 按钮一半看不见、也点不到（用户截图 1920x953）。
+   顶栏高度用 --topbar-h：窄屏是两行 94px，写死会再错 42px。
+
+   另：页面通用的 `.wrap > .col-right > .player-box { margin-top: 12vh }`（把画面
+   往下沉，见文件末尾）只对长页面成立；直播间是一屏铺满、行内居中，必须抵掉。 */
+body.view-broadcast .col-right {
+  position: static;
   align-self: center;
-  margin: 0;
-  width: min(100%, calc((100vh - 120px) * 16 / 9));
+}
+body.view-broadcast .wrap > .col-right > .player-box,
+body.view-broadcast.theater .wrap > .col-right > .player-box {
+  margin-top: 0;
+  width: min(100%, calc((100vh - var(--topbar-h) - 95px) * 16 / 9));
   aspect-ratio: 16 / 9;
 }
 body.view-broadcast #view-broadcast {
@@ -1979,11 +1994,12 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
     min-height: calc(100vh - var(--topbar-h));
     padding-bottom: 14px;      /* 竖排后内容不再固定贴住浮标，无需那 64px 留白 */
   }
-  body.view-broadcast .player-box,
-  body.view-broadcast.theater .player-box {
-    grid-column: 1;
-    grid-row: 1;
+  /* 竖排后播放器占满整列；选择器要跟上上面那条（0,3,1）才压得住，
+     否则宽屏那条 min(100%, 按高度反推的宽度) 会漏进窄屏。 */
+  body.view-broadcast .wrap > .col-right > .player-box,
+  body.view-broadcast.theater .wrap > .col-right > .player-box {
     width: 100%;
+    margin-top: 0;
   }
   body.view-broadcast #view-broadcast {
     grid-column: 1;
@@ -2025,7 +2041,7 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
   filter: drop-shadow(0 12px 28px rgba(0, 0, 0, .55));
 }
 .live-wheel-pop .live-card { background: var(--panel-2); }
-.live-wheel-note { font-size: 11px; font-weight: 400; color: var(--muted-2); margin-left: 6px; }
+.live-wheel-note { font-size: var(--fs-fine); font-weight: 400; color: var(--muted-2); margin-left: 6px; }
 .live-side { display: flex; flex-direction: column; gap: 14px; }
 .live-card {
   background: var(--panel);
@@ -2150,7 +2166,7 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
 .st-rename-ok, .st-rename-no { padding: 2px 9px; margin-left: 6px; font-size: 12px; }
 .st-row-meta {
   margin-top: 2px;
-  font-size: 11px;
+  font-size: var(--fs-fine);
   color: var(--muted-2);
   overflow-wrap: anywhere;      /* 长数字串得能断行，不能把容器撑破 */
 }
@@ -2200,7 +2216,7 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
    margin-left 负值是抵消 .st-row 的 gap —— 它俩是一组，靠太开不好读。 */
 .st-dot-more {
   flex: none;
-  width: 14px;
+  width: 18px;
   height: 22px;
   margin-left: -7px;
   padding: 0;
@@ -2299,7 +2315,7 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
 }
 .key-row:last-child { border-bottom: 0; }
 .key-name { flex: 1; min-width: 0; font-size: 13px; color: var(--text); }
-.key-scope { font-size: 11px; color: var(--muted-2); margin-left: 8px; }
+.key-scope { font-size: var(--fs-fine); color: var(--muted-2); margin-left: 8px; }
 .key-combo {
   flex: none;
   min-width: 168px;
@@ -2600,6 +2616,45 @@ body.view-broadcast #btn-quality { display: none; }
   flex-wrap: wrap;
   margin: 14px 0 12px;
 }
+/* 恢复入口：按钮按需出现（隐藏数量 > 0），弹层贴着它展开 —— 不复用 toast，
+   因为用户可能要恢复其中特定的一路。 */
+.mh-wrap { position: relative; display: inline-flex; }
+.mh-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 70;
+  min-width: 216px;
+  max-width: 300px;
+  padding: 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .5);
+}
+.mh-pop[hidden] { display: none; }
+.mh-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 3px 6px 7px; margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.mh-head b { font-size: var(--fs-fine); font-weight: 500; color: var(--muted); }
+.mh-all {
+  border: 0; background: none; padding: 2px 6px; border-radius: 6px;
+  color: var(--red); font: inherit; font-size: var(--fs-fine); cursor: pointer;
+}
+.mh-all:hover { background: var(--red-soft); }
+.mh-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px; border: 0; border-radius: 7px;
+  background: none; color: var(--text-2);
+  font: inherit; font-size: var(--fs-sub); text-align: left; cursor: pointer;
+}
+.mh-item:hover { background: var(--panel-2); color: var(--text); }
+.mh-item span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mh-item em { flex: none; font-style: normal; font-size: var(--fs-fine); color: var(--muted-2); }
+.mh-item:hover em { color: var(--red); }
+
 .multi-qn { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .multi-qn select {
   padding: 4px 8px;
@@ -2641,6 +2696,24 @@ body.view-multi .col-right { display: none; }
 }
 .multi-layout button:hover { border-color: var(--red); }
 .multi-body { display: flex; gap: 12px; align-items: flex-start; }
+/* 全部最小化：网格 display:none 让位给这块说明（不用绝对定位去盖住版面） */
+.multi-empty {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 56px 24px;
+  text-align: center;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius);
+  color: var(--muted);
+}
+.multi-empty[hidden] { display: none; }
+.multi-empty b { font-size: var(--fs-h2); font-weight: 600; color: var(--text-2); }
+.multi-empty span { font-size: var(--fs-sub); color: var(--muted); }
 .multi-side {
   width: 250px;
   flex: none;
@@ -2883,6 +2956,40 @@ body.view-multi .col-right { display: none; }
 }
 .ms-btn:hover { background: rgba(var(--ink), .16); }
 .ms-btn.on { background: var(--red); border-color: var(--red); color: var(--on-red); }
+
+/* 左上角「最小化这一路」：和底栏同一条显隐规则（悬停 / 键盘聚焦才浮出），
+   否则整面墙上会一直挂着 9 个按钮，比画面还抢眼。 */
+.ms-min {
+  position: absolute;
+  left: 10px; top: 10px;
+  z-index: 3;
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .16s ease;
+}
+.ms-cell:hover .ms-min,
+.ms-cell:focus-within .ms-min,
+.ms-cell.dragging .ms-min {
+  opacity: 1;
+  pointer-events: auto;
+}
+.ms-min svg { width: 13px; height: 13px; display: block; }
+/* 退场：缩一下再让出位置，避免「啪」地消失后整面墙跳一下 */
+.ms-cell.ms-mining {
+  transform: scale(.94);
+  opacity: 0;
+  transition: transform .15s ease, opacity .15s ease;
+  pointer-events: none;
+}
+/* 恢复回来的那一格闪一下描边，方便在墙上定位 */
+.ms-cell.just-back { animation: msJustBack .7s ease; }
+@keyframes msJustBack {
+  0% { box-shadow: inset 0 0 0 2px var(--red); }
+  100% { box-shadow: inset 0 0 0 2px transparent; }
+}
 .ms-off {
   position: absolute;
   inset: 0;

@@ -344,6 +344,12 @@ window.__BOOT_T0 = Date.now();
         <button class="btn small ghost" id="multi-side-toggle" type="button" hidden>‹ 收起列表</button>
         <button class="btn small ghost" id="multi-add" type="button">＋ 添加直播间</button>
         <button class="btn small ghost" id="multi-refresh" type="button">刷新开播状态</button>
+        <!-- 最小化后的恢复入口：藏在工具条里，只有真隐藏了才出现（不占常驻空间） -->
+        <span class="mh-wrap">
+          <button class="btn small ghost" id="multi-hidden-btn" type="button" hidden
+                  aria-expanded="false" title="点开可逐个恢复">已隐藏 0 路</button>
+          <div class="mh-pop" id="multi-hidden-pop" hidden></div>
+        </span>
         <div class="multi-layout" id="multi-layout">
           <button class="on" data-ml="auto" type="button" title="按路数自动排，铺满窗口">自适应</button>
           <button data-ml="g1" type="button" title="单画面">1</button>
@@ -366,6 +372,10 @@ window.__BOOT_T0 = Date.now();
       <div class="multi-body">
         <aside class="multi-side" id="multi-side" hidden></aside>
         <div class="multi-grid" id="multi-grid"></div>
+        <div class="multi-empty" id="multi-empty" hidden>
+          <b>所有直播间都已最小化</b>
+          <span>点上方「已隐藏 N 路」可以逐个恢复；刷新页面也会全部恢复。</span>
+        </div>
       </div>
     </section>
 
@@ -388,12 +398,16 @@ window.__BOOT_T0 = Date.now();
         </div>
         <p class="live-note" id="live-cred-state">正在检查登录状态…</p>
         <div class="live-cred" id="live-cred-box" hidden>
+          <!-- 占位文字在 321px 的卡里放不下（实测需要 209px、可用 202px，末尾被切掉）。
+               缩短到放得下，完整说明挪到 title；上面那行 note 已经讲过扫码会自动带上。 -->
           <input id="live-jct" type="password" autocomplete="off"
-                 placeholder="粘贴 bili_jct（扫码登录会自动带上）">
+                 placeholder="粘贴 bili_jct"
+                 title="扫码登录会自动带上；也可以手动粘贴 Cookie 里的 bili_jct">
           <button class="btn small primary" id="live-jct-save">保存</button>
         </div>
         <div class="live-send">
-          <input id="live-msg" maxlength="30" placeholder="发条弹幕吧（最多 30 字）">
+          <input id="live-msg" maxlength="30" placeholder="发条弹幕，30 字内"
+                 title="最多 30 字">
           <button class="btn small primary" id="live-send">发送</button>
           <button class="btn small ghost" id="live-msg-save" type="button"
                   title="把输入框里的内容存为常用">＋</button>
