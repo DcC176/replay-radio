@@ -2010,11 +2010,12 @@ body.view-broadcast #view-broadcast > .live-chat-card { min-height: 220px; }
    让它保持自身高度，缩放全部交给上面的弹幕卡吸收。 */
 body.view-broadcast #live-send-card { flex: 0 0 auto; }
 
-/* 直播间在窄屏下必须竖排。上面那条是「整屏不滚动」的固定双列（1fr + 360px），
-   宽度不够时左列会被压成 0 —— 实测 390px 下播放器只剩 2px 宽，等于没有画面。
+/* 直播间在窄屏 / 竖屏下必须竖排。上面那条是「整屏不滚动」的固定双列（1fr + 360px），
+   宽度不够时左列会被压成 0 —— 实测 390px 下播放器只剩 2px 宽，等于没有画面；
+   竖屏高窗口即使够宽，双列也会把 16:9 的画面悬在一整列空白中间。
    这里改成：播放器在上、弹幕栏在下，整页可滚动（与其它视图的窄屏处理一致）。
    这一段必须放在上面那些直播间规则之后，否则同权重会被它们覆盖。 */
-@media (max-width: 820px) {
+@media (max-width: 820px), (orientation: portrait) {
   body.view-broadcast,
   body.view-broadcast.theater { overflow: auto; }
   body.view-broadcast .wrap,
@@ -2043,6 +2044,63 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
   body.view-broadcast .live-chat-card { flex: 0 0 auto; }
   body.view-broadcast .live-chat { flex: 0 0 auto; height: 40vh; min-height: 160px; }
 }
+
+/* ---------------------------------------------------------------- 竖屏适配
+
+   竖屏（高 > 宽）时窗口往往既窄又高：横屏那套「按视口高度铺满」会把 16:9
+   画面悬在一整列空白中间，工具条叠成五六行，画面墙上下各留一大块黑底。
+   这一段放在直播间/响应式规则**之后**，才压得住它们同权重的声明。
+   只调排版尺度，不动任何功能、层级与交互。 */
+@media (orientation: portrait) {
+  /* 长页面的「往下沉 12vh」在这里会变成一百多像素的空带 —— 收成一条呼吸缝 */
+  body:not(.theater):not(.view-broadcast) .wrap > .col-right > .player-box {
+    margin-top: 24px;
+  }
+  /* 直播间竖排后页面会滚：给右下角浮标留高度；弹幕卡不必按 40vh 撑
+     （1920 高的竖屏会变成 768px 的空盒子，比上面的画面还高）。 */
+  body.view-broadcast .wrap { padding-bottom: 76px; }
+  body.view-broadcast .live-chat {
+    flex: 0 0 auto;
+    height: 22vh;
+    min-height: 160px;
+  }
+
+  /* 顶栏右侧（主播灯 + 主题 + 语言）：主播多时这一组会把两行顶栏撑出视口
+     （实测 7 位主播在 390 宽下溢出 35px）。给它可收缩 + 内部横向滚动，
+     灯一颗不少、也只是滚动而不是被裁掉。 */
+  .tb-right {
+    min-width: 0;
+    max-width: calc(100vw - 28px);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .tb-right::-webkit-scrollbar { display: none; }
+
+  /* 工具条在窄屏会叠很多行：收紧间距，别把画面墙往下顶 */
+  body.view-multi .multi-bar { gap: 8px; margin: 10px 0 8px; }
+
+  /* 画面墙高度由 JS 写成行内 px（按「铺到视口底部」算）。竖屏下封顶 70vh，
+     格子一律从顶部排 —— 避免上半屏黑底、中间一格、下半屏还是黑底。
+     !important 是为了压过 JS 写的 height / align-content 行内样式。 */
+  body.view-multi #multi-grid {
+    max-height: 70vh !important;
+    align-content: start !important;
+  }
+  /* 路数多时单格会缩到 180px 左右，格子底栏的画质/音量/按钮会横着顶出屏幕。
+     让这条底栏自己横向滚动，控件一个不少，也不再撑宽整页。 */
+  body.view-multi .ms-bar { overflow-x: auto; scrollbar-width: none; }
+  body.view-multi .ms-bar::-webkit-scrollbar { display: none; }
+
+  /* 监控室里几处 11px 的注记在竖屏偏小，统一抬到设计阶梯的 12px */
+  .multi-qn, .multi-note, .ms-qn, .mf-title, .mf-pop { font-size: var(--fs-fine); }
+
+  /* 右下角浮标收成纯图标小圆钮贴角放：长列表滚到最底时只占 32×32，
+     不再用 108×40 的胶囊横压住列表最右列 / 发送按钮。 */
+  .status-dock { right: 8px; bottom: 8px; }
+  .status-fab-text { display: none; }
+  .status-fab { width: 32px; height: 32px; padding: 0; justify-content: center; }
+}
+
 .live-info { font-size: 13px; color: var(--text); line-height: 1.7; margin-bottom: 10px; }
 .live-info b { color: var(--red); font-weight: 600; }
 .live-chat {
@@ -2143,7 +2201,9 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
 @media (max-width: 560px) {
   .status-dock { right: 12px; bottom: 12px; }
   .status-fab-text { display: none; }
-  .status-fab { padding: 0 12px; }
+  /* 文字收起后就是纯图标圆钮：width 与 padding 一起收，否则 border-box 下
+     40px 减去 24px 内边距只剩 16px，20px 的铃铛会被挤掉一角。 */
+  .status-fab { width: 32px; height: 32px; padding: 0; justify-content: center; }
   .status-panel { width: calc(100vw - 24px); }
 
   /* 手机顶栏放不下「主播名 / 噼里啪啦」整串（实测只剩 113px，
@@ -2806,7 +2866,10 @@ body.view-multi .col-right { display: none; }
 }
 .mf-pop { font-size: 11px; color: var(--muted-2); flex: none; }
 @media (max-width: 820px) {
-  .multi-body { flex-direction: column; }
+  /* ⚠️ 竖排后 align-items 必须改回 stretch：外层原来用 flex-start（横排时让左右两栏
+     各按内容高度对齐），换成 column 后它管的是**横向** —— 会把画面墙压成内容宽度
+     80px，格子缩成 80×45，竖屏下整面墙几乎全黑（实测 430×932）。 */
+  .multi-body { flex-direction: column; align-items: stretch; }
   .multi-side { width: auto; max-height: 40vh; }
 }
 

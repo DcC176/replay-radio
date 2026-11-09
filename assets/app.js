@@ -4131,6 +4131,7 @@
       state.replayMemo = replayPosNow() || state.replayMemo;
     }
     state.view = name;
+    syncDocTitle();               // 标签页标题跟着当前板块名走
     if (prev !== name) {
       // 两列宽度在这 260ms 里平滑过渡（主站侧栏 404px ↔ 非直播 288px），
       // 只在切页这一下开 transition —— 常驻的话拖窗口会变得迟钝。
@@ -4735,6 +4736,7 @@
   // 转出来的新内容也要跟着转，否则列表/面板重渲染后又会变回简体
   function applyHant() {
     convertTree(document.body);
+    syncDocTitle();               // 导航标签转成繁体后，标题也跟着换
     if (hantObserver) return;
     hantObserver = new MutationObserver(function (muts) {
       if (converting) return;
@@ -6440,12 +6442,26 @@
      通用版没有固定主播，主站一律叫「主播」，不写死任何名字。 */
   var ST_SHORT = '主播';
   var FAB_LABEL = ST_SHORT + '状态';
+  /* 当前主播的**完整名字**，由 applyStationBrand 从主播注册表填；标签页标题取它。 */
+  var ST_NAME = '';
 
   /* 整页底色/卡片底色是否跟随本板块的色调。
      主站**不上色** —— 保持默认的黑红配色；
      其它板块各带一点自己的环境色，切换时能一眼看出换人了。
      由 fetchStations / 切换处理按 st.main 设置。 */
   var ST_TINT = false;
+
+  /* 标签页标题 =「当前主播名 - 板块名称」。两个值都不写死：
+     主播名来自主播注册表（applyStationBrand 填 ST_NAME）；
+     板块名直接读当前导航标签的文字（繁体转换后也会跟着变）。
+     名单还没回来 / 找不到标签时保留 index.html 的占位标题，不编造名字。 */
+  function syncDocTitle() {
+    if (!ST_NAME) return;
+    var tab = document.querySelector('.tab[data-view="' + state.view + '"]');
+    var view = tab ? String(tab.textContent || '').trim() : '';
+    if (!view) return;
+    document.title = ST_NAME + ' - ' + view;
+  }
 
   /* 品牌文案按板块现场生成 —— 通用版不预设主播，这些位置在 HTML 里都只是占位，
      拿到名单后由 applyStationBrand 逐处填上（主站、副站都一样）。 */
@@ -6470,6 +6486,7 @@
     /* 标题用完整主播名，不用短名 —— 短名历史上会被截断，
        「名字显示不完全」的投诉就来自这里；数据层的 short 只喂给真正的窄槽。 */
     var label = st.name || short;
+    ST_NAME = label;
     function setTxt(id, txt) {
       var e = document.getElementById(id);
       if (e) e.textContent = txt;
@@ -6494,7 +6511,7 @@
       }
       cs.textContent = '直播回放系列' + (series.total ? '（' + series.total + ' 场）' : '');
     }
-    document.title = label + ' · ' + short + ' 24 小时直播回放';
+    syncDocTitle();
   }
 
   function fetchStations() {
@@ -6585,6 +6602,10 @@
     renderLamps();
     // 视觉反馈不等重载：主题色/扫过动画立刻按新的主位走
     var nxt = findStation(ST);
+    if (nxt) {
+      ST_NAME = nxt.name || nxt.short || '';
+      syncDocTitle();                 // 换主播时标签标题立刻跟上，不等 220ms 后的重载
+    }
     if (nxt && nxt.accent) {
       // 点亮的板块不止一个时，主题色取它们混出来的那一个（扫过动画同色）
       var mixed = mixAccents(ST_SET) || nxt.accent;
