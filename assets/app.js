@@ -1926,6 +1926,17 @@
     });
   }
 
+  /* 时间轴换了（筛选标签 / 播放顺序）之后，凡是「从 state.cycle 推出来」的界面都要立刻重画。
+     ⚠️ 「接下来」那张小表只在 paintNowPlaying 里渲染 —— 不补这一下，切完顺序看到的是
+     旧队列，非得点一期新的开始播才刷新（用户 2026-11-09 反馈）。 */
+  function refreshCycleViews() {
+    var cur = (state.cycle && state.segIndex >= 0)
+      ? state.cycle.segments[state.segIndex] : null;
+    if (cur) renderNext(cur);
+    renderUpNext();
+    if (state.view === 'schedule') renderSchedule();
+  }
+
   function setPlayOrder(v) {
     if (v !== 'seq' && v !== 'rev' && v !== 'shuffle') return;
     if (v === state.playOrder) return;
@@ -1933,7 +1944,7 @@
     store.set('xl_play_order', v);
     syncPlayOrder();
     rebuildKeepingCurrent();
-    if (state.view === 'schedule') renderSchedule();
+    refreshCycleViews();
   }
 
   /* 把频道位置重新瞄到「cid 这支的第 at 秒」，**一个字节都不动播放器**。
@@ -5134,6 +5145,7 @@
       renderChips();
       renderList();
       rebuildKeepingCurrent();
+      refreshCycleViews();
     });
 
     // error 不冒泡，用捕获阶段统一处理；取不到图就隐藏，避免整排裂图
