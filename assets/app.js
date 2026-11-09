@@ -1625,6 +1625,12 @@
     cats: {},              // 选中分类；空对象 = 全部
     q: '',
     sort: 'date',
+    /* 频道时间轴的铺排顺序：seq=最早→最新 / rev=最新→最早 / shuffle=稳定洗牌。
+       ⚠️ 与 `sort` 不是一回事：`sort` 只管列表怎么排，这个决定频道按什么顺序往下放。 */
+    playOrder: (function () {
+      var v = store.get('xl_play_order', 'shuffle');
+      return (v === 'seq' || v === 'rev') ? v : 'shuffle';
+    })(),
     page: 1,
     cycle: null,
     drift: 0,              // 相对「直播中」的偏移（秒）
@@ -1658,6 +1664,11 @@
        走的都是同一个 buildCycle。豁免若只对那一次重建有效，后续重建会把当前支
        重新切成片段，画面立刻被拽到别的片段去（用户看到的「连跳几次」就是这个）。 */
     exemptCid: null,
+    /* 切分类标签时，正在播的这一支可能被新筛选排除在外。把它「钉」在池子里，
+       否则重建出来的段表里根本没有它，画面必然被换掉（用户 2026-11-09 要求
+       切标签不动画面）。真的换到别的节目时 applyPlayer 清空；
+       硬重建（换板块 / 从头铺）也清空。 */
+    pinBvid: null,
     aimVer: 0,              // 重瞄序号：加载回调据此判断手里的 anchor 是否已过时
     aimCid: null,           // 最近一次重瞄的是哪一支
     aimPos: null,           // 最近一次重瞄的目标频道坐标
@@ -1788,18 +1799,31 @@
   }
 
   function buildCycle(programs) {
-    var arr = programs.slice().map(function (p) {
-      return { p: p, k: cycleKey(p.bvid, CFG.seed) };
-    }).sort(function (a, b) {
-      return a.k - b.k;
-    }).map(function (x) { return x.p; });
-    var i, j, tmp;
-    for (i = 1; i < arr.length; i++) {
-      if (arr[i].category === arr[i - 1].category) {
-        for (j = i + 1; j < arr.length; j++) {
-          if (arr[j].category !== arr[i - 1].category) {
-            tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
-            break;
+    var arr, i, j, tmp;
+    /* 铺排顺序（用户 2026-11-09 新增）：顺序 = 最早→最新，倒叙 = 最新→最早，
+       随机 = 下面那条确定性洗牌。
+       ⚠️ 「相邻同类穿插」只在随机时做 —— 顺序/倒叙是用户明确点的时间顺序，
+       再拿分类去穿插就等于没听他的。 */
+    if (state.playOrder === 'seq' || state.playOrder === 'rev') {
+      var dir = state.playOrder === 'seq' ? 1 : -1;
+      arr = programs.slice().sort(function (a, b) {
+        // pubdate 相同（同一天发好几期）时用 bvid 兜底，保证同一份输入永远同一条时间轴
+        return (a.pubdate - b.pubdate) * dir
+          || (a.bvid === b.bvid ? 0 : (a.bvid < b.bvid ? -dir : dir));
+      });
+    } else {
+      arr = programs.slice().map(function (p) {
+        return { p: p, k: cycleKey(p.bvid, CFG.seed) };
+      }).sort(function (a, b) {
+        return a.k - b.k;
+      }).map(function (x) { return x.p; });
+      for (i = 1; i < arr.length; i++) {
+        if (arr[i].category === arr[i - 1].category) {
+          for (j = i + 1; j < arr.length; j++) {
+            if (arr[j].category !== arr[i - 1].category) {
+              tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+              break;
+            }
           }
         }
       }
@@ -1852,8 +1876,12 @@
   }
 
   function rebuildCycle(soft) {
+    // 硬重建 = 从头铺，标签留下的「钉子」一并失效（它只服务于「别打断正在播的这支」）
+    if (!soft) state.pinBvid = null;
     var pool = state.all.filter(function (p) {
-      return !Object.keys(state.cats).length || state.cats[p.category];
+      // pinBvid：切标签时把正在播、但不属于新标签的那一支留在池子里
+      return !Object.keys(state.cats).length || state.cats[p.category]
+        || (state.pinBvid && p.bvid === state.pinBvid);
     });
     state.cycle = buildCycle(pool);
     // soft：只是后台抓到新清单后换一份，播放中的那一段不能被打断
@@ -1868,6 +1896,44 @@
     if (state.view === 'broadcast' || state.view === 'multi') return;
     if (state.cycle.total > 0) applyPlayer(true);
     else renderIdle();
+  }
+
+  /* 换筛选 / 换播放顺序之后重建时间轴，**但不打断正在播的这一支**
+     （用户 2026-11-09：「切换录播标签，不要切换正在播放的视频」）。
+     做法与「跳过空白」开关同一套：soft 重建换表，再用 aimCycleAt 把频道锚点
+     瞄回同一支的同一秒 —— 媒体不重载、不 seek，画面纹丝不动。
+     没在播（首屏还没就绪 / 停在歌单）时照旧从头铺。 */
+  function rebuildKeepingCurrent() {
+    var cur = (state.cycle && state.cycle.segments && state.segIndex >= 0)
+      ? state.cycle.segments[state.segIndex] : null;
+    var playing = cur && state.mediaBase !== null && el.player && el.player.readyState > 0;
+    if (!playing) { rebuildCycle(); return false; }
+    var keepCid = cur.cid;
+    var keepAt = cur.t0 + (cyclePos() - cur.start);
+    rebuildCycle(true);
+    if (aimCycleAt(keepCid, keepAt)) return true;
+    // 这一支已经（快要）播到头：别再钉着它，按新表正常换下一支
+    rebuildCycle();
+    return false;
+  }
+
+  /* 播放顺序（顺序 / 倒叙 / 随机）：存起来 + 重建时间轴。
+     换的只是「接下来按什么顺序放」，正在播的这一支同样保持不变。 */
+  function syncPlayOrder() {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-order]'), function (b) {
+      b.setAttribute('aria-pressed',
+        b.getAttribute('data-order') === state.playOrder ? 'true' : 'false');
+    });
+  }
+
+  function setPlayOrder(v) {
+    if (v !== 'seq' && v !== 'rev' && v !== 'shuffle') return;
+    if (v === state.playOrder) return;
+    state.playOrder = v;
+    store.set('xl_play_order', v);
+    syncPlayOrder();
+    rebuildKeepingCurrent();
+    if (state.view === 'schedule') renderSchedule();
   }
 
   /* 把频道位置重新瞄到「cid 这支的第 at 秒」，**一个字节都不动播放器**。
@@ -2187,6 +2253,8 @@
     var seg = state.cycle.segments[i];
     var offset = pos - seg.start;
     var key = seg.bvid + '#' + seg.page;
+    // 切标签时钉住的那一支：一旦真的换到别的节目就失效（它可能不在当前筛选里）
+    if (state.pinBvid && seg.bvid !== state.pinBvid) state.pinBvid = null;
 
     /* 同一分P 内的段切换（分段切细之后很常见）不需要换媒体：
        媒体地址、清晰度、整条时间轴都没变，重新取流等于白白再等一次
@@ -5055,9 +5123,17 @@
       if (c === '全部') state.cats = {};
       else if (state.cats[c]) delete state.cats[c];
       else state.cats[c] = 1;
+
+      /* 标签只改「接下来播什么」：正在播的这一支若被新标签排除在外，先把它钉进
+         池子 —— 否则重建出来的段表里没有它，画面必然被换掉，正好和用户的诉求相反。 */
+      var cur = (state.cycle && state.cycle.segments && state.segIndex >= 0)
+        ? state.cycle.segments[state.segIndex] : null;
+      state.pinBvid = (cur && Object.keys(state.cats).length
+        && !state.cats[cur.program.category]) ? cur.bvid : null;
+
       renderChips();
       renderList();
-      rebuildCycle();
+      rebuildKeepingCurrent();
     });
 
     // error 不冒泡，用捕获阶段统一处理；取不到图就隐藏，避免整排裂图
@@ -5101,6 +5177,10 @@
         renderList();
       });
     }
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-order]'), function (b) {
+      b.addEventListener('click', function () { setPlayOrder(b.getAttribute('data-order')); });
+    });
 
     el.prev.addEventListener('click', function () {
       if (state.page > 1) { state.page--; renderList(); }
@@ -5506,6 +5586,7 @@
 
     renderChips();
     renderList();
+    syncPlayOrder();
     syncSound();
     syncSkip();
     runPendingPlay();          // 用户刚才可能在清单到位之前就点了播放

@@ -503,6 +503,21 @@ body:not(.theater):not(.view-broadcast) .col-right .player-box {
 .btn.small { padding: 7px 15px; font-size: 12.5px; }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 
+/* 播放顺序：三个按钮一组（顺序播放 / 倒叙播放 / 随机播放）。
+   选中态用主色实心，和 `.chip.active` / `.tab.active` 同一套语言；
+   未选中保持 ghost —— 它是设置项，不该跟「进入直播」抢视线。 */
+.order-pick { display: inline-flex; align-items: center; gap: 6px; }
+.order-pick .order-label {
+  font-size: var(--fs-fine);
+  color: var(--muted-2);
+  margin: 0 2px 0 8px;      /* 与左边「回到直播」拉开一点，读起来是独立的一组 */
+}
+.btn.ghost[aria-pressed="true"] {
+  background: var(--red);
+  border-color: var(--red);
+  color: var(--on-red);
+}
+
 /* ---------------------------------------------------------------- 筛选 */
 
 .filters {
