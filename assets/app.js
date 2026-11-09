@@ -1606,6 +1606,13 @@
   var VIEWS = ['live', 'multi', 'broadcast', 'schedule', 'playlist',
                'dynamic', 'weibo', 'dd', 'about', 'settings'];
   var KEY_MUTED = 'xl_muted';
+  /* 播放进度，按板块分键（`xl_pos_<板块 id>` / `xl_plpos_<板块 id>`）。
+     切换板块是**整页重载**，不落盘就必然回到「挂钟对应的位置」（用户 2026-11-09 要求保持进度）。 */
+  var KEY_POS = 'xl_pos_';
+  var KEY_PLPOS = 'xl_plpos_';
+  /* 本次**页面加载**对应的板块。⚠️ 不能用 ST：切板块时 applyStationSet 会先把 ST 改掉，
+     220ms 后才 reload —— 中间的 pagehide 存进度就会把旧板块的位置写到新板块的键上。 */
+  var progressSid = null;
 
   var store = {
     get: function (k, d) {
@@ -1669,6 +1676,12 @@
        切标签不动画面）。真的换到别的节目时 applyPlayer 清空；
        硬重建（换板块 / 从头铺）也清空。 */
     pinBvid: null,
+    /* 播放器只有一个：歌单借走时间轴、直播间/监控室抢走 <video> 之前，先把录播看到的位置
+       记在这里，回来时接上（用户 2026-11-09：切页签不能丢进度）。 */
+    replayMemo: null,
+    /* 一次性恢复点：下一次**硬**重建之后要接上的位置 {cid, at}，由 rebuildCycle 消费。
+       跨板块重载时来自 localStorage（KEY_POS），页签切换时来自 replayMemo。 */
+    resume: null,
     aimVer: 0,              // 重瞄序号：加载回调据此判断手里的 anchor 是否已过时
     aimCid: null,           // 最近一次重瞄的是哪一支
     aimPos: null,           // 最近一次重瞄的目标频道坐标
@@ -1890,12 +1903,65 @@
     state.drift = 0;
     state.segIndex = -1;
     state.playingKey = null;
+    var want = state.resume;
+    state.resume = null;
     // 直播间 / 监控室正占着播放器（或自己拉多路），回放不能来抢
     // （boot 完成时的这次调用尤其关键，否则刚接上去的流会被回放覆盖）。
     // 离开时 resumeReplay() 会重新拉起回放。
     if (state.view === 'broadcast' || state.view === 'multi') return;
+    // 恢复点（跨板块重载的第一屏 / 从歌单切回来）：直接接到上次那一支那一秒
+    if (want && playFrom(want.cid, want.at)) return;
     if (state.cycle.total > 0) applyPlayer(true);
     else renderIdle();
+  }
+
+  /* 录播「现在看到哪一支的第几秒」。没在播、时间轴是借来的歌单、人正待在直播间/监控室，
+     都返回 null —— 这几种情况下 state.cycle 不代表录播的当前位置。 */
+  function replayPosNow() {
+    if (state.view === 'broadcast' || state.view === 'multi') return null;
+    var s = currentSeg();
+    if (!s || state.playlistCycle || state.mediaBase === null) return null;
+    return { cid: String(s.cid), at: +(s.t0 + (cyclePos() - s.start)).toFixed(1) };
+  }
+
+  /* 把频道定位到「cid 这支的第 at 秒」并重新起播。
+     ⚠️ 必须清 mediaBase / wantPos：它们指的是**旧时间轴**上的坐标，不清就会按旧坐标算位置，
+     表现是「接回上次的位置」变成「跳到别处」。 */
+  function playFrom(cid, at) {
+    var segs = state.cycle && state.cycle.segments;
+    if (!segs || !segs.length) return false;
+    var seg = null;
+    for (var i = 0; i < segs.length; i++) {
+      if (String(segs[i].cid) === String(cid)) { seg = segs[i]; break; }
+    }
+    if (!seg) return false;
+    var total = state.cycle.total;
+    var t = Math.min(Math.max(+at || 0, 0), Math.max(seg.duration - 0.5, 0));
+    state.drift = ((seg.start + t - (now() - CFG.epoch)) % total + total) % total;
+    state.mediaBase = null;
+    state.wantPos = null;
+    state.segIndex = -1;
+    state.playingKey = null;
+    applyPlayer(true);
+    return true;
+  }
+
+  /* 进度落盘（按板块分键）。只在真的在播时写 —— 否则会把「挂钟推算的位置」也存进去，
+     下次打开就成了「随手存了一个点」。 */
+  function saveProgress() {
+    var sid = progressSid || ST;
+    if (!sid) return;
+    if (state.playlistCycle) {
+      var s = currentSeg();
+      if (s && s.key) {
+        store.set(KEY_PLPOS + sid, {
+          pl: PL.curId, key: s.key, at: +(cyclePos() - s.start).toFixed(1)
+        });
+      }
+      return;
+    }
+    var r = replayPosNow();
+    if (r) store.set(KEY_POS + sid, r);
   }
 
   /* 换筛选 / 换播放顺序之后重建时间轴，**但不打断正在播的这一支**
@@ -2756,6 +2822,8 @@
   function resumeReplay() {
     destroyLive();
     el.banner.hidden = true;
+    // 离开直播间/监控室：接回播放器被抢走之前的录播位置；没有记录才回到「直播中」
+    if (state.replayMemo && playFrom(state.replayMemo.cid, state.replayMemo.at)) return;
     state.drift = 0;
     state.mediaBase = null;
     applyPlayer(true);
@@ -4055,6 +4123,13 @@
   function setView(name) {
     if (VIEWS.indexOf(name) < 0) name = 'live';
     var prev = state.view;
+    /* 播放器只有一个：歌单要借走时间轴，直播间 / 监控室要抢走 <video>。
+       去这几个页面之前先把录播看到的位置记下来（state.view 此刻还是旧值，
+       replayPosNow 的守卫才判得对），回来时 resumeReplay / rebuildCycle 会接上。 */
+    if (prev !== name && (name === 'playlist' || name === 'broadcast' || name === 'multi')
+        && state.cycle && !state.playlistCycle) {
+      state.replayMemo = replayPosNow() || state.replayMemo;
+    }
     state.view = name;
     if (prev !== name) {
       // 两列宽度在这 260ms 里平滑过渡（主站侧栏 404px ↔ 非直播 288px），
@@ -4123,7 +4198,9 @@
 
     // 离开歌单页：把频道的时间轴换回来 —— 播放器只有一个，歌单是「临时借走」的
     if (prev === 'playlist' && name !== 'playlist' && state.playlistCycle) {
+      saveProgress();                   // 歌单听到哪一首哪一秒（按板块落盘，重进时接上）
       state.playlistCycle = false;
+      state.resume = state.replayMemo;  // 把借走之前的录播位置接回去（没有就按挂钟）
       rebuildCycle(false);
     }
 
@@ -5109,6 +5186,13 @@
   }
 
   function bind() {
+    /* 进度落盘：切板块走的是整页重载（location.reload），pagehide 一定会来；
+       切到后台也顺手存一次，免得进程被杀时丢掉这一段。 */
+    window.addEventListener('pagehide', saveProgress);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'hidden') saveProgress();
+    });
+
     // 主播状态：悬浮按钮展开/收起；点面板外或按 Esc 收起
     el.statusFab.addEventListener('click', statusToggle);
     el.btnStatusClose.addEventListener('click', statusClose);
@@ -5210,6 +5294,10 @@
         } else {
           state.drift = 0;              // 回到直播：重新按挂钟对齐
           state.mediaBase = null;
+          /* 这是「明确回到直播」，旧进度就作废 —— 否则切走再回来 / 下次打开
+             又会被接回那个点，用户会以为「回到直播」没生效。 */
+          state.replayMemo = null;
+          if (progressSid || ST) store.set(KEY_POS + (progressSid || ST), null);
           applyPlayer(true);
         }
       });
@@ -5587,6 +5675,7 @@
   }
 
   function boot(data) {
+    if (!progressSid) progressSid = ST;      // 这次页面加载属于哪个板块（切板块中途 ST 会变）
     state.all = data.programs || [];
     state.meta = data.meta || {};
     state.muted = state.mutedDefault;
@@ -5628,7 +5717,12 @@
          ping 排在首屏那一堆资源请求的队尾，这个窗口比想象中大，
          足够点一次。交给 tick 走既有的「soft 重建 + 重瞄当前支」流程。 */
       if (state.playingKey) state.cycleStale = true;
-      else rebuildCycle();
+      else {
+        /* 上次退出时听到哪（按板块分键）：整页重载后接着播，而不是回到「挂钟对应的位置」。
+           cid 在新时间轴里找不到时 playFrom 会返回 false，自然退回原逻辑。 */
+        state.resume = store.get(KEY_POS + (progressSid || ST), null);
+        rebuildCycle();
+      }
       refreshStatus();
       setInterval(tick, CFG.tickMs);
 
@@ -8451,8 +8545,9 @@
   /* 放进播放引擎：把 items 铺成时间轴，并把「当前位置」瞄到第 idx 首的开头。
      `key` 是条目唯一键（见 plKeyOf）；空串 = 从头放。 */
   /* preItems：已经排好序的条目（随机播放会把洗好的数组传进来）。
-     不传就按当前筛选的列表顺序。 */
-  function plPlay(key, preItems) {
+     不传就按当前筛选的列表顺序。
+     at：从这一首的第几秒开始（切换板块/页签回来时接上上次的进度，不传 = 从头）。 */
+  function plPlay(key, preItems, at) {
     var items = (preItems || plFiltered()).filter(function (it) { return (it.dur || 0) > 0 && it.cid; });
     if (!items.length) { plNote('当前筛选下没有可播放的歌'); return; }
     var idx = 0;
@@ -8479,12 +8574,13 @@
       acc += it.dur;
     });
     var seg = segs[idx];
+    var startAt = Math.min(Math.max(+at || 0, 0), Math.max(seg.duration - 0.5, 0));
     state.playlistCycle = true;
     state.cycle = { order: items, segments: segs, total: acc };
     /* 位置 = (now-epoch+drift) mod total，所以要让它落在目标段开头。
        ⚠️ 与 playProgram 同理：两个锚点必须清掉，否则 cyclePos() 会优先读它们，
        画面会先停在上一首再跳。 */
-    state.drift = seg.start - (now() - CFG.epoch) % acc;
+    state.drift = seg.start + startAt - (now() - CFG.epoch) % acc;
     state.drift = ((state.drift % acc) + acc) % acc;
     state.mediaBase = null;
     state.wantPos = null;
@@ -8743,6 +8839,10 @@
     renderPlaylist().then(function () {
       if (state.playlistCycle) return;      // 已经在放歌单：不重开当前这首
       if (!PL.data || !plFiltered().length) return;
+      /* 上次听到哪一首哪一秒（按板块落盘）：切板块 / 切走再回来都接着放。
+         `pl` 必须与当前歌单一致 —— 换了歌单，上一首的 key 可能根本不存在。 */
+      var m = store.get(KEY_PLPOS + (progressSid || ST), null);
+      if (m && m.pl && m.pl === PL.curId && m.key) { plPlay(m.key, null, m.at); return; }
       plPlay('');
     });
   }
