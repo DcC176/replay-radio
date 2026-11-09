@@ -1,45 +1,36 @@
 # -*- coding: utf-8 -*-
-"""生成站点图标 favicon.ico。
+"""从 `tools/icon_source.jpg` 生成站点图标。
 
-一个文件同时服务两处：浏览器标签页图标，以及打包出来的 EXE 图标。
-配色取自 assets/style.css 的 --panel / --red。
+一处源图，三个用途：
+  * `favicon.ico`   —— 浏览器标签页 / 收藏夹，以及 PyInstaller 打包出来的 EXE 图标
+                       （build_exe.py 用 `--icon favicon.ico`）；桌面快捷方式
+                       `IconLocation = <exe>,0` 也就跟着一起换了。
+  * `favicon.png`   —— index.html 里显式声明的 PNG，供高 DPI 标签页 / 收藏夹使用。
 
 用法：
     python tools/make_icon.py
 """
 import os
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "favicon.ico")
-
-SIZE = 256
-BG = (16, 16, 19, 255)            # --panel  #101013
-RED = (255, 59, 78, 255)          # --red    #ff3b4e
-EDGE = (255, 255, 255, 30)        # 极淡描边：深色底在深色任务栏上也能看出边界
-
-
-def make():
-    img = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([1, 1, SIZE - 2, SIZE - 2], radius=58,
-                        fill=BG, outline=EDGE, width=3)
-
-    font = ImageFont.truetype("arialbd.ttf", 130)
-    d.text((SIZE / 2, SIZE / 2 - 16), "24", font=font, fill=RED, anchor="mm")
-
-    # 底部一道红线：电台信号条的暗示
-    d.rounded_rectangle([SIZE * 0.30, SIZE * 0.80, SIZE * 0.70, SIZE * 0.80 + 13],
-                        radius=7, fill=RED)
-    return img
+SRC = os.path.join(ROOT, "tools", "icon_source.jpg")
+ICO = os.path.join(ROOT, "favicon.ico")
+PNG = os.path.join(ROOT, "favicon.png")
+SIZES = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64),
+         (128, 128), (256, 256)]
 
 
 def main():
-    img = make()
-    img.save(OUT, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64),
-                         (128, 128), (256, 256)])
-    print("已生成 %s" % OUT)
+    src = Image.open(SRC).convert("RGBA")
+    if src.width != src.height:
+        raise SystemExit("图标源图必须是正方形，当前为 %dx%d" % src.size)
+    # 先高质量缩到 256，再让 Pillow 从它生成 ICO 的其余尺寸（避免逐级劣化）
+    base = src.resize((256, 256), Image.LANCZOS)
+    base.save(ICO, sizes=SIZES)
+    base.resize((64, 64), Image.LANCZOS).save(PNG)
+    print("已生成 %s（%s）与 %s" % (ICO, ", ".join(str(s[0]) for s in SIZES), PNG))
     return 0
 
 

@@ -49,7 +49,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 FROZEN = bool(getattr(sys, "frozen", False))    # True = 由 PyInstaller 打成的 EXE
 
-WEB_ITEMS = ("index.html", "favicon.ico", "assets", "data")   # 打进 EXE 的网页文件
+WEB_ITEMS = ("index.html", "favicon.ico", "favicon.png", "assets", "data")   # 打进 EXE 的网页文件
 
 
 # data/ 顶层这几份是**用户本机攒出来的**：自动分段写的分段与「第几首」登记时刻，

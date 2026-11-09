@@ -10,7 +10,7 @@
         分发时只需要给这一个文件。
 
 网页文件怎么进去的
-    index.html / favicon.ico / assets / data / readme.txt 全部用 --add-data 打进 EXE。
+    index.html / favicon.ico / favicon.png / assets / data / readme.txt 全部用 --add-data 打进 EXE。
     EXE 首次运行时把它们释放出来（网页进 %LOCALAPPDATA%\\ReplayRadio\\www\\，
     使用说明放同级目录），之后从释放出来的目录提供服务。
 
@@ -35,13 +35,13 @@ OUT = os.path.join(ROOT, "发布")
 # 这些 build_* 目录纯属缓存（不进包、不进版本库），可以随时手动删除。
 BUILD = os.path.join(ROOT, "build_%s" % time.strftime("%Y%m%d_%H%M%S"))
 
-APP_VERSION = "1.3.0"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.4.0"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
 # 所以改名不影响单实例检测与 --stop。
 FINAL_NAME = "噼里啪啦-v%s.exe" % APP_VERSION
-WEB = ["index.html", "favicon.ico", "assets", "data"]   # 网页文件，释放到 www\
+WEB = ["index.html", "favicon.ico", "favicon.png", "assets", "data"]   # 网页文件，释放到 www\
 README_SRC = "readme.txt"                 # 使用说明，释放到用户目录根
 
 README = """噼里啪啦 · 使用说明

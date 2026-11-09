@@ -38,7 +38,7 @@ SANDBOX = os.path.join(ROOT, "build", "verify-single")
 PORT = 8765
 BASE = "http://127.0.0.1:%d/" % PORT
 
-WEB_ITEMS = ("index.html", "favicon.ico", "assets", "data")
+WEB_ITEMS = ("index.html", "favicon.ico", "favicon.png", "assets", "data")
 
 
 def get(path, timeout=120):

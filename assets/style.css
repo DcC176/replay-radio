@@ -1509,25 +1509,42 @@ body.theater .views { display: none; }
 
 /* 剧场模式：左竖条（本场分段） | 播放器 | 右竖条（接下来） */
 body.theater .wrap {
-  grid-template-columns: 200px minmax(0, 1fr) 200px;
+  /* 侧栏随视口收窄：1440 下 200 → 173，多出来的宽度全给中间画面 */
+  grid-template-columns: clamp(150px, 12vw, 190px) minmax(0, 1fr) clamp(150px, 12vw, 190px);
   max-width: none;
-  gap: 14px;
-  padding: 14px 16px 20px;
+  gap: 12px;
+  padding: 14px 14px 20px;
   align-items: start;
 }
 
-body.theater .strip { display: block; position: sticky; top: 66px; }
-body.theater .strip-body { max-height: calc(100vh - 190px); overflow-y: auto; overflow-x: hidden; }
+body.theater .strip {
+  display: block;
+  position: sticky;
+  /* 与播放器顶端对齐：顶栏 + wrap 上内边距（窄屏顶栏是两行 94px，写死 66 会错开） */
+  top: calc(var(--topbar-h) + 14px);
+}
+body.theater .strip-body {
+  max-height: calc(100vh - var(--topbar-h) - 70px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
 
-/* 播放器宽度取「视口高度允许的最大 16:9」，同时不超过中间列宽度。
-   order 必须归零：非直播视图给过 order:-1，不重置会让三列顺序错位。 */
+/* 播放器宽度取「一屏可用高度允许的最大 16:9」。
+   ⚠️ 旧版扣 270px 太保守：1920x953 下只有 1214x683（约四成屏幕面积），
+      上方还被通用的 12vh 下沉顶掉 114px，三栏顶端完全对不齐。
+      现在扣 --topbar-h + 80px（上下内边距 + 右下角「主播状态」浮标的 60px + 余量），
+      列宽再留 24px 呼吸位；浮标固定贴底，矮窗口下不预留会把控件栏右下角盖住。 */
 body.theater .col-right {
   order: 0;
   position: static;
-  --pw: max(320px, min(100%, calc((100vh - 270px) * 16 / 9)));
+  --pw: max(320px, min(calc(100% - 24px),
+                       calc((100vh - var(--topbar-h) - 80px) * 16 / 9)));
 }
 
-body.theater .player-box { width: var(--pw); margin: 0 auto; }
+/* ⚠️ 抵掉长页面那条「往下沉 12vh」：剧场模式是三栏并排，播放器必须和两条侧栏
+   从同一行起，否则上方空一大条、画面被挤到屏幕下半部分。 */
+body.theater .wrap > .col-right > .player-box { margin-top: 0; }
+body.theater .player-box { width: var(--pw); margin-left: auto; margin-right: auto; }
 body.theater .np { width: var(--pw); margin: 14px auto 0; }
 
 body.theater .next,
