@@ -3002,6 +3002,11 @@ body.view-multi .col-right { display: none; }
 .multi-grid.portrait .ms-cell video { object-fit: contain; }
 /* 非自由布局：整格可按住拖动，松手与目标格互换位置 */
 .multi-grid:not(.free) .ms-cell { cursor: grab; }
+/* 点卡片 = 只重连这一路：进行中给整格一个边框反馈，别只靠底栏那行小字。 */
+.multi-grid .ms-cell.reconnecting {
+  cursor: progress;
+  box-shadow: inset 0 0 0 2px var(--red);
+}
 .multi-grid:not(.free) .ms-cell.dragging {
   cursor: grabbing;
   pointer-events: none;          /* 让 elementFromPoint 落在下面的格子上 */

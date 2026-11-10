@@ -7065,7 +7065,7 @@
     return '<div class="ms-bar">'
       + '<span class="ms-tag" style="background:' + esc(accent) + '">' + esc(tag) + '</span>'
       + '<span class="ms-name">' + esc(name) + '</span>'
-      + '<span class="ms-state" data-role="state">—</span>'
+      + '<span class="ms-state" data-role="state" title="点卡片可只重连这一路">—</span>'
       + '<span class="ms-btns">'
       + '<select class="ms-qn" data-act="qn" title="这一路的画质"></select>'
       + '<input class="ms-vol" data-act="vol" type="range" min="0" max="100" value="0" title="这一路的音量">'
@@ -7116,6 +7116,11 @@
     src = src || {};                     // 「关注的直播」传 {info, stream}：按 uid 查、按房间取
     cell._s = s;                         // 单路画质/音量控件要按格重启，把数据挂在格子上
     cell._src = src;
+    /* 代次：同一个格子可能被重启多次（换画质、点卡片重连、看门狗重连），
+       每次重启都挂一只看门狗 —— 旧的那只必须能认出自己过期了，
+       否则几只狗同时咬同一格，会各自销毁对方刚建好的 player。 */
+    cell._gen = (cell._gen || 0) + 1;
+    var gen = cell._gen;
     var video = cell.querySelector('video');
     var off = cell.querySelector('.ms-off');
     var sub = cell.querySelector('.ms-off-sub');
@@ -7183,7 +7188,10 @@
           stateEl.textContent = '连接中断，重连中…（' + (attempt + 1) + '/' + maxTry + '）';
           multiTimers.push(setTimeout(function () { connect(qualities, attempt + 1); }, 3000));
         } else {
-          offline('连接中断，可点「刷新开播状态」重试');
+          var manual = cell._manual;      // 手动重连失败 → 文案要说清楚「再点一次卡片」
+          cell._manual = false;
+          offline(manual ? '重连失败，点卡片再试'
+                         : '连接中断，点卡片或「刷新开播状态」重试');
         }
       });
       /* 键取「格子的 DOM id」而不是 s.id：关注源的数据里根本没有 id 字段
@@ -7203,7 +7211,10 @@
        超过 12 秒没前进 → 销毁这一路重连（退避 2/4/6…秒，最多 5 次）。 */
     var lastT = -1, lastProgress = Date.now(), stallN = 0;
     var dog = setInterval(function () {
-      if (!cell.isConnected || state.view !== 'multi') { clearInterval(dog); return; }
+      if (!cell.isConnected || state.view !== 'multi' || cell._gen !== gen) {
+        clearInterval(dog);
+        return;
+      }
       var t = video.currentTime;
       if (t > lastT + 0.2) {
         lastT = t;
@@ -7220,7 +7231,7 @@
         return;                                      // 下一轮还不动就按卡死处理
       }
       lastProgress = Date.now();
-      if (++stallN > 5) { offline('画面已停止，点「刷新开播状态」重试'); return; }
+      if (++stallN > 5) { offline('画面已停止，点卡片或「刷新开播状态」重试'); return; }
       var dead = cell._p;
       if (dead) {
         try { dead.destroy(); } catch (e) { /* 已销毁 */ }
@@ -7247,11 +7258,21 @@
           sel.value = String(cell._qn || d.current_qn || d.qualities[0].qn);
         }
         if (!d || !d.living) {
+          cell._manual = false;          // 手动重连碰到「没开播」：这不是重连成功
           offline(d && d.title ? ('未开播 · ' + d.title) : '未开播');
           return;
         }
-        live(d.title);
         cell._qs = d.qualities || [];        // 看门狗重连时直接用这份档位表
+        if (cell._manual) {                  // 手动重连成功：给一条明确回执，4 秒后回到标题
+          cell._manual = false;
+          stateEl.textContent = '已重新连接 · ' + (d.title || '直播中');
+          if (off) off.style.display = 'none';
+          multiTimers.push(setTimeout(function () {
+            if (cell.isConnected && state.view === 'multi') live(d.title);
+          }, 4000));
+        } else {
+          live(d.title);
+        }
         connect(d.qualities, 0);
       })
       .catch(function () { offline('开播状态获取失败'); });
@@ -7399,6 +7420,7 @@
     var grid = document.getElementById('multi-grid');
     if (!grid || grid.getAttribute('data-bound') === '1') return;
     grid.setAttribute('data-bound', '1');
+    var dragEndAt = 0;              // 「刚拖完」的时间戳：拖动松手会补发一次 click，要吃掉
     grid.addEventListener('click', function (e) {
       var btn = e.target.closest ? e.target.closest('.ms-btn') : null;
       if (!btn) return;
@@ -7414,6 +7436,15 @@
           try { v.requestFullscreen(); } catch (err) { /* 浏览器拒绝就算了 */ }
         }
       }
+    });
+    /* 点卡片本体（不是底栏控件、不是缩放手柄）= 只重连这一路。
+       判据放在 click 上而不是 pointerdown：拖动换位用的是 pointerdown，两者不能抢。 */
+    grid.addEventListener('click', function (e) {
+      if (Date.now() - dragEndAt < 400) return;          // 刚拖过，这一下不算点击
+      if (e.target.closest &&
+          e.target.closest('.ms-btn, .ms-bar, .ms-h, .ms-min, select, input')) return;
+      var cell = e.target.closest ? e.target.closest('.ms-cell') : null;
+      if (cell) multiReconnect(cell);
     });
     // 每格独立音量与画质（参照 DD_Monitor：每一路都能单独调，不用动全局档）
     grid.addEventListener('input', function (e) {
@@ -7444,6 +7475,7 @@
       e.preventDefault();
       var box = grid.getBoundingClientRect();
       var sx = e.clientX, sy = e.clientY;
+      var movedPx = false;
       var r = {
         x: parseFloat(cell.style.left) || 0, y: parseFloat(cell.style.top) || 0,
         w: parseFloat(cell.style.width) || FREE_MIN_W,
@@ -7454,6 +7486,7 @@
       cell.classList.add('dragging');
 
       function moveTo(ev) {
+        movedPx = true;
         var dx = (ev.clientX - sx) / box.width * 100;
         var dy = (ev.clientY - sy) / box.height * 100;
         var x = r.x, y = r.y, w = r.w, h = r.h;
@@ -7487,6 +7520,7 @@
         window.removeEventListener('pointerup', stop);
         cell.classList.remove('dragging');
         saveFreeRects(grid);
+        if (movedPx) dragEndAt = Date.now();
       }
       window.addEventListener('pointermove', moveTo);
       window.addEventListener('pointerup', stop);
@@ -7537,6 +7571,7 @@
       cell.classList.remove('dragging');
       clearDrop();
       mdrag = null;
+      if (moved) dragEndAt = Date.now();      // 拖动松手会补发 click，别当成「点卡片重连」
       if (!moved || !over || over === cell) return;
       var lead = grid.querySelector('.ms-cell.lead');
       if (lead && (cell === lead || over === lead)) {
@@ -8194,6 +8229,23 @@
       return true;
     });
     startMultiCell(cell._s, cell, cell._src);
+  }
+
+  /* 单击卡片 = 只重连这一路：销毁这一格的 player、重新查一次开播状态再连回去。
+     只按这一格的 key 过滤 multiPlayers，别的格子、布局、聚焦状态都不动。
+     4 秒内重复点击忽略 —— 连点会堆出多条流，反而更容易卡。 */
+  function multiReconnect(cell) {
+    if (!cell || cell._busy) return;
+    cell._busy = true;
+    cell._manual = true;                     // 让后续文案知道这是「手动重连」
+    cell.classList.add('reconnecting');
+    var st = cell.querySelector('[data-role="state"]');
+    if (st) st.textContent = '正在重新连接…';
+    multiRestartCell(cell);
+    setTimeout(function () {
+      cell._busy = false;
+      cell.classList.remove('reconnecting');
+    }, 4000);
   }
 
   function multiAdd() {   // ＋ 添加直播间：房间号 / 直播间链接 / b23.tv 短链
