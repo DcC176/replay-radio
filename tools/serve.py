@@ -1381,15 +1381,64 @@ def _clip_unique(path):
     return path
 
 
+CLIP_W, CLIP_H = 1920, 1080          # 保存成品统一 1080p
+# scale 后再 pad：源不是 16:9 时补黑边而不是拉变形；setsar=1 免得某些播放器按
+# 非方形像素放大。源本来 1080p 时这一步等于恒等变换。
+CLIP_VF = ("scale=%d:%d:force_original_aspect_ratio=decrease,"
+           "pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1"
+           % (CLIP_W, CLIP_H, CLIP_W, CLIP_H))
+
+
+def _clip_req(bvid, cid):
+    return ("https://api.bilibili.com/x/player/playurl?bvid=%s&cid=%s"
+            % (urllib.parse.quote(bvid), urllib.parse.quote(str(cid))))
+
+
 def _clip_media(bvid, cid):
-    """取 mp4 直链。优先 720P，没登录/没权限时退回 480P/360P。"""
+    """取可剪辑的媒体地址，目标是 1080P。
+
+    ⚠️ B 站的 1080P 只走 DASH 通道（`durl` 单文件最高 720P）：所以先请求
+    `fnval=16&fourk=1&qn=80`，拿到「视频轨 + 音频轨」两条独立地址，交给 ffmpeg
+    用两个 -i 分别输入再合并。没登录 / 非大会员 / 撞 412 时 DASH 只给 480P 以下，
+    此时退回 `durl` 的既有链路（720P→480P→360P），成品由 CLIP_VF 放大到 1080p，
+    并在任务结果里用 srcHeight 标出真实源高度（不假装是原生 1080P）。
+    """
     last = ""
-    for qn in (64, 32, 16):
-        url = ("https://api.bilibili.com/x/player/playurl?bvid=%s&cid=%s&qn=%d"
-               "&fnval=1&fnver=0&fourk=0&platform=pc&high_quality=1"
-               % (urllib.parse.quote(bvid), urllib.parse.quote(str(cid)), qn))
+    ref = "https://www.bilibili.com/video/%s" % bvid
+    try:
+        d = bili_get(_clip_req(bvid, cid) + "&fnval=16&fnver=0&fourk=1&qn=80"
+                     "&platform=pc&high_quality=1", ref, fallback_anon=True)
+        if d.get("code") == 0:
+            data = d.get("data") or {}
+            dash = data.get("dash") or {}
+            vids = dash.get("video") or []
+            auds = dash.get("audio") or []
+            if vids and auds:
+                # 优先 id=80（1080P）；源只有 1080P60(116) 时也接受。同高度取码率高的。
+                def _rank(v):
+                    return (int(v.get("height") or 0) >= 1080,
+                            int(v.get("id") or 0) == 80,
+                            int(v.get("height") or 0),
+                            int(v.get("bandwidth") or 0))
+                v = max(vids, key=_rank)
+                a = max(auds, key=lambda x: int(x.get("bandwidth") or 0))
+                vu = v.get("baseUrl") or v.get("base_url")
+                au = a.get("baseUrl") or a.get("base_url")
+                if vu and au:
+                    return {"kind": "dash", "v": vu, "a": au,
+                            "id": v.get("id"),
+                            "width": int(v.get("width") or 0),
+                            "height": int(v.get("height") or 0)}
+            last = "DASH 无可用轨道"
+        else:
+            last = "code=%s" % d.get("code")
+    except Exception as e:
+        last = str(e)
+    for qn in (80, 64, 32, 16):
+        url = (_clip_req(bvid, cid) + "&qn=%d" % qn
+               + "&fnval=1&fnver=0&fourk=0&platform=pc&high_quality=1")
         try:
-            d = bili_get(url, "https://www.bilibili.com/video/%s" % bvid, fallback_anon=True)
+            d = bili_get(url, ref, fallback_anon=True)
         except Exception as e:
             last = str(e)
             continue
@@ -1399,7 +1448,8 @@ def _clip_media(bvid, cid):
         data = d.get("data") or {}
         durl = (data.get("durl") or [{}])[0]
         if durl.get("url"):
-            return durl["url"], data.get("quality")
+            return {"kind": "durl", "url": durl["url"],
+                    "id": data.get("quality"), "width": 0, "height": 0}
         last = "没有 durl"
     raise RuntimeError(last or "取不到播放地址")
 
@@ -1420,15 +1470,28 @@ def _clip_worker(items, outdir):
         with CLIP_LOCK:
             CLIP_JOB.update(idx=i + 1, current=name)
         try:
-            media, qn = _clip_media(it["bvid"], it["cid"])
+            media = _clip_media(it["bvid"], it["cid"])
             dur = max(0.5, min(CLIP_MAX_SEC, float(it["end"]) - float(it["start"])))
-            cmd = [ff, "-hide_banner", "-loglevel", "error", "-progress", "pipe:1",
-                   "-nostats", "-headers", hdr,
-                   "-ss", "%.3f" % float(it["start"]), "-i", media,
-                   "-t", "%.3f" % dur,
-                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                   "-c:a", "aac", "-b:a", "128k",
-                   "-movflags", "+faststart", "-y", out]
+            ss = "%.3f" % float(it["start"])
+            tail = ["-t", "%.3f" % dur,
+                    "-vf", CLIP_VF,
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    # 1080p 给个上限，避免高动态画面把文件堆到几百兆；1 小时最长 4.5GB
+                    "-maxrate", "10M", "-bufsize", "20M", "-profile:v", "high",
+                    "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+                    "-sn", "-dn",
+                    "-movflags", "+faststart", "-y", out]
+            if media["kind"] == "dash":
+                # 两路输入各带一次 -ss：只会作用于紧随其后的那个 -i
+                cmd = [ff, "-hide_banner", "-loglevel", "error", "-progress", "pipe:1",
+                       "-nostats",
+                       "-headers", hdr, "-ss", ss, "-i", media["v"],
+                       "-headers", hdr, "-ss", ss, "-i", media["a"],
+                       "-map", "0:v:0", "-map", "1:a:0"] + tail
+            else:
+                cmd = [ff, "-hide_banner", "-loglevel", "error", "-progress", "pipe:1",
+                       "-nostats", "-headers", hdr,
+                       "-ss", ss, "-i", media["url"]] + tail
             # stderr 并进 stdout：分开两个管道又只读一个，错误多一点就会把 ffmpeg 卡死
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, encoding="utf-8", errors="ignore",
@@ -1449,7 +1512,11 @@ def _clip_worker(items, outdir):
                 raise RuntimeError("".join(errbuf) or ("ffmpeg 退出码 %s" % proc.returncode))
             with CLIP_LOCK:
                 CLIP_JOB["done"].append({"name": name, "path": out, "ok": True,
-                                         "quality": qn, "seconds": round(dur, 1)})
+                                         "quality": media.get("id"),
+                                         "src": media["kind"],
+                                         "srcHeight": media.get("height") or 0,
+                                         "res": "%dx%d" % (CLIP_W, CLIP_H),
+                                         "seconds": round(dur, 1)})
         except Exception as e:
             with CLIP_LOCK:
                 CLIP_JOB["done"].append({"name": name, "path": "", "ok": False,
