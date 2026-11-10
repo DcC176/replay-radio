@@ -4585,7 +4585,7 @@
         + '<code>tools/auto_segments.py</code> 自动标注，或在「标注」里手工标。</div>';
     } else {
       var curIdx = chapterIndexNow();
-      var n = 0;
+      var n = 0, estN = 0;
       groups.forEach(function (g) {
         if (!g.segs.length) return;
         if (groups.length > 1) segHtml += '<div class="chap-part">分P ' + g.page + '</div>';
@@ -4604,34 +4604,46 @@
           // 自动标注的优先级：
           //   ① 人工读帧整理的内容标签（最准，但要人整理）
           //   ② 画面「已唱」浮层的登记时刻 —— 主播每开始唱一首就登记一次，
-          //      序号就是「第几首」；该项数与本场歌单对得上时，直接把歌名填上去
+          //      序号是「第几次登记」；该项数与本场歌单对得上时，直接把歌名填上去
           //   ③ 都没有才退回按段长估算（中位一首约 3.8 分钟）
+          // 标签必须写清来源：截图里「第16首」看着像全场第 16 首，其实是第 16 次登记，
+          // 中间漏读时两者不是一回事（用户 2026-11-10 反馈的误标）。
           var est = Math.max(1, Math.round((s.end - s.start) / 228));
-          var text = null, src = '';
-          if (L && L.label) { text = L.label; src = '内容来自人工读帧'; }
-          else if (S) {
+          var text = null, src = '', kind = '';
+          if (L && L.label) {
+            text = L.label; src = '内容来自人工读帧'; kind = 'manual';
+          } else if (S) {
             // 歌单与登记次数对得上才敢按序号取歌名 —— 对不上说明有漏读/多读，
             // 错位标歌名比不标更糟
             if (mySongs.length === S.total && mySongs[S.k - 1]) {
-              text = mySongs[S.k - 1];
-              src = '本场歌单第 ' + S.k + ' 首（画面「已唱」登记点对齐）';
+              text = '第 ' + S.k + ' 次 · ' + mySongs[S.k - 1];
+              src = '画面「已唱」登记第 ' + S.k + ' 次，与歌单第 ' + S.k + ' 首对齐';
+              kind = 'named';
             } else {
-              text = '第 ' + S.k + ' 首'
+              text = '第 ' + S.k + ' 次'
                 + (S.n > 1 ? ' 起 · 含 ' + S.n + ' 首' : '');
-              src = '画面「已唱」浮层登记的第 ' + S.k + ' 首';
+              src = '画面「已唱」登记第 ' + S.k + ' 次（本场共 ' + S.total + ' 次；'
+                + '登记次数不等于歌曲总数，漏读时序号会偏小）'
+                + (mySongs.length && mySongs.length !== S.total
+                   ? '；歌单 ' + mySongs.length + ' 首，数量对不上，不标歌名' : '');
+              kind = 'counted';
             }
           } else {
             text = isMusic ? ('约 ' + est + ' 首') : ('第 ' + n + ' 段');
-            src = isMusic ? '该场画面未显示歌名或歌词，此处按段长估算'
-                          : '该场画面未显示文字信息，此处按段落定位';
+            src = isMusic ? '该段没识别到歌名，按段长估算' : '该场画面未显示文字信息，按段落定位';
+            kind = isMusic ? 'estimated' : 'segment';
+            if (isMusic) estN++;          // 非唱歌场没有歌名是正常的，不算「没识别到」
           }
-          var tip = [];
+          var tip = [fmtClock(s.start) + ' – ' + fmtClock(s.end)
+                     + '（' + ((s.end - s.start) / 60).toFixed(1) + ' 分钟）',
+                     text, src];
           if (L && L.sub) tip.push(L.sub);
-          tip.push(src);
-          tip.push(fmtClock(s.start) + ' – ' + fmtClock(s.end)
-                   + '（' + ((s.end - s.start) / 60).toFixed(1) + ' 分钟）');
+          var aria = '第 ' + n + ' 段，' + fmtClock(s.start) + ' 到 ' + fmtClock(s.end)
+                   + '，' + text;
           segHtml += '<button class="' + cls + '" data-cid="' + g.cid
-            + '" data-start="' + s.start + '" title="' + esc(tip.join(' · ')) + '">'
+            + '" data-start="' + s.start + '" data-end="' + s.end
+            + '" data-kind="' + kind + '"'
+            + ' aria-label="' + esc(aria) + '" title="' + esc(tip.join(' · ')) + '">'
             + '<span class="ci">' + n + '</span>'
             + '<span class="ct">' + fmtClock(s.start) + '</span>'
             + '<span class="cl">' + esc(text) + '</span>'
@@ -4641,6 +4653,20 @@
       });
     }
 
+    // 估算段的数量直接写在面板里：用户能一眼看出哪些段是猜的，而不是把「约 3 首」
+    // 当成已经核对过的结果。
+    var note = document.getElementById('chap-note');
+    if (note) {
+      note.textContent = estN
+        ? '本场有 ' + estN + ' 段没识别到歌名，已按段长估算；可在「标注」里修正边界。'
+        : '';
+    }
+    var note2 = document.getElementById('strip-left-note');
+    if (note2) {
+      note2.textContent = estN
+        ? '第 N 次 = 已唱第 N 次登记 · 其中 ' + estN + ' 段为估算'
+        : '第 N 次 = 已唱第 N 次登记';
+    }
     var html = songHtml + segHtml;
     el.stripLeftBody.innerHTML = html;
     el.chapList.innerHTML = html;
@@ -6166,20 +6192,22 @@
       // 直接合并不冲突，但残留会让「换板块」后还认得别人的分P）
       window.SEGMENTS = {};
       window.SUNGKEYS = {};
-      // 登记时刻（自动标注用）与分段同源同目录，一起取回合并
+      // 歌单/人工标注保留静态文件里的旧数据（cid 全局唯一，合并不会串人）
+      window.SETLISTS = window.SETLISTS || {};
+      window.SEGLABELS = window.SEGLABELS || {};
+      // 分段 / 登记时刻 / 歌单 / 人工标注四份同源同目录，一起取回合并。
+      // 以前后两份只走全局静态文件 → 一个主播的歌单和标注没法跟着它走。
       return Promise.all(ST_SET.map(function (id) {
         var q = '?station=' + encodeURIComponent(id);
-        return Promise.all([
-          fetch('data/segments.js' + q).then(function (r) { return r.ok ? r.text() : ''; })
-            .then(segObject).catch(function () { return null; }),
-          fetch('data/sung.js' + q).then(function (r) { return r.ok ? r.text() : ''; })
-            .then(segObject).catch(function () { return null; })
-        ]);   // 离线时忽略，页面会提示没有分段
+        return Promise.all(['segments', 'sung', 'setlists', 'labels'].map(function (name) {
+          return fetch('data/' + name + '.js' + q)
+            .then(function (r) { return r.ok ? r.text() : ''; })
+            .then(segObject).catch(function () { return null; });
+        }));   // 离线时忽略，页面会提示没有分段
       })).then(function (pairs) {
-        var merged = {};
-        var keys = {};
+        var boxes = [{}, {}, {}, {}];
         pairs.forEach(function (pair) {
-          [merged, keys].forEach(function (box, i) {
+          boxes.forEach(function (box, i) {
             var o = pair[i];
             if (!o) return;
             for (var k in o) {
@@ -6187,8 +6215,10 @@
             }
           });
         });
-        window.SEGMENTS = merged;
-        window.SUNGKEYS = keys;
+        window.SEGMENTS = boxes[0];
+        window.SUNGKEYS = boxes[1];
+        window.SETLISTS = boxes[2];
+        window.SEGLABELS = boxes[3];
       });
     }
 

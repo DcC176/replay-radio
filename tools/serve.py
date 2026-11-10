@@ -1006,6 +1006,25 @@ def station_sung_js(key):
         return "window.SUNGKEYS = {};\n"
 
 
+def station_sidecar_js(key, fname, var):
+    """按主播取 setlists.js / labels.js；没指定主播时返回 None（落回静态文件）。
+
+    cid 全局唯一，顶层那份理论上也能混用；但「这位主播写了什么」跟着主播目录走
+    才不会在换主播/删主播后把别人的歌单或人工标注端给下一位。
+    """
+    key = str(key or "").strip()
+    if not key:
+        return None
+    st = find_station(key)
+    if not st:
+        return "window.%s = {};\n" % var
+    try:
+        with open(os.path.join(station_dir(st), fname), encoding="utf-8", newline="") as f:
+            return f.read()
+    except OSError:
+        return "window.%s = {};\n" % var
+
+
 def api_stations():
     """GET /api/stations —— 主播列表（含各自是否有回放清单）。"""
     series_kick()          # 还没发现过就在后台补，接口本身不等它
@@ -6047,11 +6066,19 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_weibo_login_poll())
         if parsed.path == "/api/series":
             return self._json(*api_series_status())
-        if parsed.path in ("/data/segments.js", "/data/sung.js"):
+        if parsed.path in ("/data/segments.js", "/data/sung.js",
+                           "/data/setlists.js", "/data/labels.js"):
             # 带 station 时按主播给；不带则落回静态文件（首屏引导等场景）。
-            # 两者同源同目录：分段和「第几首」的登记时刻必须来自同一位主播。
-            _txt = (station_segments_js if parsed.path.endswith("segments.js")
-                    else station_sung_js)(q.get("station", [""])[0])
+            # 四份同源同目录：分段、登记时刻、歌单、人工标注必须来自同一位主播。
+            _sid = q.get("station", [""])[0]
+            if parsed.path.endswith("segments.js"):
+                _txt = station_segments_js(_sid)
+            elif parsed.path.endswith("sung.js"):
+                _txt = station_sung_js(_sid)
+            elif parsed.path.endswith("setlists.js"):
+                _txt = station_sidecar_js(_sid, "setlists.js", "SETLISTS")
+            else:
+                _txt = station_sidecar_js(_sid, "labels.js", "SEGLABELS")
             if _txt is not None:
                 _body = _txt.encode("utf-8")
                 self.send_response(200)
