@@ -1330,6 +1330,239 @@ def api_playurl(query):
     }
 
 
+# ---------------------------------------------------------------- 片段保存
+# 把「选中的分段」剪成 mp4 存到本机。ffmpeg 重新编码（不 -c copy）：
+# 分段边界是任意秒，copy 只能从关键帧开始，头尾会多出几百毫秒到几秒。
+CLIP_LOCK = threading.Lock()
+CLIP_JOB = {"running": False, "idx": 0, "total": 0, "current": "", "dir": "",
+            "done": [], "error": "", "started": 0.0, "cancel": False}
+CLIP_MAX_ITEMS = 40
+CLIP_MAX_SEC = 3600
+
+
+def _clip_default_dir():
+    return os.path.join(os.path.expanduser("~"), "Videos", "噼里啪啦")
+
+
+def _clip_check_dir(raw):
+    """只接受绝对路径；不许写到系统目录/Program Files。"""
+    d = os.path.abspath(os.path.expanduser(str(raw or "").strip()))
+    if not d or not os.path.isabs(d):
+        return None
+    low = d.lower().rstrip("\\/")
+    bad = [os.environ.get("WINDIR", r"C:\Windows").lower().rstrip("\\/"),
+           r"c:\program files", r"c:\program files (x86)"]
+    for b in bad:
+        if b and (low == b or low.startswith(b + os.sep)):
+            return None
+    return d
+
+
+def _clip_fmt(t):
+    t = max(0, int(round(t)))
+    return "%02d-%02d-%02d" % (t // 3600, (t % 3600) // 60, t % 60)
+
+
+def _clip_name(title, n, start, end):
+    s = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", str(title or "片段")).strip(" ._")[:48]
+    if not s:
+        s = "片段"
+    return "%s_第%02d段_%s~%s.mp4" % (s, int(n or 1), _clip_fmt(start), _clip_fmt(end))
+
+
+def _clip_unique(path):
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    for i in range(2, 100):
+        p = "%s_%d%s" % (base, i, ext)
+        if not os.path.exists(p):
+            return p
+    return path
+
+
+def _clip_media(bvid, cid):
+    """取 mp4 直链。优先 720P，没登录/没权限时退回 480P/360P。"""
+    last = ""
+    for qn in (64, 32, 16):
+        url = ("https://api.bilibili.com/x/player/playurl?bvid=%s&cid=%s&qn=%d"
+               "&fnval=1&fnver=0&fourk=0&platform=pc&high_quality=1"
+               % (urllib.parse.quote(bvid), urllib.parse.quote(str(cid)), qn))
+        try:
+            d = bili_get(url, "https://www.bilibili.com/video/%s" % bvid, fallback_anon=True)
+        except Exception as e:
+            last = str(e)
+            continue
+        if d.get("code") != 0:
+            last = "code=%s" % d.get("code")
+            continue
+        data = d.get("data") or {}
+        durl = (data.get("durl") or [{}])[0]
+        if durl.get("url"):
+            return durl["url"], data.get("quality")
+        last = "没有 durl"
+    raise RuntimeError(last or "取不到播放地址")
+
+
+def _clip_worker(items, outdir):
+    global CLIP_JOB
+    try:
+        from auto_segments import NO_WINDOW, HIDE_SI
+    except Exception:
+        NO_WINDOW, HIDE_SI = 0, None
+    ff = seg_ffmpeg()
+    hdr = "Referer: https://www.bilibili.com\r\nUser-Agent: %s\r\n" % UA
+    for i, it in enumerate(items):
+        if CLIP_JOB.get("cancel"):
+            break
+        name = _clip_name(it.get("title"), it.get("n"), it["start"], it["end"])
+        out = _clip_unique(os.path.join(outdir, name))
+        with CLIP_LOCK:
+            CLIP_JOB.update(idx=i + 1, current=name)
+        try:
+            media, qn = _clip_media(it["bvid"], it["cid"])
+            dur = max(0.5, min(CLIP_MAX_SEC, float(it["end"]) - float(it["start"])))
+            cmd = [ff, "-hide_banner", "-loglevel", "error", "-progress", "pipe:1",
+                   "-nostats", "-headers", hdr,
+                   "-ss", "%.3f" % float(it["start"]), "-i", media,
+                   "-t", "%.3f" % dur,
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                   "-c:a", "aac", "-b:a", "128k",
+                   "-movflags", "+faststart", "-y", out]
+            # stderr 并进 stdout：分开两个管道又只读一个，错误多一点就会把 ffmpeg 卡死
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding="utf-8", errors="ignore",
+                                    creationflags=NO_WINDOW, startupinfo=HIDE_SI)
+            errbuf = []
+            for line in proc.stdout:
+                if line.startswith("out_time_ms="):
+                    try:
+                        done = float(line.split("=", 1)[1]) / 1e6
+                        with CLIP_LOCK:
+                            CLIP_JOB["current"] = "%s（%d%%）" % (name, min(99, int(done * 100 / dur)))
+                    except (ValueError, ZeroDivisionError):
+                        pass
+                elif line.strip() and "=" not in line[:24]:
+                    errbuf.append(line.strip())
+            proc.wait(timeout=1800)
+            if proc.returncode != 0:
+                raise RuntimeError("".join(errbuf) or ("ffmpeg 退出码 %s" % proc.returncode))
+            with CLIP_LOCK:
+                CLIP_JOB["done"].append({"name": name, "path": out, "ok": True,
+                                         "quality": qn, "seconds": round(dur, 1)})
+        except Exception as e:
+            with CLIP_LOCK:
+                CLIP_JOB["done"].append({"name": name, "path": "", "ok": False,
+                                         "error": str(e)[:300]})
+    with CLIP_LOCK:
+        CLIP_JOB.update(running=False, idx=CLIP_JOB["total"], current="")
+
+
+def api_clip_start(obj):
+    global CLIP_JOB
+    items = obj.get("items")
+    if not isinstance(items, list) or not items:
+        return 400, {"error": "没有选中任何分段"}
+    if len(items) > CLIP_MAX_ITEMS:
+        return 400, {"error": "一次最多保存 %d 段" % CLIP_MAX_ITEMS}
+    outdir = _clip_check_dir(obj.get("dir") or _clip_default_dir())
+    if not outdir:
+        return 400, {"error": "保存路径不合法（不能写系统目录）"}
+    try:
+        os.makedirs(outdir, exist_ok=True)
+    except OSError as e:
+        return 400, {"error": "创建目录失败：%s" % e}
+    if seg_ffmpeg() == "":
+        return 400, {"error": "本机没找到 ffmpeg，无法保存"}
+    clean = []
+    for it in items:
+        try:
+            bvid = str(it.get("bvid") or "").strip()
+            cid = str(it.get("cid") or "").strip()
+            a = max(0.0, float(it.get("start")))
+            b = float(it.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if not bvid or not cid or not (b > a):
+            continue
+        clean.append({"bvid": bvid, "cid": cid, "start": a, "end": b,
+                      "title": str(it.get("title") or ""), "n": it.get("n") or 1})
+    if not clean:
+        return 400, {"error": "分段数据不完整"}
+    with CLIP_LOCK:
+        if CLIP_JOB.get("running"):
+            return 409, {"error": "上一批还在保存，请等它结束"}
+        CLIP_JOB = {"running": True, "idx": 0, "total": len(clean), "current": "",
+                    "dir": outdir, "done": [], "error": "", "started": time.time(),
+                    "cancel": False}
+    t = threading.Thread(target=_clip_worker, args=(clean, outdir), daemon=True)
+    t.start()
+    return 200, {"ok": True, "total": len(clean), "dir": outdir}
+
+
+def api_clip_status():
+    with CLIP_LOCK:
+        d = dict(CLIP_JOB)
+    d["defaultDir"] = _clip_default_dir()
+    d["ffmpeg"] = seg_ffmpeg() != ""
+    return 200, d
+
+
+def _pick_dir_win32(initial=""):
+    """Windows 原生「选择文件夹」对话框（ctypes，不依赖 tk/Add-Type）。"""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ole32 = ctypes.windll.ole32
+        shell32 = ctypes.windll.shell32
+        ole32.CoInitialize(None)
+
+        class BROWSEINFOW(ctypes.Structure):
+            _fields_ = [("hwndOwner", wintypes.HWND), ("pidlRoot", ctypes.c_void_p),
+                        ("pszDisplayName", wintypes.LPWSTR), ("lpszTitle", wintypes.LPCWSTR),
+                        ("ulFlags", wintypes.UINT), ("lpfn", ctypes.c_void_p),
+                        ("lParam", wintypes.LPARAM), ("iImage", ctypes.c_int)]
+
+        BFFM_INITIALIZED = 1
+        BFFM_SETSELECTIONW = 0x400 + 102
+        WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HWND, ctypes.c_uint,
+                                     wintypes.WPARAM, wintypes.LPARAM)
+        init = os.path.abspath(initial) if initial else ""
+
+        def _cb(hwnd, msg, wp, lp):
+            if msg == BFFM_INITIALIZED and init:
+                shell32.SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, init)
+            return 0
+
+        fn = WNDPROC(_cb)
+        buf = ctypes.create_unicode_buffer(1024)
+        bi = BROWSEINFOW(None, None, buf, "选择保存片段的位置", 0, fn, 0, 0)
+        pidl = shell32.SHBrowseForFolderW(ctypes.byref(bi))
+        if not pidl:
+            return ""
+        try:
+            out = ctypes.create_unicode_buffer(2048)
+            if not shell32.SHGetPathFromIDListW(pidl, out):
+                return ""
+            return out.value
+        finally:
+            ole32.CoTaskMemFree(pidl)
+    except Exception:
+        return None
+
+
+def api_clip_pick(obj):
+    cur = _clip_check_dir(obj.get("initial") or _clip_default_dir()) or _clip_default_dir()
+    p = _pick_dir_win32(cur)
+    if p is None:
+        return 501, {"error": "这个系统不支持原生文件夹选择，请直接输入路径", "dir": ""}
+    if p == "":
+        return 200, {"ok": False, "dir": "", "cancelled": True}
+    return 200, {"ok": True, "dir": p}
+
+
 def api_status(force=False):
     """本机登录态。带 ?refresh=1 时绕过缓存（登录/登出之后必须拿到新结果）。"""
     if not force:
@@ -5992,6 +6225,8 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/playurl":
             code, obj = api_playurl(q)
             return self._json(code, obj)
+        if parsed.path == "/api/clip/status":
+            return self._json(*api_clip_status())
         if parsed.path == "/api/dd/actions":
             return self._json(*api_dd_actions(q))
         if parsed.path == "/api/dd/profile":
@@ -6177,6 +6412,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_segments_refresh())
         if parsed.path == "/api/segments/save":
             return self._json(*api_segments_save(obj))
+        if parsed.path == "/api/clip/start":
+            return self._json(*api_clip_start(obj))
+        if parsed.path == "/api/clip/pick":
+            return self._json(*api_clip_pick(obj))
         if parsed.path == "/api/series/refresh":
             return self._json(*api_series_refresh(obj))
         if parsed.path == "/api/page/bye":

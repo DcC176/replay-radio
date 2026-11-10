@@ -1386,6 +1386,32 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
 .chap-list { display: flex; flex-direction: column; gap: 4px; overflow-x: hidden; }
 .chap-list { max-height: 250px; overflow-y: auto; overflow-x: hidden; }
 
+/* 片段保存：多选条 + 每行左侧的勾选框（只在 .clip-mode 下出现） */
+.clip-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 2px 0 8px; }
+.clip-count { font-size: var(--fs-fine); color: var(--muted-2); min-width: 62px; }
+.clip-dir {
+  flex: 1 1 190px; min-width: 130px;
+  padding: 6px 9px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel);
+  color: var(--text); font: inherit; font-size: var(--fs-fine); outline: none;
+}
+.clip-dir:focus { border-color: color-mix(in srgb, var(--red) 55%, var(--line)); }
+.clip-note { font-size: var(--fs-fine); line-height: 1.6; color: var(--muted); margin: 0 0 8px; }
+.clip-note:empty { display: none; }
+.cpick {
+  display: none; flex: none; position: relative;
+  width: 14px; height: 14px; border-radius: 4px;
+  border: 1px solid var(--line-2); background: var(--panel);
+}
+.chapters-panel.clip-mode .cpick { display: block; }
+.chap.picked { background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 42%, transparent); }
+.chap.picked .cpick { background: var(--red); border-color: var(--red); }
+.chap.picked .cpick::after {
+  content: ''; position: absolute; left: 4px; top: 1px;
+  width: 4px; height: 8px; transform: rotate(45deg);
+  border: solid var(--on-red); border-width: 0 2px 2px 0;
+}
+
 .chap {
   display: flex;
   align-items: center;

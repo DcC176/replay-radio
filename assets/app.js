@@ -1636,7 +1636,7 @@
        ⚠️ 与 `sort` 不是一回事：`sort` 只管列表怎么排，这个决定频道按什么顺序往下放。 */
     playOrder: (function () {
       var v = store.get('xl_play_order', 'shuffle');
-      return (v === 'seq' || v === 'rev') ? v : 'shuffle';
+      return (v === 'seq' || v === 'rev' || v === 'sing') ? v : 'shuffle';
     })(),
     page: 1,
     cycle: null,
@@ -1650,6 +1650,10 @@
     skip: store.get('xl_skip', false),      // 跳过空白片段
     marking: false,
     chapKey: '',                            // 当前片段标识，用于避免每秒重渲染
+    clipMode: false,                        // 分段列表进入「多选保存」模式
+    clipSel: {},                            // 选中项：cid@start -> 1（跨重渲染保留）
+    clipMeta: {},                           // 选中项对应的 bvid/cid/起止/标题
+    clipBusy: false,                        // 正在保存，防重复提交
     qn: store.get('xl_qn', 80),             // 请求的清晰度；B 站会按登录态降级到最高可用
     qnDegraded: false,                      // 本次档位是不是「降级来的」（是的话不写进 xl_qn）
     playlistCycle: false,                   // 当前时间轴是不是「借来的歌单」（离开歌单页要还回去）
@@ -1774,6 +1778,35 @@
   // exemptCid：这一支不参与本次规则（切换开关时它就是正在播的那支，见 btnSkip）
   // 读的是 state.exemptCid 而**不是调用参数** —— 豁免要跨多次重建一直生效，
   // 否则任何一次后台重建都会把正在播的那一支重新切碎（详见 state 里的注释）。
+  /* 「仅播放唱歌」用的时间轴单元：只取**有登记点**的段，并按登记点把段内的
+     聊天/空白切掉（一首歌一个单元）。
+     - 有 sung.js：每个登记点 = 一首歌的起点，单元从该点开始、到下一个点或段尾结束；
+       没有登记点的段（聊天、空白、漏读段）直接跳过。
+     - 没有任何登记点：无法区分歌与聊天，只能按整段铺（宁可多放一点，也不整场空）。
+     顺序由 buildCycle 统一按发布时间排，这里只负责「选中哪些秒」。 */
+  function singUnits(part) {
+    var segs = segmentsOf(part.cid);
+    if (!segs || !segs.length) return [];
+    var keys = (window.SUNGKEYS || {})[String(part.cid)] || [];
+    var out = [];
+    segs.slice().sort(function (a, b) { return a.start - b.start; }).forEach(function (s) {
+      if (!s || !(s.end > s.start)) return;
+      var a0 = Math.max(0, s.start), b0 = Math.min(s.end, part.duration);
+      if (b0 - a0 < 20) return;
+      if (!keys.length) {
+        out.push({ start: a0, duration: b0 - a0, label: s.label || '' });
+        return;
+      }
+      var inside = keys.filter(function (k) { return k >= a0 && k < b0; }).sort(function (x, y) { return x - y; });
+      inside.forEach(function (k, i) {
+        var nxt = (i + 1 < inside.length) ? inside[i + 1] : b0;
+        var d = Math.min(nxt, b0) - Math.max(k, a0);
+        if (d >= 20) out.push({ start: Math.max(k, a0), duration: d, label: s.label || '' });
+      });
+    });
+    return out;
+  }
+
   function effectiveUnits(part) {
     if (String(part.cid) === String(state.exemptCid)) {
       return [{ start: 0, duration: part.duration, label: '' }];
@@ -1817,7 +1850,14 @@
        随机 = 下面那条确定性洗牌。
        ⚠️ 「相邻同类穿插」只在随机时做 —— 顺序/倒叙是用户明确点的时间顺序，
        再拿分类去穿插就等于没听他的。 */
-    if (state.playOrder === 'seq' || state.playOrder === 'rev') {
+    if (state.playOrder === 'sing') {
+      // 只留唱歌场，按发布时间正序 —— 用户明确要「保持原有时间线顺序」
+      arr = programs.filter(function (p) { return !!MUSIC_CATS[p.category]; })
+        .slice().sort(function (a, b) {
+          return (a.pubdate - b.pubdate)
+            || (a.bvid === b.bvid ? 0 : (a.bvid < b.bvid ? -1 : 1));
+        });
+    } else if (state.playOrder === 'seq' || state.playOrder === 'rev') {
       var dir = state.playOrder === 'seq' ? 1 : -1;
       arr = programs.slice().sort(function (a, b) {
         // pubdate 相同（同一天发好几期）时用 bvid 兜底，保证同一份输入永远同一条时间轴
@@ -1846,7 +1886,7 @@
     var acc = 0;
     arr.forEach(function (p) {
       p.parts.forEach(function (part) {
-        effectiveUnits(part).forEach(function (u) {
+        (state.playOrder === 'sing' ? singUnits(part) : effectiveUnits(part)).forEach(function (u) {
           segments.push({
             bvid: p.bvid,
             page: part.page,
@@ -1894,7 +1934,7 @@
     var pool = state.all.filter(function (p) {
       // pinBvid：切标签时把正在播、但不属于新标签的那一支留在池子里
       return !Object.keys(state.cats).length || state.cats[p.category]
-        || (state.pinBvid && p.bvid === state.pinBvid);
+        || (state.playOrder !== 'sing' && state.pinBvid && p.bvid === state.pinBvid);
     });
     state.cycle = buildCycle(pool);
     // soft：只是后台抓到新清单后换一份，播放中的那一段不能被打断
@@ -2003,8 +2043,25 @@
     if (state.view === 'schedule') renderSchedule();
   }
 
+  /* 只读调试出口（与 window.__PALETTE 同理）：验证「仅播放唱歌」时能直接看
+     时间轴里到底铺了哪些段，不用靠画面猜。只返回副本，不暴露可变引用。 */
+  window.__RR = {
+    cycle: function () {
+      var c = state.cycle || { total: 0, segments: [] };
+      return {
+        order: state.playOrder, total: c.total,
+        segments: (c.segments || []).map(function (s) {
+          return { bvid: s.bvid, cid: s.cid, page: s.page,
+                   title: s.program && s.program.title,
+                   category: s.program && s.program.category,
+                   start: s.start, t0: s.t0, duration: s.duration, label: s.label };
+        })
+      };
+    }
+  };
+
   function setPlayOrder(v) {
-    if (v !== 'seq' && v !== 'rev' && v !== 'shuffle') return;
+    if (v !== 'seq' && v !== 'rev' && v !== 'shuffle' && v !== 'sing') return;
     if (v === state.playOrder) return;
     state.playOrder = v;
     store.set('xl_play_order', v);
@@ -2424,8 +2481,13 @@
 
   function renderIdle() {
     el.npCat.textContent = '—';
-    el.npTitle.textContent = '当前筛选下没有可播放内容';
-    el.npMeta.textContent = '请至少选择一个分类';
+    if (state.playOrder === 'sing') {
+      el.npTitle.textContent = '没有已标记的唱歌分段';
+      el.npMeta.textContent = '可切回「顺序播放」，或先在「标注」里给唱歌段做分段';
+    } else {
+      el.npTitle.textContent = '当前筛选下没有可播放内容';
+      el.npMeta.textContent = '请至少选择一个分类';
+    }
     el.npBar.style.width = '0%';
     el.npPos.textContent = '--:--';
     el.npDur.textContent = '--:--';
@@ -4548,6 +4610,8 @@
   }
 
   function renderChapters() {
+    /* clipMeta 只增不清：选中态按 cid@start 记，切到别的节目再回来也不能丢；
+       cid 全局唯一，旧条目不会和别的节目撞键。 */
     var seg = currentSeg();
     if (!seg) {
       el.stripLeftBody.innerHTML = '<div class="chap-empty">—</div>';
@@ -4640,10 +4704,19 @@
           if (L && L.sub) tip.push(L.sub);
           var aria = '第 ' + n + ' 段，' + fmtClock(s.start) + ' 到 ' + fmtClock(s.end)
                    + '，' + text;
+          var key = g.cid + '@' + s.start;
+          state.clipMeta[key] = {
+            bvid: p.bvid, cid: g.cid, page: g.page,
+            start: s.start, end: s.end, title: p.title, n: n
+          };
+          if (state.clipSel[key]) cls += ' picked';
           segHtml += '<button class="' + cls + '" data-cid="' + g.cid
             + '" data-start="' + s.start + '" data-end="' + s.end
-            + '" data-kind="' + kind + '"'
+            + '" data-kind="' + kind + '" data-key="' + esc(key) + '"'
+            + ' data-bvid="' + esc(p.bvid) + '" data-n="' + n + '"'
+            + ' aria-pressed="' + (state.clipSel[key] ? 'true' : 'false') + '"'
             + ' aria-label="' + esc(aria) + '" title="' + esc(tip.join(' · ')) + '">'
+            + '<span class="cpick" aria-hidden="true"></span>'
             + '<span class="ci">' + n + '</span>'
             + '<span class="ct">' + fmtClock(s.start) + '</span>'
             + '<span class="cl">' + esc(text) + '</span>'
@@ -4671,6 +4744,7 @@
     el.stripLeftBody.innerHTML = html;
     el.chapList.innerHTML = html;
     centerActive();
+    updateClipBar();
   }
 
   // 让当前片段保持在可视区域中间（只在重渲染时执行，不干扰手动滚动）
@@ -5110,7 +5184,145 @@
     var next = typeof on === 'boolean' ? on : el.chaptersPanel.hidden;
     el.chaptersPanel.hidden = !next;
     el.btnChapters.setAttribute('aria-expanded', String(next));
-    if (next) renderChapters();
+    if (next) {
+      renderChapters();
+      clipEnsureDir();
+    }
+  }
+
+  /* ---------------------------------------------------------- 片段保存
+     在分段面板里多选，逐段剪成 mp4 存到本机。选中态按 cid@start 记，
+     重画/切段都不会掉；真正保存的条目以本轮渲染出来的 clipMeta 为准。 */
+  function clipNote(txt) {
+    var n = document.getElementById('clip-note');
+    if (n) n.textContent = txt || '';
+  }
+
+  function clipSelectedCount() {
+    var n = 0;
+    for (var k in state.clipSel) {
+      if (state.clipSel[k] && state.clipMeta[k]) n++;
+    }
+    return n;
+  }
+
+  function updateClipBar() {
+    var panel = document.getElementById('chapters-panel');
+    if (panel) panel.classList.toggle('clip-mode', state.clipMode);
+    var mode = document.getElementById('clip-mode');
+    if (mode) {
+      mode.textContent = state.clipMode ? '退出多选' : '选择片段';
+      mode.setAttribute('aria-pressed', state.clipMode ? 'true' : 'false');
+    }
+    var cnt = document.getElementById('clip-count');
+    if (cnt) cnt.textContent = '已选 ' + clipSelectedCount() + ' 段';
+    var save = document.getElementById('clip-save');
+    if (save) save.disabled = state.clipBusy || clipSelectedCount() === 0;
+    Array.prototype.forEach.call(document.querySelectorAll('#chap-list .chap'), function (b) {
+      var k = b.getAttribute('data-key');
+      var on = !!(state.clipSel[k] && state.clipMeta[k]);
+      b.classList.toggle('picked', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+
+  function setClipMode(on) {
+    state.clipMode = !!on;
+    if (state.clipMode && el.chaptersPanel.hidden) toggleChapters(true);
+    updateClipBar();
+    if (state.clipMode) clipEnsureDir();
+  }
+
+  function toggleClipPick(btn) {
+    var k = btn.getAttribute('data-key');
+    if (!k) return;
+    if (state.clipSel[k]) delete state.clipSel[k];
+    else state.clipSel[k] = 1;
+    updateClipBar();
+  }
+
+  function clipEnsureDir() {
+    var inp = document.getElementById('clip-dir');
+    if (!inp) return;
+    if (!inp.value) inp.value = store.get('xl_clip_dir', '') || '';
+    if (inp.value) return;
+    fetch('/api/clip/status').then(function (r) { return r.json(); }).then(function (d) {
+      if (!inp.value && d && d.defaultDir) inp.value = d.defaultDir;
+    }).catch(function () { /* 离线时留空，保存时会用默认目录 */ });
+  }
+
+  function pickClipDir() {
+    var inp = document.getElementById('clip-dir');
+    if (!inp) return;
+    clipNote('请在弹窗里选择保存位置…');
+    postJSON('/api/clip/pick', { initial: inp.value || '' }).then(function (d) {
+      if (d && d.dir) {
+        inp.value = d.dir;
+        store.set('xl_clip_dir', d.dir);
+        clipNote('');
+      } else if (d && d.error) {
+        clipNote(d.error + '（可直接在上面的输入框里输入路径）');
+        inp.focus();
+      } else {
+        clipNote('已取消');
+      }
+    }).catch(function () { clipNote('打开文件夹选择器失败，请直接输入路径'); });
+  }
+
+  function saveClips() {
+    if (state.clipBusy) return;
+    var items = [];
+    Object.keys(state.clipSel).forEach(function (k) {
+      var m = state.clipMeta[k];
+      if (m && state.clipSel[k]) items.push(m);
+    });
+    items.sort(function (a, b) {
+      return (a.start - b.start) || (String(a.cid) < String(b.cid) ? -1 : 1);
+    });
+    if (!items.length) return;
+    var inp = document.getElementById('clip-dir');
+    var dir = inp ? inp.value.trim() : '';
+    state.clipBusy = true;
+    updateClipBar();
+    clipNote('正在准备保存 ' + items.length + ' 段…');
+    postJSON('/api/clip/start', { items: items, dir: dir }).then(function (d) {
+      if (!d || d.error) {
+        state.clipBusy = false;
+        updateClipBar();
+        clipNote((d && d.error) || '保存失败');
+        return;
+      }
+      if (d.dir && inp) {
+        inp.value = d.dir;
+        store.set('xl_clip_dir', d.dir);
+      }
+      clipPoll();
+    }).catch(function () {
+      state.clipBusy = false;
+      updateClipBar();
+      clipNote('提交失败，请检查本机服务是否在运行');
+    });
+  }
+
+  function clipPoll() {
+    fetch('/api/clip/status').then(function (r) { return r.json(); }).then(function (d) {
+      if (d.running) {
+        clipNote('保存中 ' + d.idx + '/' + d.total + '：' + (d.current || '…'));
+        setTimeout(clipPoll, 800);
+        return;
+      }
+      state.clipBusy = false;
+      updateClipBar();
+      var ok = (d.done || []).filter(function (x) { return x.ok; });
+      var bad = (d.done || []).filter(function (x) { return !x.ok; });
+      var msg = '已保存 ' + ok.length + ' 段到 ' + (d.dir || '');
+      if (bad.length) msg += '；失败 ' + bad.length + ' 段：' + (bad[0].error || '');
+      clipNote(msg);
+    }).catch(function () {
+      state.clipBusy = false;
+      updateClipBar();
+      clipNote('查询保存进度失败');
+    });
   }
 
   function syncSound() {
@@ -5477,10 +5689,33 @@
 
     el.btnChapters.addEventListener('click', function () { toggleChapters(); });
 
+    var clipModeBtn = document.getElementById('clip-mode');
+    if (clipModeBtn) clipModeBtn.addEventListener('click', function () { setClipMode(!state.clipMode); });
+    var clipPickBtn = document.getElementById('clip-pick');
+    if (clipPickBtn) clipPickBtn.addEventListener('click', pickClipDir);
+    var clipSaveBtn = document.getElementById('clip-save');
+    if (clipSaveBtn) clipSaveBtn.addEventListener('click', saveClips);
+    var clipOpenBtn = document.getElementById('btn-clip');
+    if (clipOpenBtn) clipOpenBtn.addEventListener('click', function () {
+      // 影院模式下面板被 CSS 藏起来（body.theater .chapters-panel{display:none}），
+      // 点了按钮却什么都不出现。先退回普通视图，再展开面板。
+      if (document.body.classList.contains('theater')) {
+        var th = document.getElementById('btn-theater');
+        if (th) th.click();
+      }
+      toggleChapters(true);
+      setClipMode(true);
+      clipNote('勾选要保存的分段，再点「保存为 MP4」');
+      el.chaptersPanel.scrollIntoView({ block: 'nearest' });
+    });
+    updateClipBar();
+
     [el.stripLeftBody, el.chapList].forEach(function (box) {
       box.addEventListener('click', function (e) {
         var b = e.target.closest('.chap[data-cid]');
-        if (b) jumpToSegment(b.getAttribute('data-cid'), parseInt(b.getAttribute('data-start'), 10));
+        if (!b) return;
+        if (box === el.chapList && state.clipMode) { toggleClipPick(b); return; }
+        jumpToSegment(b.getAttribute('data-cid'), parseInt(b.getAttribute('data-start'), 10));
       });
     });
 
@@ -7660,112 +7895,68 @@
   }
 
   /* ------------------------------------------------------------ 竖屏画面墙
-     横屏那套「底排 + 右列」在竖屏会塌：1156×1920 聚焦 7 路实测右列 5 格只有
-     140×103（名字读不出来），下方第二大的格子 1086×810 被 cover 裁成 1.34:1。
-     竖屏改成「纵向分层」，全部格子严格 16:9 + contain，谁都不裁不压：
-       · 第一带：主画面整行宽（最大），严格 16:9
-       · 第二带：左下「占比第二大」的格子 + 右侧一列**够宽**的副画面
-         （列宽 ≥240px、每格自身 16:9，与第二格同高、互不遮挡）
-       · 其余副画面按当前宽度分 1~4 列往下铺，单格不小于可读宽度
-       · 右列挤不到 240px 就不设右列；窄到 <520px 一律单列整行宽往下排
-     墙高按内容算（不再写死铺到 70vh）：放得下就没有空墙，放不下就墙内滚动。
-     宽高比 / 尺寸 / 横竖屏一变，applyMultiLayout 都会重跑这套几何。          */
-  var MULTI_P_RIGHT_MIN = 240;      // 右侧副画面最小可读宽（px）
-
+     竖屏只做一件事：**统一网格**。之前那套「主画面 + 70% 第二格 + 右列 + 按需分列」
+     在 656×1320 的监控室里排成了参差的几行（宽窄不一、最后一行孤零零一格、
+     行与行左右边缘都对不上），用户 2026-11-10 截图反馈。
+     现在：
+       · 宽度 ≥480 用 2 列，否则 1 列；
+       · 聚焦时主画面占 2 列（1 列时就是整行宽），严格 16:9；
+       · 自动模式下若「第一格放大 + 其余两列」放得进一屏，也放大第一格，
+         否则保持等宽网格（小窗优先不滚动）；
+       · 其余格子一律同宽同高，按列数往下铺；最后一行不足时贴左列；
+       · 间距仍是横屏的 4px，字号沿用同一套阶梯，不另做一套「竖屏小字」。
+     墙高按内容算：放得下就贴着内容，放不下就墙内滚动。 */
   function multiPortraitWall(availW, availH) {
     // 墙「高 > 宽」就按竖屏处理：窗口是不是竖屏会自然反映到这里，
     // 同一窗口里左栏收起/展开、侧栏占宽也会自动跟着换排法。
     return availH > availW * 1.05;
   }
 
-  /* 副画面用几列：取「总高最接近可用高度」的一档；放不下时允许墙内滚动，
-     但不为了塞进一屏把格子压到读不出。同分时优先单格更宽的那档。 */
-  function multiPortraitPickK(rest, availW, availH, usedH, minRead, kList) {
-    var best = null;
-    for (var i = 0; i < kList.length; i++) {
-      var k = kList[i];
-      var w = (availW - MULTI_GAP * (k - 1)) / k;
-      if (w < minRead) continue;
-      var rows = Math.ceil(rest / k);
-      var sh = Math.round(w * 9 / 16);
-      var h = rows * sh + MULTI_GAP * (rows - 1);
-      var H = usedH + h;
-      var score = Math.abs(H - availH) + (H > availH ? 60 : 0);
-      if (!best || score < best.score - 1e-9 ||
-          (Math.abs(score - best.score) < 1e-9 && w > best.w)) {
-        best = { k: k, w: w, sh: sh, h: h, H: H, rows: rows, score: score };
-      }
-    }
-    return best;
-  }
-
-  function multiPortraitLayout(grid, cells, availW, availH, winH) {
+  function multiPortraitLayout(grid, cells, availW, winH) {
     var g = MULTI_GAP;
     var n = cells.length;
     var order = multiOrderCells(cells);
     var focus = !!multiFocusId && n > 1 && multiLayout !== 'free';
-    // 只有真正窄（手机宽）才一律单列；600~760px 的竖屏分两列反而能一屏看完，
-    // 单列会把 7 路拉成 2800px 的长卷（实测 768×1280）。
-    var narrow = availW < 520;
-    var minRead = narrow ? 0 : 240;                 // 副画面下限：低于这个宽名字就挤没了
-    var boxes = [], y = 0, main = null, restOrder;
-
+    var cols = availW >= 480 ? 2 : 1;   // 600 宽窗口去掉左右内边距约 542，仍分两列
+    var cellW = Math.floor((availW - g * (cols - 1)) / cols);
+    var cellH = Math.round(cellW * 9 / 16);
+    var main = null;
+    var rest = order.slice();
     if (focus) {
       main = order.filter(function (x) {
         return x.getAttribute('data-id') === multiFocusId;
       })[0] || order[0];
-      restOrder = order.filter(function (x) { return x !== main; });
-      // 第一带：主画面整行宽，最大、严格 16:9
-      var mainH = Math.round(availW * 9 / 16);
-      boxes.push({ cell: main, x: 0, y: 0, w: availW, h: mainH });
-      // 第二带：左下的「占比第二大」格子 + 右侧一列够宽的副画面。
-      // 右列跟第二格同高，列宽 ≥240px 且自身 16:9 —— 不再出现 140×103 的窄条。
-      var secondW = narrow ? availW : Math.round(availW * 0.70);
-      var colW = narrow ? 0 : availW - secondW - g;
-      if (colW < MULTI_P_RIGHT_MIN) { colW = 0; secondW = availW; }
-      var secondH = Math.round(secondW * 9 / 16);
-      var y2 = mainH + g;
-      var rightCount = 0;
-      if (colW && n >= 3) {
-        var rh = Math.round(colW * 9 / 16);
-        rightCount = Math.min(n - 2, Math.max(1, Math.floor((secondH + g) / (rh + g))));
-        for (var j = 0; j < rightCount; j++) {
-          boxes.push({ cell: restOrder[j], x: secondW + g, y: y2 + j * (rh + g),
-                       w: colW, h: rh });
-        }
+      rest = order.filter(function (x) { return x !== main; });
+    } else if (cols === 2 && n >= 4) {
+      /* 自动模式也想把高度用起来：第一格放大到「两列 × 两行」（仍严格 16:9），
+         其余照常两列铺。只在放得下时这么做 —— 600 宽这类小窗放大后会多出
+         一条 89px 的滚动，那就保持等宽网格，不硬塞。 */
+      var featH = Math.round(availW * 9 / 16) + g
+        + Math.ceil((n - 1) / cols) * cellH
+        + (Math.ceil((n - 1) / cols) - 1) * g;
+      if (featH <= winH + 24) {
+        main = order[0];
+        rest = order.slice(1);
       }
-      boxes.push({ cell: restOrder[rightCount], x: 0, y: y2, w: secondW, h: secondH });
-      y = y2 + secondH + g;
-      restOrder = restOrder.slice(rightCount + 1);
-    } else {
-      restOrder = order.slice();
     }
 
-    var fixed = { g1: 1, g2: 2, g4: 2, g6: 3, g9: 3 }[multiLayout] || 0;
-    var kList = [];
-    if (narrow) kList = [1];
-    else if (fixed) kList = [Math.min(fixed, 4)];
-    else { for (var k = 1; k <= 4; k++) kList.push(k); }
-    var pick = restOrder.length
-      ? multiPortraitPickK(restOrder.length, availW, availH, y, minRead, kList)
-      : null;
-    if (restOrder.length) {
-      // 极窄的墙可能一档都过不了 minRead：退回单列整行宽，绝不留下没位置的格子
-      var pk = pick ? pick.k : 1;
-      var subW = pick ? Math.floor(pick.w) : availW;
-      var subH = pick ? pick.sh : Math.round(availW * 9 / 16);
-      restOrder.forEach(function (cell, i) {
-        var row = Math.floor(i / pk), col = i % pk;
-        // 最后一行不足一列时整行居中，别把空格子全甩到右边（竖屏尤其显眼）
-        var rowCount = Math.min(pk, restOrder.length - row * pk);
-        var rowW = rowCount * subW + (rowCount - 1) * g;
-        var x0 = Math.round((availW - rowW) / 2);
-        boxes.push({ cell: cell,
-          x: x0 + col * (subW + g),
-          y: y + row * (subH + g),
-          w: subW, h: subH });
-      });
+    var boxes = [], y = 0;
+    if (main) {
+      // 占满整行（2 列 + 中间那道缝），仍是 16:9
+      var mw = cols === 2 ? availW : cellW;
+      var mh = Math.round(mw * 9 / 16);
+      boxes.push({ cell: main, x: 0, y: 0, w: mw, h: mh });
+      y = mh + g;
     }
+    rest.forEach(function (cell, i) {
+      var row = Math.floor(i / cols), col = i % cols;
+      // 一律左对齐到网格：最后一行只剩一格时也贴左列，保持「所有左边缘只有两个位置」。
+      // 居中会让它多出第三个 x 坐标，截图里看起来就是「歪的」。
+      boxes.push({ cell: cell,
+        x: col * (cellW + g),
+        y: y + row * (cellH + g),
+        w: cellW, h: cellH });
+    });
     var H = 0;
     boxes.forEach(function (b) { H = Math.max(H, b.y + b.h); });
 
@@ -7891,7 +8082,7 @@
     /* 墙比宽高（竖屏、或左栏收起后变窄的长墙）：改走竖屏分层几何。
        自由布局是用户自己按百分比摆的，等比跟着窗口走，这里不接管。 */
     if (multiPortraitWall(availW, winH) && multiLayout !== 'free') {
-      multiPortraitLayout(grid, cells, availW, winH, winH);
+      multiPortraitLayout(grid, cells, availW, winH);
       return;
     }
     var plan = multiPlan(n, availW, grid.clientHeight);
