@@ -4177,7 +4177,7 @@ def playinfo_by_room(room):
 # ws:// 会自动改用内置的 WebSocket 加载器 —— 服务端只要把 FLV 字节按二进制帧发出去，
 # 前端一行解析代码都不用写。
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-WS_CHUNK = 262144
+WS_CHUNK = 32768             # 单帧上限（32KB）。⚠️ 别调大，原因见 api_live_ws
 
 
 def ws_accept(handler):
@@ -4280,7 +4280,12 @@ def api_live_ws(handler, query):
                 except Exception:
                     pass
                 break
-            chunk = resp.read(WS_CHUNK)
+            # ⚠️ 必须 read1()：read(n) 会**攒满 n 字节才返回**。原来这里是
+            #    read(262144)，1Mbps 的流要攒 2 秒才发一帧 —— 前端 MSE 里
+            #    每隔两秒才到一批数据，缓冲一空就 waiting，追帧再 seek 一次
+            #    就可能彻底停住（表现为「播一阵后画面定住、状态还是直播中」）。
+            #    read1(n) 有多少返回多少，最多 n 字节 → 到货即转发，抖动 < 100ms。
+            chunk = resp.read1(WS_CHUNK)
             if not chunk:
                 break
             handler.wfile.write(ws_frame(chunk))

@@ -7123,7 +7123,8 @@
     var maxTry = 2;                      // 断流重连次数
 
     function live(title) {
-      stateEl.textContent = title || '直播中';
+      if (title) cell._title = title;
+      stateEl.textContent = title || cell._title || '直播中';
       if (off) off.style.display = 'none';
     }
 
@@ -7142,14 +7143,32 @@
     function connect(qualities, attempt) {
       if (typeof mpegts === 'undefined') { offline('播放库缺失（assets/mpegts.js）'); return; }
       if (!cell.isConnected) return;     // 这一格已被移除（取消勾选），别再连
+      /* ⚠️ 复用同一个 <video> 重新接 MSE 之前，必须先把上一路的 src 摘掉。
+         mpegts 的 destroy() 只断开 MediaSource，元素上残留的 blob: src 会让新的
+         player attach 失败 —— 表现正是「重连了 5 次、服务端取流都成功、画面还是不动」。
+         摘 src + load() 把元素复位到 EMPTY，新 MediaSource 才接得上。 */
+      try { video.pause(); } catch (e) { /* 还没源 */ }
+      if (video.src) {
+        video.removeAttribute('src');
+        try { video.load(); } catch (e) { /* 忽略 */ }
+      }
       var qn = cell._qn || multiPickQn(multiQnChoice(), qualities);   // 单路选择优先于全局
       var p = mpegts.createPlayer({
         type: 'flv', isLive: true,
         url: src.stream ? src.stream(qn)
           : multiWsUrl('station=' + encodeURIComponent(s.id) + '&qn=' + qn),
-        enableStashBuffer: false,
-        liveBufferLatencyChasing: true
+        /* 抖动缓冲必须留：关掉 stash 时数据一到就直接塞 MSE，
+           网络稍有停顿（或服务端按大片推流）缓冲立刻见底 → waiting；
+           此时追帧再 seek 一次，可能落到还没数据的区间上，画面就永久定住。 */
+        enableStashBuffer: true,
+        stashInitialSize: 256,                    // KB，约 2 秒的余量
+        /* 追帧阈值别用默认的 1.5s / 0.5s：默认值卡一下就会连续 seek，
+           每次 seek 都可能踩空。放宽到「落后 3 秒才追、追到只剩 1 秒」。 */
+        liveBufferLatencyChasing: true,
+        liveBufferLatencyMaxLatency: 3,
+        liveBufferLatencyMinRemain: 1
       });
+      cell._p = p;
       p.attachMediaElement(video);
       p.load();
       try {
@@ -7158,6 +7177,7 @@
       } catch (e) { /* 浏览器可能要求手势 */ }
       p.on(mpegts.Events.ERROR, function () {
         try { p.destroy(); } catch (e) { /* 已销毁 */ }
+        if (cell._p === p) cell._p = null;
         if (!cell.isConnected) return;   // 格子已移除：别再挂重连定时器
         if (attempt < maxTry) {
           stateEl.textContent = '连接中断，重连中…（' + (attempt + 1) + '/' + maxTry + '）';
@@ -7173,6 +7193,46 @@
       p._cellKey = cell.getAttribute('data-id') || s.id;
       multiPlayers.push(p);
     }
+
+    /* ---------------------------------------------------------- 卡住看门狗
+       mpegts 对「画面不动但连接还活着」是不发 ERROR 的：MSE 里 seek 到空区间、
+       或解码队列被浏览器挂起时，就表现为「画面定住、底栏还写着直播中」，
+       以前只能整页刷新。这里只认一个事实：currentTime 有多久没往前走了
+       —— 按「最近一次前进的时刻」算，不用连续计数（追帧 seek 会让 currentTime
+       来回跳，计数会被这些小跳重置，反而永远不触发）。
+       超过 12 秒没前进 → 销毁这一路重连（退避 2/4/6…秒，最多 5 次）。 */
+    var lastT = -1, lastProgress = Date.now(), stallN = 0;
+    var dog = setInterval(function () {
+      if (!cell.isConnected || state.view !== 'multi') { clearInterval(dog); return; }
+      var t = video.currentTime;
+      if (t > lastT + 0.2) {
+        lastT = t;
+        lastProgress = Date.now();
+        if (stallN) { stallN = 0; live(); }          // 恢复后把退避与文案清掉
+        return;
+      }
+      if (Date.now() - lastProgress < 12000) return;
+      if (video.paused) {                            // 被浏览器挂起：先叫一次 play()
+        try {
+          var pr2 = video.play();
+          if (pr2 && typeof pr2.catch === 'function') pr2.catch(function () {});
+        } catch (e) { /* 需要手势 */ }
+        return;                                      // 下一轮还不动就按卡死处理
+      }
+      lastProgress = Date.now();
+      if (++stallN > 5) { offline('画面已停止，点「刷新开播状态」重试'); return; }
+      var dead = cell._p;
+      if (dead) {
+        try { dead.destroy(); } catch (e) { /* 已销毁 */ }
+        cell._p = null;
+        multiPlayers = multiPlayers.filter(function (x) { return x !== dead; });
+      }
+      stateEl.textContent = '画面停住，正在重连…（' + stallN + '）';
+      multiTimers.push(setTimeout(function () {
+        if (cell.isConnected && state.view === 'multi') connect(cell._qs || [], 0);
+      }, Math.min(30000, 2000 * stallN)));
+    }, 3000);
+    multiTimers.push(dog);
 
     fetch(src.info || '/api/live/playinfo?station=' + encodeURIComponent(s.id))
       .then(function (r) { return r.json(); })
@@ -7191,6 +7251,7 @@
           return;
         }
         live(d.title);
+        cell._qs = d.qualities || [];        // 看门狗重连时直接用这份档位表
         connect(d.qualities, 0);
       })
       .catch(function () { offline('开播状态获取失败'); });
