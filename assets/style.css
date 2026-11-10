@@ -2079,13 +2079,10 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
   /* 工具条在窄屏会叠很多行：收紧间距，别把画面墙往下顶 */
   body.view-multi .multi-bar { gap: 8px; margin: 10px 0 8px; }
 
-  /* 画面墙高度由 JS 写成行内 px（按「铺到视口底部」算）。竖屏下封顶 70vh，
-     格子一律从顶部排 —— 避免上半屏黑底、中间一格、下半屏还是黑底。
-     !important 是为了压过 JS 写的 height / align-content 行内样式。 */
-  body.view-multi #multi-grid {
-    max-height: 70vh !important;
-    align-content: start !important;
-  }
+  /* 竖屏下墙高改由 applyMultiLayout 的竖屏几何按「内容实际高度」写行内 px：
+     放得下就不留空墙，放不下就墙内滚动。这里必须撤掉旧的 70vh 封顶，
+     否则 JS 算好的分层会被硬截成 1344px，最下面几格又变成看不见。 */
+  body.view-multi #multi-grid { max-height: none !important; }
   /* 路数多时单格会缩到 180px 左右，格子底栏的画质/音量/按钮会横着顶出屏幕。
      让这条底栏自己横向滚动，控件一个不少，也不再撑宽整页。 */
   body.view-multi .ms-bar { overflow-x: auto; scrollbar-width: none; }
@@ -2919,6 +2916,20 @@ body.view-multi .col-right { display: none; }
 .multi-grid.filling { display: block; position: relative; }
 .multi-grid.filling .ms-cell { position: absolute; }
 .multi-grid.filling .ms-cell:not(.lead) video { object-fit: cover; }
+
+/* 竖屏分层：位置尺寸全部由 JS 按「实时宽高比」写成 px（每一格都严格 16:9）。
+   与 filling 的区别是**一律 contain**：竖屏下再走 cover 会把第二大那格
+   1086×810 的画面左右裁掉一大半。放不下时墙内滚动，不裁切、不压控件。 */
+.multi-grid.portrait {
+  display: block;
+  position: relative;
+  overflow-x: hidden;
+  /* 内容超高时竖向滚动条会占 15px，若等它出现才缩 clientWidth，
+     按旧宽度算好的格子会横向顶出去。stable 从一开始就把这条槽留出来。 */
+  scrollbar-gutter: stable;
+}
+.multi-grid.portrait .ms-cell { position: absolute; }
+.multi-grid.portrait .ms-cell video { object-fit: contain; }
 /* 非自由布局：整格可按住拖动，松手与目标格互换位置 */
 .multi-grid:not(.free) .ms-cell { cursor: grab; }
 .multi-grid:not(.free) .ms-cell.dragging {

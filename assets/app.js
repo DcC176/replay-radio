@@ -7292,10 +7292,38 @@
         });
       });
     }
-    // 窗口一变，可用高度就变了：重新算列数与行高（自由布局是百分比，等比跟着走）
-    window.addEventListener('resize', function () {
-      if (state.view === 'multi') applyMultiLayout();
-    });
+    /* 窗口尺寸 / 宽高比 / 横竖屏一变就重排画面墙。
+       rAF 合并同一帧里的多次事件；ResizeObserver 只盯容器**宽度**
+       （我们自己在 applyMultiLayout 里写高度，盯高度会自激循环）。 */
+    var relayoutPending = false;
+    function scheduleMultiLayout() {
+      if (state.view !== 'multi' || relayoutPending) return;
+      relayoutPending = true;
+      (window.requestAnimationFrame || function (fn) { setTimeout(fn, 16); })(function () {
+        relayoutPending = false;
+        if (state.view === 'multi') applyMultiLayout();
+      });
+    }
+    window.addEventListener('resize', scheduleMultiLayout);
+    // 有些浏览器转屏只发 orientationchange；matchMedia 的 change 兜住比例切换
+    window.addEventListener('orientationchange', scheduleMultiLayout);
+    if (window.matchMedia) {
+      var mqPortrait = window.matchMedia('(orientation: portrait)');
+      if (mqPortrait.addEventListener) mqPortrait.addEventListener('change', scheduleMultiLayout);
+      else if (mqPortrait.addListener) mqPortrait.addListener(scheduleMultiLayout);
+    }
+    if (window.ResizeObserver) {
+      var bodyEl = document.querySelector('.multi-body');
+      if (bodyEl) {
+        var lastBodyW = 0;
+        new ResizeObserver(function (entries) {
+          var w = Math.round(entries[0].contentRect.width);
+          if (Math.abs(w - lastBodyW) < 2) return;   // 高度变化（我们自己写的）不触发
+          lastBodyW = w;
+          scheduleMultiLayout();
+        }).observe(bodyEl);
+      }
+    }
   }
 
   function renderMulti(force) {
@@ -7601,6 +7629,131 @@
     return { w: Math.max(80, Math.floor(w)), h: Math.max(45, Math.floor(h)) };
   }
 
+  /* ------------------------------------------------------------ 竖屏画面墙
+     横屏那套「底排 + 右列」在竖屏会塌：1156×1920 聚焦 7 路实测右列 5 格只有
+     140×103（名字读不出来），下方第二大的格子 1086×810 被 cover 裁成 1.34:1。
+     竖屏改成「纵向分层」，全部格子严格 16:9 + contain，谁都不裁不压：
+       · 第一带：主画面整行宽（最大），严格 16:9
+       · 第二带：左下「占比第二大」的格子 + 右侧一列**够宽**的副画面
+         （列宽 ≥240px、每格自身 16:9，与第二格同高、互不遮挡）
+       · 其余副画面按当前宽度分 1~4 列往下铺，单格不小于可读宽度
+       · 右列挤不到 240px 就不设右列；窄到 <520px 一律单列整行宽往下排
+     墙高按内容算（不再写死铺到 70vh）：放得下就没有空墙，放不下就墙内滚动。
+     宽高比 / 尺寸 / 横竖屏一变，applyMultiLayout 都会重跑这套几何。          */
+  var MULTI_P_RIGHT_MIN = 240;      // 右侧副画面最小可读宽（px）
+
+  function multiPortraitWall(availW, availH) {
+    // 墙「高 > 宽」就按竖屏处理：窗口是不是竖屏会自然反映到这里，
+    // 同一窗口里左栏收起/展开、侧栏占宽也会自动跟着换排法。
+    return availH > availW * 1.05;
+  }
+
+  /* 副画面用几列：取「总高最接近可用高度」的一档；放不下时允许墙内滚动，
+     但不为了塞进一屏把格子压到读不出。同分时优先单格更宽的那档。 */
+  function multiPortraitPickK(rest, availW, availH, usedH, minRead, kList) {
+    var best = null;
+    for (var i = 0; i < kList.length; i++) {
+      var k = kList[i];
+      var w = (availW - MULTI_GAP * (k - 1)) / k;
+      if (w < minRead) continue;
+      var rows = Math.ceil(rest / k);
+      var sh = Math.round(w * 9 / 16);
+      var h = rows * sh + MULTI_GAP * (rows - 1);
+      var H = usedH + h;
+      var score = Math.abs(H - availH) + (H > availH ? 60 : 0);
+      if (!best || score < best.score - 1e-9 ||
+          (Math.abs(score - best.score) < 1e-9 && w > best.w)) {
+        best = { k: k, w: w, sh: sh, h: h, H: H, rows: rows, score: score };
+      }
+    }
+    return best;
+  }
+
+  function multiPortraitLayout(grid, cells, availW, availH, winH) {
+    var g = MULTI_GAP;
+    var n = cells.length;
+    var order = multiOrderCells(cells);
+    var focus = !!multiFocusId && n > 1 && multiLayout !== 'free';
+    // 只有真正窄（手机宽）才一律单列；600~760px 的竖屏分两列反而能一屏看完，
+    // 单列会把 7 路拉成 2800px 的长卷（实测 768×1280）。
+    var narrow = availW < 520;
+    var minRead = narrow ? 0 : 240;                 // 副画面下限：低于这个宽名字就挤没了
+    var boxes = [], y = 0, main = null, restOrder;
+
+    if (focus) {
+      main = order.filter(function (x) {
+        return x.getAttribute('data-id') === multiFocusId;
+      })[0] || order[0];
+      restOrder = order.filter(function (x) { return x !== main; });
+      // 第一带：主画面整行宽，最大、严格 16:9
+      var mainH = Math.round(availW * 9 / 16);
+      boxes.push({ cell: main, x: 0, y: 0, w: availW, h: mainH });
+      // 第二带：左下的「占比第二大」格子 + 右侧一列够宽的副画面。
+      // 右列跟第二格同高，列宽 ≥240px 且自身 16:9 —— 不再出现 140×103 的窄条。
+      var secondW = narrow ? availW : Math.round(availW * 0.70);
+      var colW = narrow ? 0 : availW - secondW - g;
+      if (colW < MULTI_P_RIGHT_MIN) { colW = 0; secondW = availW; }
+      var secondH = Math.round(secondW * 9 / 16);
+      var y2 = mainH + g;
+      var rightCount = 0;
+      if (colW && n >= 3) {
+        var rh = Math.round(colW * 9 / 16);
+        rightCount = Math.min(n - 2, Math.max(1, Math.floor((secondH + g) / (rh + g))));
+        for (var j = 0; j < rightCount; j++) {
+          boxes.push({ cell: restOrder[j], x: secondW + g, y: y2 + j * (rh + g),
+                       w: colW, h: rh });
+        }
+      }
+      boxes.push({ cell: restOrder[rightCount], x: 0, y: y2, w: secondW, h: secondH });
+      y = y2 + secondH + g;
+      restOrder = restOrder.slice(rightCount + 1);
+    } else {
+      restOrder = order.slice();
+    }
+
+    var fixed = { g1: 1, g2: 2, g4: 2, g6: 3, g9: 3 }[multiLayout] || 0;
+    var kList = [];
+    if (narrow) kList = [1];
+    else if (fixed) kList = [Math.min(fixed, 4)];
+    else { for (var k = 1; k <= 4; k++) kList.push(k); }
+    var pick = restOrder.length
+      ? multiPortraitPickK(restOrder.length, availW, availH, y, minRead, kList)
+      : null;
+    if (restOrder.length) {
+      // 极窄的墙可能一档都过不了 minRead：退回单列整行宽，绝不留下没位置的格子
+      var pk = pick ? pick.k : 1;
+      var subW = pick ? Math.floor(pick.w) : availW;
+      var subH = pick ? pick.sh : Math.round(availW * 9 / 16);
+      restOrder.forEach(function (cell, i) {
+        var row = Math.floor(i / pk), col = i % pk;
+        // 最后一行不足一列时整行居中，别把空格子全甩到右边（竖屏尤其显眼）
+        var rowCount = Math.min(pk, restOrder.length - row * pk);
+        var rowW = rowCount * subW + (rowCount - 1) * g;
+        var x0 = Math.round((availW - rowW) / 2);
+        boxes.push({ cell: cell,
+          x: x0 + col * (subW + g),
+          y: y + row * (subH + g),
+          w: subW, h: subH });
+      });
+    }
+    var H = 0;
+    boxes.forEach(function (b) { H = Math.max(H, b.y + b.h); });
+
+    grid.classList.add('portrait');
+    /* winH 里已经给右下角浮标留了 64px；浮标实际只占 40px，所以内容超高时可以
+       再借用 24px，避免差几像素就多出一条没意义的滚动条。 */
+    grid.style.height = Math.max(260, Math.min(winH + 24, H + 8)) + 'px';
+    boxes.forEach(function (b) {
+      var c = b.cell;
+      c.style.left = b.x + 'px';
+      c.style.top = b.y + 'px';
+      c.style.width = b.w + 'px';
+      c.style.height = b.h + 'px';
+      if (focus && c === main) c.classList.add('lead');
+    });
+    return H;
+  }
+
   /* 显示顺序：用户在墙上拖过的顺序（记忆在 localStorage），没记录的按 DOM 顺序接在后面 */
   var multiOrder = store.get('xl_mf_order', []) || [];
 
@@ -7675,7 +7828,7 @@
     if (multiLayout === 'free') multiFocusId = '';   // 自由布局用拖动缩放，不用聚焦
 
     grid.classList.toggle('free', multiLayout === 'free');
-    grid.classList.remove('filling');
+    grid.classList.remove('filling', 'portrait');
     grid.style.gridTemplateColumns = '';
     grid.style.gridTemplateRows = '';
     grid.style.justifyContent = '';
@@ -7703,8 +7856,15 @@
       return;
     }
 
-    sizeMultiGrid();                                  // 先定可用高度，再按它算格子尺寸
-    var plan = multiPlan(n, grid.clientWidth, grid.clientHeight);
+    var winH = sizeMultiGrid();                      // 先定可用高度，再按它算格子尺寸
+    var availW = grid.clientWidth;
+    /* 墙比宽高（竖屏、或左栏收起后变窄的长墙）：改走竖屏分层几何。
+       自由布局是用户自己按百分比摆的，等比跟着窗口走，这里不接管。 */
+    if (multiPortraitWall(availW, winH) && multiLayout !== 'free') {
+      multiPortraitLayout(grid, cells, availW, winH, winH);
+      return;
+    }
+    var plan = multiPlan(n, availW, grid.clientHeight);
     if (plan.fill) {
       if (layoutMultiFill(grid, n, grid.clientWidth, grid.clientHeight, cells)) return;
       // 万一某个尺寸下算不出「底排 + 右列」的几何（墙太窄/太矮），退回 3 列宫格：
