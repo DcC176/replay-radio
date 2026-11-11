@@ -1278,6 +1278,39 @@ body.side-r-off #btn-side-r { background: rgba(245, 71, 91, .92); }
 }
 .pv-btn:hover { background: var(--red); }
 
+/* 播放选项（自动连播 / 循环）：图标按钮，比文字按钮窄 —— 顶栏在 288px 的
+   侧栏里已经把标题挤到极限，再塞两个文字按钮必然溢出。 */
+.pv-opt { padding: 3px 7px; display: inline-flex; align-items: center; justify-content: center; min-width: 27px; }
+.pv-opt svg { width: 13px; height: 13px; display: block; }
+.pv-opt[aria-pressed="true"] { background: rgba(245, 71, 91, .92); }
+.pv-opt[aria-pressed="true"]:hover { background: #f5475b; }
+/* 「单集」态在循环图标中间叠一个 1，其余状态只有一个回环箭头 */
+.pv-opt .i-one { display: none; }
+#btn-loop[data-loop="one"] .i-one { display: block; }
+
+/* 播放器内的一次性提示：与 .mute-hint 同高（控制条 50px + 8px 间隙），水平居中 */
+.pv-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 58px;
+  z-index: 4;
+  transform: translate(-50%, 4px);
+  max-width: calc(100% - 24px);
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, .86);
+  color: rgba(255, 255, 255, .94);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .16s, transform .16s;
+}
+.pv-toast.on { opacity: 1; transform: translate(-50%, 0); }
+.pv-toast[hidden] { display: none; }
+
 .mute-hint {
   position: absolute;
   left: 12px;

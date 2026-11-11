@@ -759,8 +759,8 @@ window.__BOOT_T0 = Date.now();
 
     <section class="view" id="view-settings">
       <h1 class="title sm">设置</h1>
-      <p class="sub">快捷键<b>默认全部留空</b>，需要你自己按一遍来绑定。绑定后在任何页面都生效；
-        只存在本机浏览器里，不上传。</p>
+      <p class="sub">播放器带<b>默认快捷键</b>（← / → 快退快进 10 秒，↑ / ↓ 音量 ±10%），
+        下表可以改成你习惯的组合。绑定后在任何页面都生效；只存在本机浏览器里，不上传。</p>
 
       <div class="live-card">
         <div class="live-card-h">外观</div>
@@ -828,6 +828,10 @@ window.__BOOT_T0 = Date.now();
         </div>
         <div class="key-list" id="keys-list"></div>
         <p class="live-note" id="keys-tip">点右侧按键格，然后按下你想用的组合键（Esc 取消）。</p>
+        <p class="live-note">默认组合：<b>←</b> 快退 10 秒 · <b>→</b> 快进 10 秒 ·
+          <b>↑</b> 音量 +10% · <b>↓</b> 音量 −10%。快退 / 快进只在录播与歌单生效
+          （直播间是实时流，按下会在画面上提示）；音量在所有播放状态生效。
+          焦点在输入框 / 下拉框 / 滑杆里时不触发，不会抢掉方向键。</p>
       </div>
 
       <div class="live-card" style="margin-top:18px">
@@ -925,6 +929,9 @@ window.__BOOT_T0 = Date.now();
         <span class="pv-wait-txt">缓冲中…</span>
       </div>
 
+      <!-- 播放器内的一次性提示（快捷键在直播流上无效 / 停在段末 …） -->
+      <div class="pv-toast" id="pv-toast" hidden></div>
+
       <div class="pv-top">
         <div class="pv-title" id="pv-title">—</div>
         <div class="pv-topbtns">
@@ -943,6 +950,27 @@ window.__BOOT_T0 = Date.now();
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path class="i-col" d="M6 3.5L10.5 8 6 12.5"/>
               <path class="i-exp" d="M10 3.5L5.5 8l4.5 4.5"/>
+            </svg>
+          </button>
+          <!-- 播放选项（v1.9.4）：自动连播 / 循环播放。状态跨板块共用一份 -->
+          <button class="pv-btn pv-opt" id="btn-autonext" type="button" aria-pressed="true"
+                  title="自动连播：开（关闭后每段播完停住）">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2.4 3.3v9.4l6.1-4.7z" fill="currentColor" stroke="none"/>
+              <path d="M9 3.3v9.4l6.1-4.7z" fill="currentColor" stroke="none"/>
+            </svg>
+          </button>
+          <button class="pv-btn pv-opt" id="btn-loop" type="button" aria-pressed="false"
+                  data-loop="off" title="循环播放：关（点按切换 关 → 单集 → 列表）">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3.1 6.6A3.3 3.3 0 016.4 3.3h5.3"/>
+              <path d="M9.5 1.3L11.7 3.3 9.5 5.3"/>
+              <path d="M12.9 9.4A3.3 3.3 0 019.6 12.7H4.3"/>
+              <path d="M6.5 14.7L4.3 12.7 6.5 10.7"/>
+              <text class="i-one" x="8" y="10.6" text-anchor="middle" font-size="7.6"
+                    font-weight="700" fill="currentColor" stroke="none">1</text>
             </svg>
           </button>
           <button class="pv-btn" id="btn-chapters">分段</button>

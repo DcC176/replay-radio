@@ -1606,6 +1606,7 @@
   var VIEWS = ['live', 'multi', 'broadcast', 'schedule', 'playlist',
                'dynamic', 'weibo', 'dd', 'about', 'settings'];
   var KEY_MUTED = 'xl_muted';
+  var KEY_LOOP = 'xl_loop';         // 循环播放：off / one / list / random（见 state.loop）
   /* 播放进度，按板块分键（`xl_pos_<板块 id>` / `xl_plpos_<板块 id>`）。
      切换板块是**整页重载**，不落盘就必然回到「挂钟对应的位置」（用户 2026-11-09 要求保持进度）。 */
   var KEY_POS = 'xl_pos_';
@@ -1638,6 +1639,26 @@
       var v = store.get('xl_play_order', 'shuffle');
       return (v === 'seq' || v === 'rev' || v === 'sing') ? v : 'shuffle';
     })(),
+    /* 播放选项（v1.9.4）：自动连播 / 循环。
+       ⚠️ 必须是**一份**全局状态：录播时间轴、歌单、直播间共用同一个 <video>，
+       各存一份必然互相打架（在录播里关掉连播，切到歌单又自己接上了）。 */
+    autoNext: store.get('xl_autonext', true),
+    loop: (function () {
+      var v = store.get(KEY_LOOP, null);
+      if (v === 'off' || v === 'one' || v === 'list' || v === 'random') return v;
+      /* 旧键 xl_pl_loop（歌单播放器模式那三档）一次性迁移。
+         原来的默认 `order`（顺序播完回头）就是现在的「列表循环」，但本次要求
+         「循环默认关」，所以 order 一律按 off 处理；one / random 原样带过来。 */
+      var old = store.get('xl_pl_loop', null);
+      if (old === 'one') return 'one';
+      if (old === 'random') return 'random';
+      return 'off';
+    })(),
+    /* 段末被「连播关 / 循环关」拦下时的停播标记（见 boundaryCheck）。
+       cyclePos 由 currentTime 推出来，暂停即定住；tick 见到它就整轮返回。 */
+    hold: '',
+    heldSeg: -1,           // 刚从这个段「继续」过：同段别再停第二次
+
     page: 1,
     cycle: null,
     drift: 0,              // 相对「直播中」的偏移（秒）
@@ -1943,6 +1964,8 @@
     state.drift = 0;
     state.segIndex = -1;
     state.playingKey = null;
+    state.hold = '';          // 从头铺时间轴：段末停播的标记不再有意义（否则 tick 会永远返回）
+    state.heldSeg = -1;
     var want = state.resume;
     state.resume = null;
     // 直播间 / 监控室正占着播放器（或自己拉多路），回放不能来抢
@@ -1981,6 +2004,8 @@
     state.mediaBase = null;
     state.wantPos = null;
     state.segIndex = -1;
+    state.hold = '';              // 换锚点重播：段末停播标记一并作废
+    state.heldSeg = -1;
     state.playingKey = null;
     applyPlayer(true);
     return true;
@@ -2381,6 +2406,9 @@
     // 离开时 resumeReplay() 是在 state.view 已经切走之后调用的，所以正常恢复不受影响。
     if (state.view === 'broadcast' || state.view === 'multi') return;
     if (!state.cycle || !state.cycle.segments.length) return;
+    // 强制重新取流（换期 / 恢复播放 / 换清晰度）：段末停播的标记随之作废，
+    // 否则 tick 会因为 hold 一直返回，画面标题停在上一支、声音已经播到下一支。
+    if (force) { state.hold = ''; state.heldSeg = -1; }
 
     var pos = cyclePos();
     var i = findSeg(pos);
@@ -3121,13 +3149,36 @@
   }
 
   /* ---------------------------------------------------------- 设置：快捷键 */
-  // 按需求「不设置基础默认快捷键」：初始全为空，必须用户自己按一遍来绑定。
+  // v1.9.4 起播放器带**默认组合**（上一版按当时的要求全部留空，用户现在要「基础快捷键」）。
   // 绑定存 localStorage，**全局生效** —— 任意视图、焦点在页面任何位置都能用。
 
   var KEY_STORE = 'xl_keys';
   var keyMap = store.get(KEY_STORE) || {};
   var recording = null;                 // 正在录制的动作 id
   var keysBound = false;
+
+  /* 默认组合：方向键是这个场景里唯一没有歧义的一组（←/→ 找位置，↑/↓ 调音量），
+     而且与视频网站的习惯一致。只在**没有冲突**时补：用户自己绑过的动作不覆盖，
+     默认组合已被别的动作占用时也跳过。`xl_keys_seeded` 只置一次 —— 之后用户在
+     设置页把它们清掉就是真的清掉，重启不会又被填回来。 */
+  var DEFAULT_KEYS = {
+    seekBack: 'ArrowLeft', seekFwd: 'ArrowRight',
+    volUp: 'ArrowUp', volDown: 'ArrowDown'
+  };
+  (function seedDefaultKeys() {
+    if (store.get('xl_keys_seeded', false)) return;
+    var took = false;
+    Object.keys(DEFAULT_KEYS).forEach(function (id) {
+      if (keyMap[id]) return;
+      var combo = DEFAULT_KEYS[id], clash = false;
+      Object.keys(keyMap).forEach(function (k) { if (keyMap[k] === combo) clash = true; });
+      if (clash) return;
+      keyMap[id] = combo;
+      took = true;
+    });
+    store.set('xl_keys_seeded', true);
+    if (took) saveKeys();
+  })();
 
   var KEY_ACTIONS = [
     { id: 'playPause', name: '播放 / 暂停', run: function () { clickSel('#ctrl-play'); } },
@@ -3149,13 +3200,19 @@
   }
 
   function bumpVolume(d) {
+    if (state.view === 'multi') return;        // 监控室每路各有自己的音量，不动主播放器
+    if (!el.ctrlVol) return;
     var v = Math.min(1, Math.max(0, (parseFloat(el.ctrlVol.value) || 0) + d));
     el.ctrlVol.value = v;
     el.ctrlVol.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
   function seekBy(d) {
-    if (state.view === 'broadcast') return;       // 直播没有进度可拖
+    if (state.view === 'multi') return;        // 多路画面没有「主进度」可跳
+    if (state.view === 'broadcast') {          // 直播是实时流：进度不可回退，别静默失败
+      pvToast('直播间是实时流，不能快进 / 快退');
+      return;
+    }
     if (!el.player || !isFinite(el.player.duration)) return;
     el.player.currentTime = Math.min(el.player.duration,
                                      Math.max(0, el.player.currentTime + d));
@@ -5412,6 +5469,8 @@
 
   function playProgram(bvid) {
     ensureInCycle(bvid);
+    state.hold = '';          // 用户手点了一期：段末停播的标记作废
+    state.heldSeg = -1;
     /* 清单刷新过、而循环还是旧的（新一期只在 state.all 里）时，这里会找不到它 ——
        原来就静默 return，用户点了没反应。先 soft 重建再找一次。
        注意**不要**顺手重定位 segIndex：那会让 tick 先按「当前位置在新段表里
@@ -5447,6 +5506,10 @@
   }
 
   function bind() {
+    /* 快捷键的全局监听原来挂在 bindSettings() 里，而它要等用户第一次打开「设置」才跑 ——
+       于是默认快捷键在设置页被访问之前根本不起作用。这里先绑一次（有 keysBound 守卫，
+       之后 renderSettings 再调也不会重复绑）。 */
+    bindSettings();
     /* 进度落盘：切板块走的是整页重载（location.reload），pagehide 一定会来；
        切到后台也顺手存一次，免得进程被杀时丢掉这一段。 */
     window.addEventListener('pagehide', saveProgress);
@@ -5770,6 +5833,9 @@
     el.player.addEventListener('loadstart', waitShow);
     el.player.addEventListener('seeking', function () {
       if (el.player.readyState < 3) waitShow();
+      // 用户自己动了位置：段末的停播标记作废，否则回拖到段中间也不会再停
+      if (state.hold) { state.hold = ''; syncPlayOptions(); }
+      state.heldSeg = -1;
     });
     el.player.addEventListener('playing', function () { waitHide(true); });
     el.player.addEventListener('canplay', function () { waitHide(); });
@@ -5779,6 +5845,17 @@
     el.player.addEventListener('play', function () {
       el.ctrlPlay.classList.add('playing');
       el.playerBox.classList.remove('paused');
+      /* 段末停住之后用户按了播放 = 明确要「继续」：解除 hold。
+         heldSeg 留着，避免同段在边界上被立刻再停一次（见 boundaryCheck）。
+         另有一种必须单独处理的情形：媒体本身比标称时长短（B 站给整数秒），
+         停住时媒体已经 ended、后面没有可播的内容了 —— 这时光解除 hold 是「按了没反应」，
+         得直接推一段。 */
+      if (state.hold) {
+        var wasEnded = el.player.ended;
+        state.hold = '';
+        syncPlayOptions();
+        if (wasEnded) advanceSegment();
+      }
     });
     el.player.addEventListener('pause', function () {
       el.ctrlPlay.classList.remove('playing');
@@ -5817,6 +5894,12 @@
       paintNow();
     });
 
+    /* 段边界守卫：timeupdate 约 4 次/秒，比 tick（1 秒）细得多 —— 单集循环若晚 1 秒
+       才跳回，用户会先听见下一段的开头。ended 是另一个必须接的信号：媒体比标称时长短，
+       位置永远够不到边界。 */
+    el.player.addEventListener('timeupdate', boundaryCheck);
+    el.player.addEventListener('ended', boundaryCheck);
+
     el.btnMute.classList.toggle('muted', el.player.muted || el.player.volume === 0);
     el.ctrlVol.value = el.player.muted ? 0 : el.player.volume;
     el.btnQpClose.addEventListener('click', function () { toggleQuality(false); });
@@ -5832,6 +5915,16 @@
     });
 
     el.btnChapters.addEventListener('click', function () { toggleChapters(); });
+
+    // 播放选项：自动连播（两态）/ 循环（关 → 单集 → 列表）。状态跨板块共用一份。
+    if (el.btnAutonext) el.btnAutonext.addEventListener('click', function () {
+      setAutoNext(!state.autoNext);
+    });
+    if (el.btnLoop) el.btnLoop.addEventListener('click', function () {
+      var seq = ['off', 'one', 'list'];
+      var cur = seq.indexOf(state.loop);        // random（歌单旧档）点一下就回到 off
+      setLoop(seq[(cur + 1) % seq.length]);
+    });
 
     var clipModeBtn = document.getElementById('clip-mode');
     if (clipModeBtn) clipModeBtn.addEventListener('click', function () { setClipMode(!state.clipMode); });
@@ -5982,11 +6075,179 @@
     window.addEventListener('hashchange', route);
   }
 
+  /* -------------------------------------------------- 自动连播 / 循环播放（v1.9.4）
+
+     两项都只作用在「一段播完之后怎么办」这**一个**判断点上，所以规则只写在一处：
+     录播时间轴走 boundaryCheck()，歌单走媒体自己的 ended（见 plAdvance），
+     两边读同一份 state.autoNext / state.loop。
+
+       循环=单集            重播本段（优先于连播）
+       循环=列表 / 随机     段末照常接下一段，只在整条时间轴末尾绕回开头
+       连播=关              段末停住，等用户按播放
+       循环=关 + 已到末尾   停住
+
+     停住的做法是「暂停 + hold 标记」：cyclePos 由 currentTime 推出来，暂停即定住；
+     tick 见到 hold 直接返回，于是既不会换段，也不会把标题改成下一支。 */
+  var LOOP_LABEL = { off: '关', one: '单集', list: '列表', random: '随机' };
+
+  function loopWraps() { return state.loop === 'list' || state.loop === 'random'; }
+
+  var toastTimer = 0;
+  function pvToast(msg) {
+    if (!el.pvToast) return;
+    el.pvToast.textContent = msg;
+    el.pvToast.hidden = false;
+    void el.pvToast.offsetWidth;                 // 先落一帧，过渡才从 opacity 0 起
+    el.pvToast.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      el.pvToast.classList.remove('on');
+      setTimeout(function () {
+        if (!el.pvToast.classList.contains('on')) el.pvToast.hidden = true;
+      }, 200);
+    }, 2200);
+  }
+
+  function syncPlayOptions() {
+    if (el.btnAutonext) {
+      el.btnAutonext.setAttribute('aria-pressed', state.autoNext ? 'true' : 'false');
+      el.btnAutonext.title = state.autoNext
+        ? '自动连播：开（关闭后每段播完停住）'
+        : '自动连播：关（每段播完停住，点播放继续）';
+    }
+    if (el.btnLoop) {
+      el.btnLoop.setAttribute('data-loop', state.loop);
+      el.btnLoop.setAttribute('aria-pressed', state.loop === 'off' ? 'false' : 'true');
+      el.btnLoop.title = '循环播放：' + LOOP_LABEL[state.loop]
+        + '（点按切换 关 → 单集 → 列表）';
+    }
+  }
+
+  /* 停在本段末尾。只暂停、不 seek：cyclePos 立刻定住，画面停在最后一帧。 */
+  function holdAtEnd(why) {
+    if (!state.cycle || state.segIndex < 0) return;
+    state.hold = why;
+    state.heldSeg = state.segIndex;
+    if (el.player) el.player.pause();
+    pvToast(why === 'tail' ? '已到时间轴末尾 · 点播放继续' : '已停在本段末尾 · 点播放继续');
+    syncPlayOptions();
+  }
+
+  /* 单集循环：把媒体定位回本段起点。不重载媒体（同一分P 内），所以没有黑屏。 */
+  function replaySegment(seg) {
+    if (!seg || state.mediaBase === null || !el.player || el.player.readyState < 1) return;
+    var v = el.player;
+    var wasEnded = v.ended;
+    try { v.currentTime = seg.t0; } catch (e) { return; }
+    // ⚠️ 先 seek 再改锚点：currentTime 的赋值是同步的，改完锚点 pos 立刻等于 seg.start
+    state.mediaBase = seg.t0;
+    state.cycleBase = seg.start;
+    state.hold = '';
+    state.heldSeg = -1;
+    /* 两种情形要分开处理：
+       · 还在播 → 直接 play（本来就没停，play 是幂等的）；
+       · 已经 ended → play() 会被紧随其后的 seek 打断并 reject（MSE 下实测停在 0 秒不动），
+         所以等 seeked 落地再叫一次，2~3 秒后没人认领就撤掉监听。 */
+    v.play().catch(function () { /* 被 seek 打断：下面兜底 */ });
+    if (wasEnded) {
+      var again = function () {
+        v.removeEventListener('seeked', again);
+        v.play().catch(function () { /* 浏览器可能要手势 */ });
+      };
+      v.addEventListener('seeked', again);
+      setTimeout(function () { v.removeEventListener('seeked', again); }, 3000);
+    }
+  }
+
+  /* 媒体比标称时长短、tick 等不到越界时，主动推一段（重新取流） */
+  function advanceSegment() {
+    var segs = state.cycle && state.cycle.segments;
+    if (!segs || segs.length < 2) return;
+    var next = segs[(state.segIndex + 1) % segs.length];
+    state.hold = '';
+    state.heldSeg = -1;
+    /* 锚点与 playProgram 同一套：把 drift 设成「此刻正好停在 next 开头」。
+       ⚠️ 只设 wantPos 不够 —— applyPlayer → loadMedia 是用**挂钟**算 cycleBase 的，
+       媒体一就绪 base 会落回「上一段的同一秒」，tick 立刻把画面拽回去。
+       实测（v1.9.4 验收）：媒体提前 0.3 秒 ended 时，画面先到新段、再跳回旧段 50 秒处。 */
+    var total = state.cycle.total;
+    state.drift = ((next.start - (now() - CFG.epoch)) % total + total) % total;
+    state.mediaBase = null;
+    state.wantPos = null;
+    applyPlayer(true);
+  }
+
+  /* 段边界守卫：tick 每秒才跑一次，靠它判边界会晚最多 1 秒（先播出下一段的声音再跳回）。
+     timeupdate 约 4 次/秒，够细且只在真播的时候才有事件。 */
+  function boundaryCheck() {
+    if (state.view === 'broadcast' || state.view === 'multi') return;
+    if (state.playlistCycle) return;         // 歌单每首是独立媒体，交给 ended → plAdvance
+    if (!state.cycle || !state.cycle.segments.length) return;
+    if (state.segIndex < 0 || state.hold || state.loading) return;
+    if (state.mediaBase === null || !el.player || el.player.readyState < 2) return;
+    var segs = state.cycle.segments;
+    var seg = segs[state.segIndex];
+    if (!seg || !(seg.duration > 0)) return;
+    if (state.heldSeg === state.segIndex) return;
+    var last = state.segIndex === segs.length - 1;
+
+    if (el.player.ended) {
+      /* B 站给的时长是整数、实际媒体常短 0.3 秒左右，位置永远够不到边界 ——
+         只靠 left 判断会「放完卡在结尾」。ended 是这里唯一可靠的信号。 */
+      if (state.loop === 'one') { replaySegment(seg); return; }
+      if (!state.autoNext || (last && !loopWraps())) { holdAtEnd(last ? 'tail' : 'end'); return; }
+      var nxt = segs[(state.segIndex + 1) % segs.length];
+      /* 只有下一段在**别的分P**时重新取流才有意义；同分P 说明清单比媒体长，
+         重载一次还是立刻 ended，会变成每秒重载一次。 */
+      if (nxt && (nxt.bvid !== seg.bvid || nxt.page !== seg.page)) advanceSegment();
+      return;
+    }
+
+    var left = seg.duration - (cyclePos() - seg.start);
+    if (left > 0.3 || left < -0.3) return;   // 没到边界 / 已经越界（越界交给 tick 换段）
+    if (state.loop === 'one') { replaySegment(seg); return; }
+    if (!state.autoNext) { holdAtEnd('end'); return; }
+    if (last && !loopWraps()) holdAtEnd('tail');
+  }
+
+  function setAutoNext(on) {
+    on = !!on;
+    if (on === state.autoNext) return;
+    state.autoNext = on;
+    store.set('xl_autonext', on);
+    state.heldSeg = -1;
+    if (on && state.hold) {                  // 刚停住的那一段：允许继续了，接着走
+      state.hold = '';
+      tick();
+    }
+    syncPlayOptions();
+    if (state.view === 'broadcast') pvToast('直播是实时流：连播 / 循环只在录播与歌单生效');
+  }
+
+  function setLoop(v) {
+    if (v !== 'off' && v !== 'one' && v !== 'list' && v !== 'random') return;
+    if (v === state.loop) return;
+    var held = (state.hold && state.cycle && state.segIndex >= 0)
+      ? state.cycle.segments[state.segIndex] : null;
+    state.loop = v;
+    store.set(KEY_LOOP, v);
+    state.heldSeg = -1;
+    if (held) {
+      state.hold = '';
+      if (v === 'one') replaySegment(held);
+      else tick();                           // 按新设置继续推进（该换段的换段）
+    }
+    syncPlayOptions();
+    plSyncBar();                             // 歌单播放器模式那个循环图标跟着变
+    if (state.view === 'broadcast') pvToast('直播是实时流：连播 / 循环只在录播与歌单生效');
+  }
+
   /* ---------------------------------------------------------- 启动 */
 
   function tick() {
     if (!state.cycle || !state.cycle.segments.length) return;
     if (state.view === 'broadcast' || state.view === 'multi') return;   // 直播/监控室占着播放器，回放的换段逻辑别来抢
+    if (state.hold) return;                   // 段末已停住：既不换段，也不改标题
     if (state.loading) {
       // 取流/定位期间不做换段判断。但**不能无限等**：dash 与 mp4 各自的兜底
       // 最长 15 秒，真遇上回调没回来，卡住的不只是换段 —— 用户再点同一期
@@ -6031,6 +6292,7 @@
         i = findSeg(cyclePos());
       }
       state.segIndex = i;
+      state.heldSeg = -1;          // 换段了：新的一段重新算，段末该停还会停
       // 不清 playingKey：applyPlayer 要靠它判断「是不是还在同一个分P」——
       // 清掉就每次都当成跨分P，重新取一次流（这正是「切一下卡一下」的来源）。
       state.pendingStart = null;   // 换了分P：上一位「记了起点没记终点」的作废
@@ -6095,6 +6357,7 @@
     renderChips();
     renderList();
     syncPlayOrder();
+    syncPlayOptions();
     syncSound();
     syncSkip();
     runPendingPlay();          // 用户刚才可能在清单到位之前就点了播放
@@ -6476,6 +6739,9 @@
       ctrlBuffer: document.getElementById('ctrl-buffer'),
       ctrlTip: document.getElementById('ctrl-tip'),
       pvWait: document.getElementById('pv-wait'),
+      pvToast: document.getElementById('pv-toast'),
+      btnAutonext: document.getElementById('btn-autonext'),
+      btnLoop: document.getElementById('btn-loop'),
       ctrlDot: document.getElementById('ctrl-dot'),
       ctrlPlay: document.getElementById('ctrl-play'),
       ctrlMute: document.getElementById('ctrl-mute'),
@@ -8803,11 +9069,9 @@
      歌词按**歌名**去 lrclib.net 查（`/api/lyrics` 在服务端代取，绕开 CORS）。
      红心写在歌单条目上（跟歌单一起存后端），不是 localStorage —— 换版本/换浏览器都还在。 */
   var ppState = { shownKey: '', lines: [] };
-  /* 循环模式：order = 顺序（播完下一首）、one = 单曲、random = 随机下一首。
-     存在 localStorage，下次进来沿用。 */
-  var LOOP_KEY = 'xl_pl_loop';
-  var plLoop = store.get(LOOP_KEY, 'order');
-  if (['order', 'one', 'random'].indexOf(plLoop) < 0) plLoop = 'order';
+  /* 循环模式已并入全局 state.loop（v1.9.4）：歌单与录播时间轴**共用一份**。
+     各存一份的话，在录播里关掉循环、切到歌单又自己接上，用户看到的就是「设置不生效」。
+     旧键 xl_pl_loop 在 state 初始化时一次性迁移，这里不再单独保存。 */
 
   function plViewIsPlayer() { return PL.view === 'player'; }
 
@@ -9036,8 +9300,9 @@
 
     var lb = document.getElementById('mv-loop');
     if (lb) {
-      lb.textContent = plLoop === 'one' ? '🔂' : (plLoop === 'random' ? '🔀' : '⟳');
-      lb.title = plLoop === 'one' ? '单曲循环' : (plLoop === 'random' ? '随机播放' : '顺序播放');
+      lb.textContent = state.loop === 'one' ? '🔂'
+        : (state.loop === 'random' ? '🔀' : (state.loop === 'list' ? '🔁' : '➡'));
+      lb.title = '循环播放：' + LOOP_LABEL[state.loop] + '（点按切换）';
     }
     var ss = document.getElementById('mv-skip-state');
     if (ss && el.btnSkip) ss.textContent = el.btnSkip.textContent.indexOf('开') >= 0 ? '开' : '关';
@@ -9090,10 +9355,11 @@
 
     var loop = document.getElementById('mv-loop');
     if (loop) loop.addEventListener('click', function () {
-      var seq = ['order', 'one', 'random'];
-      plLoop = seq[(seq.indexOf(plLoop) + 1) % seq.length];
-      try { store.set(LOOP_KEY, plLoop); } catch (e) { /* 隐私模式 */ }
-      plSyncBar();
+      /* 与顶栏那个「循环」读写同一份 state.loop；这里多一档 random
+         （歌单特有的「下一首随机」），顶栏只走 关→单集→列表 三档。 */
+      var seq = ['off', 'one', 'list', 'random'];
+      var cur = seq.indexOf(state.loop);
+      setLoop(seq[(cur + 1) % seq.length]);
     });
 
     var vol = document.getElementById('mv-vol');
@@ -9264,14 +9530,24 @@
     var segs = state.cycle.segments;
     var i = state.segIndex >= 0 ? state.segIndex : 0;
     var seg;
-    if (plLoop === 'one') {
+    if (state.loop === 'one') {
       seg = segs[i];                       // 单曲循环：还是这首
-    } else if (plLoop === 'random') {
+    } else if (!state.autoNext) {
+      /* 连播关掉：到这里就停，用户点「下一首」再走（不静默卡住） */
+      plNote('自动连播已关闭：点「下一首」继续');
+      return;
+    } else if (state.loop === 'random') {
       /* 随机：从**除当前这首以外**的里挑，避免连播同一首（只有一首时才回头） */
       var pool = segs.filter(function (x) { return x.key !== (segs[i] || {}).key; });
       seg = pool.length ? pool[Math.floor(Math.random() * pool.length)] : segs[i];
+    } else if (i + 1 >= segs.length) {
+      if (!loopWraps()) {                  // 最后一首 + 循环关：停在这里
+        plNote('已到歌单末尾（循环播放未开启）');
+        return;
+      }
+      seg = segs[0];
     } else {
-      seg = segs[(i + 1) % segs.length];   // 顺序：播完回头
+      seg = segs[i + 1];
     }
     if (seg) plPlay(seg.key);      // ⚠️ 用 key 不用 bvid：同 bvid 多分P 时按 bvid 会回到该期第一首
   }
