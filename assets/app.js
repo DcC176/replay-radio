@@ -4210,6 +4210,12 @@
       void document.body.offsetWidth;
     }
     document.body.classList.toggle('view-other', name !== 'live');
+    /* 侧栏收起状态只对录播页有意义（宽屏 + 三栏都在那一页）；
+       切走时清掉，免得带着 side-*-off 进直播间/监控室改到它们的列定义。 */
+    if (name !== 'live') {
+      document.body.classList.remove('side-l-off', 'side-r-off');
+      syncSideBtns();
+    }
     document.body.classList.toggle('view-multi', name === 'multi');
     document.body.classList.toggle('view-broadcast', name === 'broadcast');
     /* DD 板块自己也要一个 class：它整块全宽、播放器缩到后台。
@@ -4319,6 +4325,21 @@
     document.body.classList.toggle('theater', next);
     el.btnTheater.setAttribute('aria-pressed', String(next));
     el.btnTheater.textContent = next ? '退出宽屏' : '宽屏';
+  }
+
+  /* 宽屏模式的两侧边栏：各自收起 / 展开，互不影响。
+     状态只挂两个 body 类（side-l-off / side-r-off），CSS 按类改列定义 ——
+     不碰 state、不重排播放器，所以收起时画面继续播、进度不丢。 */
+  function syncSideBtns() {
+    [['btnSideL', 'side-l-off', '左'], ['btnSideR', 'side-r-off', '右']]
+      .forEach(function (it) {
+        var b = el[it[0]];
+        if (!b) return;
+        var off = document.body.classList.contains(it[1]);
+        b.setAttribute('aria-pressed', String(off));
+        b.title = (off ? '展开' : '收起') + it[2] + '侧边栏';
+        b.setAttribute('aria-label', b.title);
+      });
   }
 
   // 画质说明面板
@@ -5577,6 +5598,15 @@
     });
 
     el.btnTheater.addEventListener('click', function () { toggleTheater(); });
+    [['btnSideL', 'side-l-off'], ['btnSideR', 'side-r-off']].forEach(function (it) {
+      var b = el[it[0]];
+      if (!b) return;
+      b.addEventListener('click', function () {
+        document.body.classList.toggle(it[1]);
+        syncSideBtns();
+      });
+    });
+    syncSideBtns();
 
     // 播放地址有时效，过期或网络抖动时重新取一次，不要让画面卡死
     el.player.addEventListener('error', function () {
@@ -5625,23 +5655,126 @@
       if (!el.player || !el.player.requestFullscreen) return;
       try { el.player.requestFullscreen(); } catch (e) { /* 忽略 */ }
     });
-    function seekAt(clientX) {
-      if (!el.player || !isFinite(el.player.duration) || el.player.duration <= 0) return;
-      var box = el.ctrlProgress.getBoundingClientRect();
-      var r = Math.min(1, Math.max(0, (clientX - box.left) / box.width));
-      try { el.player.currentTime = r * el.player.duration; } catch (e) { /* 忽略 */ }
+    /* ---------------------------------------------------------------- 进度条
+       按下即定位、拖动只改「预览」、**松手才提交一次 seek**。
+       旧实现是在 mousemove 里直接写 currentTime：每移动一像素就 seek 一次，
+       长片上是连续卡顿；而且 timeupdate 同时在改宽度，条和鼠标会打架。
+       边界：比例钳在 [0,1]，且 duration 未知（空闲 / 还在取流）时整条不响应。 */
+    var drag = null;            // {id, r, wasPlaying}
+    var seekLock = 0;           // 松手到视频真正跳过去之间，别让 timeupdate 把条拉回原处
+    var rafId = 0;
+
+    function canSeek() {
+      return !!(el.player && el.player.src
+        && isFinite(el.player.duration) && el.player.duration > 0);
     }
-    el.ctrlProgress.addEventListener('mousedown', function (e) {
-      seekAt(e.clientX);
-      var move = function (ev) { seekAt(ev.clientX); };
-      var up = function () {
-        document.removeEventListener('mousemove', move);
-        document.removeEventListener('mouseup', up);
-      };
-      document.addEventListener('mousemove', move);
-      document.addEventListener('mouseup', up);
+    function ratioAt(clientX) {
+      var box = el.ctrlProgress.getBoundingClientRect();
+      if (!box.width) return 0;
+      return Math.min(1, Math.max(0, (clientX - box.left) / box.width));
+    }
+    /* 只写填充宽、圆点位置、时间与气泡。指针事件 120~240Hz，用 rAF 合并成每帧一次。 */
+    function paintAt(r) {
+      var pct = (r * 100).toFixed(2);
+      el.ctrlFilled.style.width = pct + '%';
+      el.ctrlDot.style.left = pct + '%';
+      var t = fmtClock(r * el.player.duration);
+      el.ctrlCur.textContent = t;
+      if (el.ctrlTip) {
+        el.ctrlTip.textContent = t;
+        el.ctrlTip.style.left = pct + '%';
+        el.ctrlTip.hidden = false;
+      }
+    }
+    function schedulePaint() {
+      if (rafId) return;
+      rafId = requestAnimationFrame(function () {
+        rafId = 0;
+        if (drag) paintAt(drag.r);
+      });
+    }
+    function endDrag(ev) {
+      if (!drag || (ev && ev.pointerId !== drag.id)) return;
+      var r = drag.r, resume = drag.wasPlaying;
+      drag = null;
+      el.ctrlProgress.classList.remove('dragging');
+      el.ctrlProgress.classList.add('settling');       // 松手反馈：圆点扩散一圈
+      setTimeout(function () { el.ctrlProgress.classList.remove('settling'); }, 480);
+      if (el.ctrlTip) el.ctrlTip.hidden = true;
+      if (ev) {
+        try { el.ctrlProgress.releasePointerCapture(ev.pointerId); } catch (e) { /* 已释放 */ }
+      }
+      if (!canSeek()) return;
+      seekLock = Date.now() + 800;
+      try { el.player.currentTime = r * el.player.duration; } catch (e) { /* 忽略 */ }
+      if (resume) {                                    // 拖之前在放：拖完继续放
+        var pr = el.player.play();
+        if (pr && typeof pr.catch === 'function') pr.catch(function () { /* 等手势 */ });
+      }
+    }
+    el.ctrlProgress.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      if (!canSeek()) return;
       e.preventDefault();
+      drag = { id: e.pointerId, r: ratioAt(e.clientX), wasPlaying: !el.player.paused };
+      try { el.ctrlProgress.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器 */ }
+      el.ctrlProgress.classList.add('dragging');
+      paintAt(drag.r);                                 // 按下立刻跟手（不等第一帧 rAF）
     });
+    el.ctrlProgress.addEventListener('pointermove', function (e) {
+      if (!drag || e.pointerId !== drag.id) return;
+      drag.r = ratioAt(e.clientX);
+      schedulePaint();
+    });
+    el.ctrlProgress.addEventListener('pointerup', endDrag);
+    el.ctrlProgress.addEventListener('pointercancel', endDrag);
+    /* 指针捕获在两种情况下会丢：拖到窗口外松手、浏览器自己取消。
+       只在元素上监听会留下「一直处于拖动态、条不再跟播放走」的僵尸状态。 */
+    el.ctrlProgress.addEventListener('lostpointercapture', function () { endDrag(); });
+    window.addEventListener('pointerup', endDrag);
+    window.addEventListener('pointercancel', endDrag);
+
+    /* ---------------------------------------------------------- 缓冲 / 加载提示
+       waiting / stalled / seeking 且数据没跟上时才出现；playing / canplay 后淡出。
+       250ms 延迟 + 400ms 最短停留：过站式抖动不会让它闪个不停。
+       动效全在 CSS 里（只改 transform / opacity），这里只管显隐时机。 */
+    var waitOn = 0, waitOff = 0, waitShownAt = 0, waitVisible = false;
+
+    function waitShow() {
+      if (waitOff) { clearTimeout(waitOff); waitOff = 0; }
+      if (waitOn || waitVisible) return;
+      waitOn = setTimeout(function () {
+        waitOn = 0;
+        waitVisible = true;
+        waitShownAt = Date.now();
+        el.pvWait.hidden = false;
+        requestAnimationFrame(function () { el.pvWait.classList.add('on'); });
+      }, 250);
+    }
+    function waitHide(force) {
+      if (waitOn) { clearTimeout(waitOn); waitOn = 0; }
+      if (!waitVisible) return;
+      if (!force && el.player.readyState < 3) return;   // 数据还没到位，继续显示
+      waitVisible = false;
+      var hold = Math.max(0, 400 - (Date.now() - waitShownAt));
+      waitOff = setTimeout(function () {
+        waitOff = 0;
+        el.pvWait.classList.remove('on');               // 走 opacity 过渡
+        setTimeout(function () {
+          if (!el.pvWait.classList.contains('on')) el.pvWait.hidden = true;
+        }, 260);
+      }, hold);
+    }
+    el.player.addEventListener('waiting', waitShow);
+    el.player.addEventListener('stalled', waitShow);
+    el.player.addEventListener('loadstart', waitShow);
+    el.player.addEventListener('seeking', function () {
+      if (el.player.readyState < 3) waitShow();
+    });
+    el.player.addEventListener('playing', function () { waitHide(true); });
+    el.player.addEventListener('canplay', function () { waitHide(); });
+    el.player.addEventListener('seeked', function () { waitHide(); });
+    el.player.addEventListener('error', function () { waitHide(true); });
 
     el.player.addEventListener('play', function () {
       el.ctrlPlay.classList.add('playing');
@@ -5659,8 +5792,7 @@
     el.player.addEventListener('loadedmetadata', function () {
       if (isFinite(el.player.duration)) el.ctrlDur.textContent = fmtClock(el.player.duration);
     });
-    el.player.addEventListener('timeupdate', function () {
-      el.ctrlCur.textContent = fmtClock(el.player.currentTime);
+    function paintNow() {
       if (!isFinite(el.player.duration) || el.player.duration <= 0) return;
       var r = el.player.currentTime / el.player.duration * 100;
       el.ctrlFilled.style.width = r + '%';
@@ -5671,6 +5803,18 @@
             / el.player.duration * 100) + '%';
         }
       } catch (e) { /* 忽略 */ }
+    }
+    el.player.addEventListener('timeupdate', function () {
+      // 拖动中由鼠标决定；松手后到视频真正跳过去之间（seekLock）也别抢，
+      // 否则条会先弹回旧位置再跳回来 —— 看起来像「拖不动」。
+      if (drag || Date.now() < seekLock) return;
+      el.ctrlCur.textContent = fmtClock(el.player.currentTime);
+      paintNow();
+    });
+    el.player.addEventListener('seeked', function () {
+      seekLock = 0;
+      el.ctrlCur.textContent = fmtClock(el.player.currentTime);
+      paintNow();
     });
 
     el.btnMute.classList.toggle('muted', el.player.muted || el.player.volume === 0);
@@ -6320,6 +6464,8 @@
       btnMutedef: document.getElementById('btn-mutedef'),
       btnRandom: document.getElementById('btn-random'),
       btnTheater: document.getElementById('btn-theater'),
+      btnSideL: document.getElementById('btn-side-l'),
+      btnSideR: document.getElementById('btn-side-r'),
       btnQuality: document.getElementById('btn-quality'),
       btnQnHint: document.getElementById('btn-qn-hint'),
       qualityPanel: document.getElementById('quality-panel'),
@@ -6328,6 +6474,8 @@
       playerBox: document.getElementById('player-box'),
       pvTitle: document.getElementById('pv-title'),
       ctrlBuffer: document.getElementById('ctrl-buffer'),
+      ctrlTip: document.getElementById('ctrl-tip'),
+      pvWait: document.getElementById('pv-wait'),
       ctrlDot: document.getElementById('ctrl-dot'),
       ctrlPlay: document.getElementById('ctrl-play'),
       ctrlMute: document.getElementById('ctrl-mute'),

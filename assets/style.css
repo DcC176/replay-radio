@@ -887,6 +887,7 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
   height: 15px;
   margin: 0 12px;
   cursor: pointer;
+  touch-action: none;              /* 触摸拖动时不要滚页面 */
 }
 /* ⚠️ 播放器进度条与音量条的配色**不能用 --ink / --text**：
    这两组变量是"页面底色上的前景色"，浅色主题下会变成深色；
@@ -922,6 +923,108 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
 .pv-progress:hover::before,
 .pv-progress:hover .pv-buffer,
 .pv-progress:hover .pv-filled { height: 5px; }
+
+/* 轨道与进度在「悬停 → 拖动」之间过渡，避免高度突变；只动 height，代价可忽略 */
+.pv-progress::before,
+.pv-progress .pv-buffer,
+.pv-progress .pv-filled { transition: height .12s ease; }
+
+/* 拖动预览气泡：跟着鼠标那一列，松手即隐藏 */
+.pv-tip {
+  position: absolute;
+  bottom: 17px;
+  left: 0;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  background: rgba(0, 0, 0, .84);
+  border: 1px solid rgba(255, 255, 255, .2);
+  transform: translateX(-50%) translateY(4px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s ease, transform .12s ease;
+  white-space: nowrap;
+}
+.pv-tip[hidden] { display: none; }
+.pv-progress.dragging { cursor: grabbing; }
+.pv-progress.dragging::before,
+.pv-progress.dragging .pv-buffer,
+.pv-progress.dragging .pv-filled { height: 6px; }
+.pv-progress.dragging .pv-dot {
+  transform: translateX(-50%) scale(1.36);
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, .22);
+}
+.pv-progress.dragging .pv-tip { opacity: 1; transform: translateX(-50%) translateY(0); }
+/* 松手：圆点扩散一圈，表示「已经提交跳转」 */
+.pv-progress.settling .pv-dot { animation: pvDotPulse .42s ease-out; }
+@keyframes pvDotPulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, .55); }
+  100% { box-shadow: 0 0 0 10px rgba(255, 255, 255, 0); }
+}
+
+/* ---------------------------------------------------------------- 缓冲提示
+   卡通风格：一颗会轻轻摇晃的胶囊 + 三颗弹跳的小点。只改 transform / opacity，
+   不触发重排；尺寸跟播放器一起缩（clamp），窄屏和大屏都不挤。
+   注意 `.pv-wait` 是 flex，[hidden] 必须显式写回 display:none，否则隐不掉。 */
+.pv-wait {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .5em;
+  font-size: clamp(11px, 1.1vmin + 7px, 15px);
+  color: #fff;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .24s ease;
+  background: radial-gradient(ellipse at center, rgba(0, 0, 0, .34), rgba(0, 0, 0, 0) 62%);
+}
+.pv-wait[hidden] { display: none; }
+.pv-wait.on { opacity: 1; }
+.pv-wait-bubble {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: .34em;
+  padding: .5em .74em;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, .74);
+  border: 1px solid rgba(255, 255, 255, .18);
+  animation: pvWaitWobble 1.6s ease-in-out infinite;
+}
+.pv-wait-bubble i {
+  width: .52em;
+  height: .52em;
+  border-radius: 50%;
+  background: #fff;
+  transform-origin: 50% 100%;
+  animation: pvWaitBounce .92s ease-in-out infinite;
+  will-change: transform;
+}
+.pv-wait-bubble i:nth-child(2) { background: var(--red); animation-delay: .12s; }
+.pv-wait-bubble i:nth-child(3) { animation-delay: .24s; }
+.pv-wait-txt { letter-spacing: .04em; text-shadow: 0 1px 3px rgba(0, 0, 0, .65); }
+
+@keyframes pvWaitBounce {
+  0%, 100% { transform: translateY(0) scaleY(.86); }
+  35% { transform: translateY(-.44em) scaleY(1.06); }
+  62% { transform: translateY(0) scaleY(.92); }
+}
+@keyframes pvWaitWobble {
+  0%, 100% { transform: rotate(-1.6deg); }
+  50% { transform: rotate(1.6deg); }
+}
+/* 减少动态效果时只留文字与静态点，不做弹跳/摇晃 */
+@media (prefers-reduced-motion: reduce) {
+  .pv-wait-bubble,
+  .pv-wait-bubble i { animation: none; }
+  .pv-progress.settling .pv-dot { animation: none; }
+}
 
 .pv-bar {
   display: flex;
@@ -1150,6 +1253,18 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
   white-space: nowrap;
 }
 .pv-topbtns { display: flex; gap: 6px; flex: 0 0 auto; }
+/* 宽屏专用：两侧边栏开关。图标随状态翻转（收起→指向内，展开→指向外） */
+.pv-side { display: none; align-items: center; padding: 3px 8px; }
+body.theater .pv-side { display: inline-flex; }
+.pv-side svg { width: 12px; height: 12px; display: block; }
+.pv-side .i-exp { display: none; }
+body.side-l-off #btn-side-l .i-col,
+body.side-r-off #btn-side-r .i-col { display: none; }
+body.side-l-off #btn-side-l .i-exp,
+body.side-r-off #btn-side-r .i-exp { display: block; }
+/* 收起状态用主色实心，跟「已按下」的语义一致 */
+body.side-l-off #btn-side-l,
+body.side-r-off #btn-side-r { background: rgba(245, 71, 91, .92); }
 .pv-btn {
   padding: 3px 11px;
   border: 0;
@@ -1585,6 +1700,41 @@ body.theater .wrap {
   gap: 12px;
   padding: 14px 14px 20px;
   align-items: start;
+  /* 收起 / 展开侧栏时列宽平滑变化（只在这一下付代价，常驻会拖慢拖窗口） */
+  transition: grid-template-columns .22s ease;
+}
+
+/* -------------------------------------------------------------- 宽屏两侧边栏
+   两个开关各自独立：body 上 side-l-off / side-r-off 只管自己那一侧，
+   同时按也不会互相覆盖（下面第三条规则专门处理「两边都收起」）。
+   ⚠️ 必须限定在「侧栏本来就存在」的宽度（>1280）：1281 以下那条断点会主动
+   `grid-template-columns: minmax(0,1fr)` + 隐藏侧栏，这里若不加限制，
+   收起一侧会把另一侧重新「复活」成 150~190px 的列（实测 1280 下确实如此）。 */
+@media (min-width: 1281px) {
+  /* 收掉哪一侧就少一列：网格是自动排布，留一个 0 宽占位列会让剩下的项整体左移
+     （实测「收起左栏」后 .col-right 掉进 0 宽的第一列、画面缩成 320px 的下限）。 */
+  body.theater.side-l-off main.wrap {
+    grid-template-columns: minmax(0, 1fr) clamp(150px, 12vw, 190px);
+  }
+  body.theater.side-r-off main.wrap {
+    grid-template-columns: clamp(150px, 12vw, 190px) minmax(0, 1fr);
+  }
+  body.theater.side-l-off.side-r-off main.wrap {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  body.theater.side-l-off #strip-left,
+  body.theater.side-r-off #strip-right { display: none; }
+}
+@media (max-width: 1280px) {
+  /* 这个宽度下侧栏本来就是隐藏的，开关没有可操作对象，别露出来 */
+  body.theater .pv-side { display: none; }
+}
+/* 画面跟着列宽一起长，不要瞬移 */
+body.theater .player-box { transition: width .22s ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  body.theater .wrap,
+  body.theater .player-box { transition: none; }
 }
 
 body.theater .strip {
