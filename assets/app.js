@@ -4273,6 +4273,16 @@
       document.body.classList.remove('side-l-off', 'side-r-off');
       syncSideBtns();
     }
+    /* 宽屏（body.theater）只对**有播放器主画面**的两页有意义：录播是三栏、
+       直播间是左右分栏，CSS 里都单独写过。切到别的板块必须退出，否则：
+       `body.theater .views{display:none}` 会把新板块的整块内容藏掉，而 theater 那条
+       三栏网格又没在这些页定义 —— 页面空白，只剩录播的分段侧栏被该板块的列定义
+       拉满整宽（用户 2026-11-12 反馈：宽屏下点「监控室」，整屏只剩「本场分段」列表）。
+       返回录播时不自动恢复宽屏，与上面侧栏收起的处理口径一致。 */
+    if (name !== 'live' && name !== 'broadcast' && document.body.classList.contains('theater')
+        && el.btnTheater) {
+      toggleTheater(false);
+    }
     document.body.classList.toggle('view-multi', name === 'multi');
     document.body.classList.toggle('view-broadcast', name === 'broadcast');
     /* DD 板块自己也要一个 class：它整块全宽、播放器缩到后台。
