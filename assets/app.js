@@ -5728,6 +5728,71 @@
       el.player.volume = parseFloat(this.value);
       el.player.muted = el.player.volume === 0;
     });
+
+    /* 音量弹层：B 站是悬停向上弹竖向滑杆；触屏没有 hover，所以点图标也能开合。
+       图标不是静音键（静音键已按需求删掉），只控制弹层显隐。 */
+    function setVolPop(on) {
+      if (!el.volPop) return;
+      el.volPop.hidden = !on;
+      if (el.ctrlVolBtn) el.ctrlVolBtn.setAttribute('aria-expanded', on ? 'true' : 'false');
+    }
+    if (el.volWrap && el.volPop) {
+      el.volWrap.addEventListener('mouseenter', function () { setVolPop(true); });
+      el.volWrap.addEventListener('mouseleave', function () { setVolPop(false); });
+      el.ctrlVolBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        setVolPop(el.volPop.hidden);
+      });
+      document.addEventListener('pointerdown', function (e) {
+        if (!el.volPop.hidden && !el.volWrap.contains(e.target)) setVolPop(false);
+      });
+    }
+
+    /* 倍速：只对点播/歌单有时间轴可调；直播流没有倍速，按钮在对应视图里由 CSS 隐藏 */
+    var RATES = [2, 1.5, 1.25, 1, 0.75, 0.5];
+    if (el.rateMenu && el.ctrlRate) {
+      el.rateMenu.innerHTML = RATES.map(function (r) {
+        return '<button type="button" data-rate="' + r + '">' + r.toFixed(1) + 'x</button>';
+      }).join('');
+      el.ctrlRate.addEventListener('click', function (e) {
+        e.stopPropagation();
+        el.rateMenu.hidden = !el.rateMenu.hidden;
+      });
+      el.rateMenu.addEventListener('click', function (e) {
+        var b = e.target.closest('button[data-rate]');
+        if (!b) return;
+        var r = parseFloat(b.getAttribute('data-rate')) || 1;
+        if (el.player) el.player.playbackRate = r;
+        el.ctrlRate.textContent = r.toFixed(1) + 'x';
+        Array.prototype.forEach.call(el.rateMenu.children, function (x) {
+          x.classList.toggle('on', Math.abs((parseFloat(x.getAttribute('data-rate')) || 1) - r) < 1e-3);
+        });
+        el.rateMenu.hidden = true;
+      });
+      document.addEventListener('pointerdown', function (e) {
+        if (el.rateMenu.hidden) return;
+        if (el.rateMenu.contains(e.target) || el.ctrlRate.contains(e.target)) return;
+        el.rateMenu.hidden = true;
+      });
+      var cur = el.player ? el.player.playbackRate : 1;
+      el.ctrlRate.textContent = cur.toFixed(1) + 'x';
+    }
+
+    /* 画中画：浏览器不支持就整颗按钮不出现（.pv-ic[hidden] 已经确保 [hidden] 真的隐藏） */
+    if (el.ctrlPip) {
+      if (!document.pictureInPictureEnabled || !el.player.requestPictureInPicture) {
+        el.ctrlPip.hidden = true;
+      } else {
+        el.ctrlPip.hidden = false;
+        el.ctrlPip.addEventListener('click', function () {
+          if (document.pictureInPictureElement) {
+            document.exitPictureInPicture().catch(function () { /* 忽略 */ });
+          } else {
+            el.player.requestPictureInPicture().catch(function () { /* 需要手势/不支持 */ });
+          }
+        });
+      }
+    }
     el.btnFs.addEventListener('click', function () {
       if (!el.player || !el.player.requestFullscreen) return;
       try { el.player.requestFullscreen(); } catch (e) { /* 忽略 */ }
@@ -6756,6 +6821,12 @@
       ctrlDot: document.getElementById('ctrl-dot'),
       ctrlPlay: document.getElementById('ctrl-play'),
       ctrlVol: document.getElementById('ctrl-vol'),
+      ctrlVolBtn: document.getElementById('ctrl-vol-btn'),
+      volWrap: document.getElementById('vol-wrap'),
+      volPop: document.getElementById('vol-pop'),
+      ctrlRate: document.getElementById('ctrl-rate'),
+      rateMenu: document.getElementById('rate-menu'),
+      ctrlPip: document.getElementById('ctrl-pip'),
       ctrlFs: document.getElementById('ctrl-fs'),
       ctrlProgress: document.getElementById('ctrl-progress'),
       ctrlFilled: document.getElementById('ctrl-filled'),

@@ -998,14 +998,37 @@ window.__BOOT_T0 = Date.now();
             <svg class="i-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4h3.5v16H7zM13.5 4H17v16h-3.5z"/></svg>
           </button>
           <span class="pv-time"><span id="ctrl-cur">0:00</span><em>/</em><span id="ctrl-dur">0:00</span></span>
-          <!-- 音量滑杆常显：原来收在静音按钮后面（悬停才展开），静音键删掉后
-               它成了唯一的声音入口，必须一直看得见、点得到。 -->
-          <div class="pv-volwrap">
-            <input type="range" id="ctrl-vol" class="pv-vol" min="0" max="1" step="0.05" value="1" title="音量">
-          </div>
           <div class="pv-grow"></div>
           <select class="pv-sel" id="quality" title="清晰度"><option value="80">清晰度…</option></select>
+          <!-- 倍速：与 B 站点播页一样放在清晰度右侧；直播流没有倍速，按视图隐藏 -->
+          <span class="pv-ratewrap" id="rate-wrap">
+            <button class="pv-ic pv-txt" id="ctrl-rate" type="button" title="播放速度">1.0x</button>
+            <div class="pv-menu" id="rate-menu" hidden></div>
+          </span>
+          <!-- 音量：照 B 站的做法收成一个图标，悬停向上弹出竖向滑杆。
+               注意它**不是静音键**（静音键已按你的要求删掉）：点一下只展开/收起滑杆。 -->
+          <div class="pv-volwrap" id="vol-wrap">
+            <button class="pv-ic" id="ctrl-vol-btn" type="button"
+                    aria-label="音量" aria-expanded="false" title="音量">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 9v6h4l5 3.5v-13L8 9H4z"/>
+                <path d="M16 9.5a3.5 3.5 0 010 5M18.5 7a7 7 0 010 10"/>
+              </svg>
+            </button>
+            <div class="pv-volpop" id="vol-pop" hidden>
+              <input type="range" id="ctrl-vol" class="pv-vol" min="0" max="1" step="0.05" value="1"
+                     title="音量" aria-label="音量">
+            </div>
+          </div>
           <button class="pv-ic pv-txt" id="btn-theater" title="网页全屏">宽屏</button>
+          <button class="pv-ic" id="ctrl-pip" type="button" title="画中画" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="14" rx="2"/>
+              <rect x="12" y="12" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/>
+            </svg>
+          </button>
           <button class="pv-ic" id="ctrl-fs" title="全屏">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 011-1h4M15 4h4a1 1 0 011 1v4M20 15v4a1 1 0 01-1 1h-4M9 20H5a1 1 0 01-1-1v-4"/></svg>
           </button>

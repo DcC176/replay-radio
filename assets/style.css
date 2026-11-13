@@ -1060,26 +1060,85 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
   color: #fff;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  /* 时间是控制条里唯一会变宽的东西（"1:23:45 / 3:00:21"）。加了倍速按钮之后
+     430px 的窗口下会把它挤出可视区（实测溢出 30px），所以让它可压缩：
+     宁可时间显示得短一点，也不能把右侧按钮顶出去。 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
 }
 .pv-time em { font-style: normal; margin: 0 3px; color: rgba(var(--ink), .5); }
 
-.pv-volwrap { display: flex; align-items: center; }
-/* 音量滑杆**常显**：原来它宽 0、悬停静音键才展开；静音键删掉之后它就是唯一的声音
-   入口，收起时连点都点不到（悬停区只有 2px），所以固定给 56px。 */
+/* 倍速弹层：与音量弹层同一套观感，贴在按钮正上方 */
+.pv-ratewrap { position: relative; display: inline-flex; }
+.pv-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, .86);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+}
+.pv-menu[hidden] { display: none; }
+.pv-menu button {
+  border: 0;
+  background: none;
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 2px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  text-align: center;
+  white-space: nowrap;
+}
+.pv-menu button:hover { background: rgba(255, 255, 255, .16); }
+.pv-menu button.on { color: var(--red); font-weight: 600; }
+/* 直播流没有倍速（B 站直播页也没有）；监控室是多路，也不适用 */
+body.view-broadcast .pv-ratewrap,
+body.view-multi .pv-ratewrap { display: none; }
+/* 倍速按钮的文字宽度固定，避免 1.0x ↔ 1.5x 之间抖动；窄屏靠缩 padding 省宽度 */
+#ctrl-rate { min-width: 34px; padding: 0 6px; }
+/* .pv-ic 是 inline-flex，会把 [hidden] 盖掉 —— 画中画按钮不支持时要真的消失 */
+.pv-ic[hidden] { display: none; }
+
+/* 音量：照 B 站的做法收成一个图标，悬停向上弹出**竖向**滑杆。
+   它不是静音键（静音键已删）：点图标只展开/收起弹层。 */
+.pv-volwrap { position: relative; display: flex; align-items: center; }
+.pv-volpop {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 4px);
+  transform: translateX(-50%);
+  width: 26px;
+  height: 92px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, .82);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+}
+.pv-volpop[hidden] { display: none; }
 .pv-vol {
-  width: 56px;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 76px;
   height: 3px;
-  margin-left: 2px;
-  opacity: .92;
+  margin: 0;
+  padding: 0;
+  transform: translate(-50%, -50%) rotate(-90deg);
   border-radius: 2px;
-  background: rgba(255, 255, 255, .3);
+  background: rgba(255, 255, 255, .34);
   outline: none;
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
-  transition: opacity .18s;
 }
-.pv-vol:hover { opacity: 1; }
 .pv-vol::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 10px; height: 10px;
@@ -1693,8 +1752,8 @@ body.view-other .credits { display: none; }
   .pv-ic svg { width: 16px; height: 16px; }
   .pv-sel { padding: 4px 18px 4px 6px; font-size: 11px; }
   .pv-txt { padding: 0 8px; font-size: 11px; }
-  /* 静音键删掉后，音量滑杆是这个宽度下唯一的声音入口 —— 不能藏，缩窄到 40px */
-  .pv-vol { display: block; width: 40px; }
+  /* 竖向弹层在窄栏里也放得下，只把轨道缩短一点 */
+  .pv-vol { display: block; width: 68px; }
   .np { padding: 13px; }
   .np-title { font-size: 14px; }
   .np-btns { gap: 6px; margin-top: 12px; }
