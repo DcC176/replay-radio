@@ -1047,11 +1047,9 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
 }
 .pv-ic:hover { background: rgba(var(--ink), .16); }
 .pv-ic svg { width: 19px; height: 19px; }
-.pv-ic .i-pause, .pv-ic .i-mute { display: none; }
+.pv-ic .i-pause { display: none; }
 .pv-ic.playing .i-play { display: none; }
 .pv-ic.playing .i-pause { display: block; }
-.pv-ic.muted .i-vol { display: none; }
-.pv-ic.muted .i-mute { display: block; }
 /* 文字按钮默认会被 flex 压缩：窄屏下「宽屏」实测被挤到 32px（自然宽 44px），
    文字因此折成两行。禁掉收缩并禁止换行。 */
 .pv-txt { width: auto; flex: none; white-space: nowrap; padding: 0 10px; font-size: 12px; font-family: inherit; }
@@ -1066,20 +1064,22 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
 .pv-time em { font-style: normal; margin: 0 3px; color: rgba(var(--ink), .5); }
 
 .pv-volwrap { display: flex; align-items: center; }
+/* 音量滑杆**常显**：原来它宽 0、悬停静音键才展开；静音键删掉之后它就是唯一的声音
+   入口，收起时连点都点不到（悬停区只有 2px），所以固定给 56px。 */
 .pv-vol {
-  width: 0;
+  width: 56px;
   height: 3px;
   margin-left: 2px;
-  opacity: 0;
+  opacity: .92;
   border-radius: 2px;
   background: rgba(255, 255, 255, .3);
   outline: none;
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
-  transition: width .18s, opacity .18s;
+  transition: opacity .18s;
 }
-.pv-volwrap:hover .pv-vol { width: 64px; opacity: 1; }
+.pv-vol:hover { opacity: 1; }
 .pv-vol::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 10px; height: 10px;
@@ -1288,7 +1288,7 @@ body.side-r-off #btn-side-r { background: rgba(245, 71, 91, .92); }
 .pv-opt .i-one { display: none; }
 #btn-loop[data-loop="one"] .i-one { display: block; }
 
-/* 播放器内的一次性提示：与 .mute-hint 同高（控制条 50px + 8px 间隙），水平居中 */
+/* 播放器内的一次性提示：贴在控制条上方（控制条 50px + 8px 间隙），水平居中 */
 .pv-toast {
   position: absolute;
   left: 50%;
@@ -1311,26 +1311,6 @@ body.side-r-off #btn-side-r { background: rgba(245, 71, 91, .92); }
 .pv-toast.on { opacity: 1; transform: translate(-50%, 0); }
 .pv-toast[hidden] { display: none; }
 
-.mute-hint {
-  position: absolute;
-  left: 12px;
-  /* ⚠️ 控制条高 50px，原来 46px 会让提示条压进控制条（实测 top=749 vs 控制条 768，
-     底边 772 直接盖住进度条）。抬到 58px，留 8px 间隙。 */
-  bottom: 58px;
-  padding: 4px 11px;
-  border-radius: 999px;
-  /* 它压在视频画面上：去掉模糊后要更实一点，否则视频细节透上来会吃掉字 */
-  background: rgba(0, 0, 0, .86);
-  /* ⚠️ 用固定的浅色，不能用 var(--text-2)：那个变量在浅色主题下是深灰，
-     深灰字压在这条黑胶囊上等于看不见（用户实测截图就是这样）。
-     下一行让它跟随播放器 UI 一起出现/消失，鼠标移开就别挡画面。 */
-  color: rgba(255, 255, 255, .92);
-  font-size: 11.5px;
-  opacity: 0;
-  transition: opacity .18s;
-}
-.player-box:hover .mute-hint { opacity: 1; }
-.mute-hint[hidden] { display: none; }
 
 
 /* 播放器下方的工具面板（画质说明 / 片段标注） */
@@ -1713,8 +1693,8 @@ body.view-other .credits { display: none; }
   .pv-ic svg { width: 16px; height: 16px; }
   .pv-sel { padding: 4px 18px 4px 6px; font-size: 11px; }
   .pv-txt { padding: 0 8px; font-size: 11px; }
-  /* 音量滑块在这个宽度里根本展不开（hover 要再伸出 64px），只留静音键 */
-  .pv-vol { display: none; }
+  /* 静音键删掉后，音量滑杆是这个宽度下唯一的声音入口 —— 不能藏，缩窄到 40px */
+  .pv-vol { display: block; width: 40px; }
   .np { padding: 13px; }
   .np-title { font-size: 14px; }
   .np-btns { gap: 6px; margin-top: 12px; }
@@ -4032,7 +4012,6 @@ body.music-mode .mv { display: flex; }
 /* 音乐模式下把视频的控件收起来（它们 z-index 只有 3，本来就被盖住，但要防 hover 露出） */
 body.music-mode .pv-top,
 body.music-mode .pv-ctrl,
-body.music-mode .mute-hint { display: none; }
 
 .mv-head {
   flex: 0 0 auto;

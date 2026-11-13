@@ -3194,7 +3194,8 @@
 
   var KEY_ACTIONS = [
     { id: 'playPause', name: '播放 / 暂停', run: function () { clickSel('#ctrl-play'); } },
-    { id: 'muteToggle', name: '静音 / 取消静音', run: function () { clickSel('#ctrl-mute'); } },
+    { id: 'muteToggle', name: '静音 / 取消静音',
+      run: function () { if (el.player) el.player.muted = !el.player.muted; } },
     { id: 'volUp', name: '音量增大', run: function () { bumpVolume(0.1); } },
     { id: 'volDown', name: '音量减小', run: function () { bumpVolume(-0.1); } },
     { id: 'seekBack', name: '快退 10 秒', scope: '仅回放', run: function () { seekBy(-10); } },
@@ -5434,10 +5435,6 @@
       b.disabled = !state.muted;
       b.classList.toggle('done', !state.muted);
     });
-
-    el.muteHint.textContent = state.muted
-      ? '静音播放中 · 点「进入直播」开启声音'
-      : '已开启声音 · 若浏览器拦截自动播放，请点播放器内的播放键';
   }
 
   function renderChips() {
@@ -5720,16 +5717,11 @@
     /* ------------------------ 原生播放控件 ------------------------ */
 
     el.btnPlay = el.ctrlPlay;
-    el.btnMute = el.ctrlMute;
     el.btnFs = el.ctrlFs;
     el.btnPlay.addEventListener('click', function () {
       if (!el.player || !el.player.src) return;
       if (el.player.paused) el.player.play().catch(function () {});
       else el.player.pause();
-    });
-    el.btnMute.addEventListener('click', function () {
-      if (!el.player || !el.player.src) return;
-      el.player.muted = !el.player.muted;
     });
     el.ctrlVol.addEventListener('input', function () {
       if (!el.player || !el.player.src) return;
@@ -5884,9 +5876,7 @@
       el.playerBox.classList.add('paused');
     });
     el.player.addEventListener('volumechange', function () {
-      el.btnMute.classList.toggle('muted', el.player.muted || el.player.volume === 0);
       el.ctrlVol.value = el.player.muted ? 0 : el.player.volume;
-      el.btnMute.setAttribute('aria-label', el.player.muted ? '取消静音' : '静音');
     });
     el.player.addEventListener('loadedmetadata', function () {
       if (isFinite(el.player.duration)) el.ctrlDur.textContent = fmtClock(el.player.duration);
@@ -5922,7 +5912,6 @@
     el.player.addEventListener('timeupdate', boundaryCheck);
     el.player.addEventListener('ended', boundaryCheck);
 
-    el.btnMute.classList.toggle('muted', el.player.muted || el.player.volume === 0);
     el.ctrlVol.value = el.player.muted ? 0 : el.player.volume;
     el.btnQpClose.addEventListener('click', function () { toggleQuality(false); });
 
@@ -6745,7 +6734,6 @@
       npPos: document.getElementById('np-pos'),
       npDur: document.getElementById('np-dur'),
       liveBadge: document.getElementById('np-live'),
-      muteHint: document.getElementById('mute-hint'),
       upnext: document.getElementById('next-list'),
       btnMutedef: document.getElementById('btn-mutedef'),
       btnRandom: document.getElementById('btn-random'),
@@ -6767,7 +6755,6 @@
       btnLoop: document.getElementById('btn-loop'),
       ctrlDot: document.getElementById('ctrl-dot'),
       ctrlPlay: document.getElementById('ctrl-play'),
-      ctrlMute: document.getElementById('ctrl-mute'),
       ctrlVol: document.getElementById('ctrl-vol'),
       ctrlFs: document.getElementById('ctrl-fs'),
       ctrlProgress: document.getElementById('ctrl-progress'),
@@ -8173,9 +8160,8 @@
       grid.innerHTML = list.map(multiCellHtml).join('');
       bindFaceFallback(grid);           // 离线格的头像取不到时换首字母，不留破图
       var note = document.getElementById('multi-note');
-      if (note) {
-        note.textContent = list.length + ' 路 · 声音默认关闭，点 🔊 独奏；点 ⤢ 聚焦';
-      }
+      // 这行只用于临时状态（已添加 / 添加失败…），不再放常驻说明 —— 用户 2026-11-14 要求
+      if (note) note.textContent = '';
       list.forEach(function (s) {
         var cell = grid.querySelector('.ms-cell[data-id="' + s.id + '"]');
         if (cell) startMultiCell(s, cell);

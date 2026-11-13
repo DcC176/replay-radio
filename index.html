@@ -765,8 +765,6 @@ window.__BOOT_T0 = Date.now();
 
     <section class="view" id="view-settings">
       <h1 class="title sm">设置</h1>
-      <p class="sub">播放器带<b>默认快捷键</b>（← / → 快退快进 10 秒，↑ / ↓ 音量 ±10%），
-        下表可以改成你习惯的组合。绑定后在任何页面都生效；只存在本机浏览器里，不上传。</p>
 
       <div class="live-card">
         <div class="live-card-h">外观</div>
@@ -1000,11 +998,9 @@ window.__BOOT_T0 = Date.now();
             <svg class="i-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4h3.5v16H7zM13.5 4H17v16h-3.5z"/></svg>
           </button>
           <span class="pv-time"><span id="ctrl-cur">0:00</span><em>/</em><span id="ctrl-dur">0:00</span></span>
+          <!-- 音量滑杆常显：原来收在静音按钮后面（悬停才展开），静音键删掉后
+               它成了唯一的声音入口，必须一直看得见、点得到。 -->
           <div class="pv-volwrap">
-            <button class="pv-ic" id="ctrl-mute" title="静音">
-              <svg class="i-vol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 3.5v-13L8 9H4z"/><path d="M16 9.5a3.5 3.5 0 010 5M18.5 7a7 7 0 010 10"/></svg>
-              <svg class="i-mute" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 3.5v-13L8 9H4z"/><path d="M16 10l4 4M20 10l-4 4"/></svg>
-            </button>
             <input type="range" id="ctrl-vol" class="pv-vol" min="0" max="1" step="0.05" value="1" title="音量">
           </div>
           <div class="pv-grow"></div>
@@ -1025,7 +1021,6 @@ window.__BOOT_T0 = Date.now();
         </div>
       </div>
 
-      <div class="mute-hint" id="mute-hint">静音播放中 · 点「进入直播」开启声音</div>
       <div class="offline-banner" id="offline-banner" hidden></div>
 
       <!-- 音乐播放器视图：切到「播放器模式」时盖住视频区（视频仍在后台放声音） -->
