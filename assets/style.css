@@ -3169,11 +3169,15 @@ body.view-multi .col-right { display: none; }
 .multi-grid .ms-cell.lead {
   box-shadow: inset 0 0 0 2px var(--red);
 }
-/* 「填满」布局（7 路以上、宫格铺不满时）：格子按 px 绝对定位，由 JS 算好；
-   副画面用 cover 吃掉多余比例，所以墙上不留空格（用户 2026-11-05 选定）。 */
+/* 「填满」布局（7 路以上、宫格铺不满时）：格子按 px 绝对定位，由 JS 算好。
+   ⚠️ 这里**不能用 cover**：格子是按剩余空间切的、往往不是 16:9，
+   cover 会把画面裁掉一大块（实测 1.04:1 的格子会把 16:9 的画面左右各裁掉两成，
+   底部那两格就是这样）。用户 2026-11-13 明确要求「完整展示直播画面，不裁剪」，
+   所以一律 contain：整幅画面等比缩进格子里，多出来的上下/左右留黑边。
+   2026-11-05 用 cover 是为了「墙上不留空格」—— 该取舍已被这次要求覆盖。 */
 .multi-grid.filling { display: block; position: relative; }
 .multi-grid.filling .ms-cell { position: absolute; }
-.multi-grid.filling .ms-cell:not(.lead) video { object-fit: cover; }
+.multi-grid.filling .ms-cell video { object-fit: contain; }
 
 /* 竖屏分层：位置尺寸全部由 JS 按「实时宽高比」写成 px（每一格都严格 16:9）。
    与 filling 的区别是**一律 contain**：竖屏下再走 cover 会把第二大那格
