@@ -1016,11 +1016,76 @@ window.__BOOT_T0 = Date.now();
           </div>
           <span class="pv-time"><span id="ctrl-cur">0:00</span><em>/</em><span id="ctrl-dur">0:00</span></span>
           <div class="pv-grow"></div>
-          <select class="pv-sel" id="quality" title="清晰度"><option value="80">清晰度…</option></select>
+          <!-- 画质：原生 select **保留但隐藏**，它是清晰度数据与状态的唯一来源
+               （setQualityList 写 option、change 事件切流、xl_qn 记忆、降级提示全走它）。
+               用户看到的是下面这套按 B 站复刻的面板。 -->
+          <select class="pv-sel" id="quality" title="清晰度" hidden aria-hidden="true" tabindex="-1">
+            <option value="">清晰度</option>
+          </select>
+          <span class="pv-popwrap" id="qn-wrap">
+            <button class="pv-ic pv-txt pv-qnbtn" id="btn-qn" type="button"
+                    aria-haspopup="menu" aria-expanded="false" aria-controls="quality-panel"
+                    title="清晰度"><span id="qn-label">清晰度…</span></button>
+            <div class="pv-pop pv-qnpop" id="quality-panel" role="menu"
+                 aria-label="清晰度" hidden><ul class="qn-list" id="qn-list"></ul></div>
+          </span>
           <!-- 倍速：与 B 站点播页一样放在清晰度右侧；直播流没有倍速，按视图隐藏 -->
           <span class="pv-ratewrap" id="rate-wrap">
             <button class="pv-ic pv-txt" id="ctrl-rate" type="button" title="播放速度">1.0x</button>
             <div class="pv-menu" id="rate-menu" hidden></div>
+          </span>
+          <!-- 设置（齿轮）：按 B 站点播页放在「倍速」右边、「网页全屏」左边 -->
+          <span class="pv-popwrap" id="set-wrap">
+            <button class="pv-ic" id="btn-settings" type="button"
+                    aria-haspopup="menu" aria-expanded="false" aria-controls="settings-panel"
+                    title="设置">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3.2"/>
+                <path d="M19.5 14.3a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V20a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1.08-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H4a2 2 0 110-4h.09a1.65 1.65 0 001.51-1.08 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H10a1.65 1.65 0 001-1.51V4a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V10a1.65 1.65 0 001.51 1H20a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+              </svg>
+            </button>
+            <div class="pv-pop pv-setpop" id="settings-panel" role="menu"
+                 aria-label="播放设置" hidden>
+              <div class="set-row" data-act="mirror" role="menuitemcheckbox"
+                   aria-checked="false" tabindex="0">
+                <span class="set-label">镜像画面</span>
+                <span class="set-sw" aria-hidden="true"><i></i></span>
+              </div>
+              <div class="set-row" data-act="loop" role="menuitemcheckbox"
+                   aria-checked="false" tabindex="0">
+                <span class="set-label">单集循环</span>
+                <span class="set-sw" aria-hidden="true"><i></i></span>
+              </div>
+              <div class="set-row" data-act="autonext" role="menuitemcheckbox"
+                   aria-checked="true" tabindex="0">
+                <span class="set-label">自动连播</span>
+                <span class="set-sw" aria-hidden="true"><i></i></span>
+              </div>
+              <div class="set-row set-sub" data-act="rate" role="menuitem"
+                   aria-haspopup="true" aria-expanded="false" tabindex="0">
+                <span class="set-label">播放速度</span>
+                <span class="set-val" id="set-rate-val">1.0x</span>
+                <i class="set-arrow" aria-hidden="true"></i>
+              </div>
+              <div class="set-sublist" id="set-rate-list" hidden></div>
+              <div class="set-row set-sub" data-act="fit" role="menuitem"
+                   aria-haspopup="true" aria-expanded="false" tabindex="0">
+                <span class="set-label">画面比例</span>
+                <span class="set-val" id="set-fit-val">适应</span>
+                <i class="set-arrow" aria-hidden="true"></i>
+              </div>
+              <div class="set-sublist" id="set-fit-list" hidden></div>
+              <div class="set-row set-volrow">
+                <span class="set-label">音量</span>
+                <input type="range" id="set-vol" min="0" max="1" step="0.01" value="1"
+                       aria-label="音量">
+              </div>
+              <div class="set-row set-more" id="set-more" role="menuitem" tabindex="0">
+                <span class="set-label">更多播放设置</span>
+                <i class="set-arrow" aria-hidden="true"></i>
+              </div>
+            </div>
           </span>
           <button class="pv-ic pv-txt" id="btn-theater" title="网页全屏">宽屏</button>
           <button class="pv-ic" id="ctrl-pip" type="button" title="画中画" hidden>

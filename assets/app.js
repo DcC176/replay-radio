@@ -1677,6 +1677,13 @@
     clipBusy: false,                        // 正在保存，防重复提交
     qn: store.get('xl_qn', 80),             // 请求的清晰度；B 站会按登录态降级到最高可用
     qnDegraded: false,                      // 本次档位是不是「降级来的」（是的话不写进 xl_qn）
+    /* 播放器「设置」面板里的两项（v1.9.11）：镜像 / 画面比例。
+       都是纯前端显示变换，记在本机，下次沿用。 */
+    mirror: store.get('xl_mirror', false) === true,
+    fit: (function () {
+      var v = store.get('xl_fit', 'contain');
+      return ['contain', 'fill', 'cover'].indexOf(v) >= 0 ? v : 'contain';
+    })(),
     playlistCycle: false,                   // 当前时间轴是不是「借来的歌单」（离开歌单页要还回去）
     media: '',                              // 当前媒体地址
     mediaBase: null,                        // 媒体时间轴上的锚点
@@ -2173,6 +2180,9 @@
       return '<option value="' + q.qn + '"' + (q.qn === cur ? ' selected' : '') + '>'
         + q.desc + '</option>';
     }).join('');
+    // 自定义面板只是这棵 option 的渲染结果：列表变了就重画（见 renderQnList）
+    renderQnList();
+    syncQnLabel();
   }
 
   /* 播放器顶栏那枚「可选 1080P60」提示（v1.0.27）。
@@ -2863,6 +2873,8 @@
     // 不占位的话，从频道页切过来会先闪一下回放的「1080P 高清」。
     el.quality.innerHTML = '<option value="">直播画质载入中…</option>';
     el.quality.disabled = true;
+    renderQnList();
+    syncQnLabel();
     // 先把回放彻底摘掉：留着 src 会停在回放的最后一帧上，看起来就像「直播间在放回放」
     destroyDash();
     destroyLive();
@@ -2906,6 +2918,8 @@
         el.liveInfo.innerHTML = '<b>未开播</b>';
         el.quality.innerHTML = '<option value="">未开播</option>';
         el.quality.disabled = true;
+        renderQnList();
+        syncQnLabel();
         chatStop();
         liveOffline(ST_SHORT + '现在没开播，这里只会显示直播画面。');
         return;
@@ -4422,11 +4436,178 @@
       });
   }
 
-  // 画质说明面板
+  /* ---------------------------------------------- 播放器弹层：画质 / 设置（复刻 B 站）
+     两个面板互斥；点面板外或 Esc 关闭。
+     ⚠️ 画质面板**不自己存状态**：它渲染的是隐藏原生 select（#quality）的 option，
+        点击后把值写回 select 再派发 change —— 切流、xl_qn 记忆、降级提示仍然只有一条通路。
+     ⚠️ 面板在 .player-box 里，而那个盒子有 overflow:hidden，所以打开时按「按钮到盒子顶部
+        的剩余高度」写 max-height，小窗口下面板变矮并内部滚动，不会被切掉一截。 */
+
+  var QN_TAG = {
+    127: '超清', 126: '杜比视界', 125: 'HDR', 120: '超清', 116: '高帧率',
+    112: '高码率', 80: '高清', 74: '高帧率', 64: '准高清', 32: '标清', 16: '流畅'
+  };
+  var QN_VIP_MIN = 112;            // ≥112（1080P 高码率及以上）带「大会员」标识
+  var FIT_LABEL = { contain: '适应', fill: '拉伸', cover: '裁剪' };
+  var SET_RATES = [2, 1.5, 1.25, 1, 0.75, 0.5];
+  /* 倍速文字：整数补一位小数（2 → "2.0x"），1.25/0.75 保留两位 —— 不能用 toFixed(1)，
+     那会把 1.25 显示成 1.3、0.75 显示成 0.8，与 B 站不一致。 */
+  function rateText(r) {
+    r = parseFloat(r) || 1;
+    return (r % 1 === 0 ? r.toFixed(1) : String(r)) + 'x';
+  }
+  var SET_FITS = [['contain', '适应'], ['fill', '拉伸'], ['cover', '裁剪']];
+
+  /* 把一条清晰度拆成「主文字 + 后缀 + 是否会员」。
+     后端 desc 形如 "1080P 高码率" / "1080P60" / "4K" / "杜比视界"，后缀缺失时用 QN_TAG 补。 */
+  function qnParts(qn, desc) {
+    var d = String(desc || qn).trim();
+    var m = d.match(/^(\d+K|\d{3,4}P\d*)\s*(.*)$/);
+    var name = m ? m[1] : d;
+    var tag = m ? m[2] : '';
+    if (!tag && QN_TAG[qn] && QN_TAG[qn] !== name) tag = QN_TAG[qn];
+    return { name: name, tag: tag, vip: qn >= QN_VIP_MIN };
+  }
+
+  function renderQnList() {
+    if (!el.qnList) return;
+    var opts = [].slice.call(el.quality.options || []);
+    if (!opts.length || !el.quality.value) {
+      el.qnList.innerHTML = '<li class="qn-item" aria-disabled="true"><span class="qn-name">'
+        + (el.quality.disabled ? '当前不可选' : '载入中…') + '</span></li>';
+      return;
+    }
+    var cur = parseInt(el.quality.value, 10);
+    el.qnList.innerHTML = opts.map(function (o) {
+      var qn = parseInt(o.value, 10);
+      if (!qn) return '';
+      var p = qnParts(qn, o.textContent);
+      return '<li class="qn-item" role="menuitemradio" tabindex="0" data-qn="' + qn + '"'
+        + ' aria-checked="' + (qn === cur ? 'true' : 'false') + '">'
+        + '<span class="qn-name">' + esc(p.name) + '</span>'
+        + (p.tag ? '<span class="qn-tag">' + esc(p.tag) + '</span>' : '')
+        + (p.vip ? '<em class="qn-vip">大会员</em>' : '')
+        + '</li>';
+    }).join('');
+  }
+
+  /* 控制条按钮上显示当前档位（B 站就是直接把 "1080P 高码率" 写在按钮里）。
+     后端 desc 有时只有分辨率（"360P"），后缀在这里补齐，保证按钮与面板文案一致。 */
+  function syncQnLabel() {
+    if (!el.qnLabel) return;
+    var o = el.quality.options[el.quality.selectedIndex];
+    if (!o || !el.quality.value) { el.qnLabel.textContent = '清晰度'; return; }
+    var p = qnParts(parseInt(el.quality.value, 10), o.textContent);
+    el.qnLabel.textContent = p.name + (p.tag ? ' ' + p.tag : '');
+  }
+
+  function setRowState(act, on) {
+    var row = el.setPanel && el.setPanel.querySelector('.set-row[data-act="' + act + '"]');
+    if (row) row.setAttribute('aria-checked', on ? 'true' : 'false');
+  }
+
+  function syncSetRows() {
+    if (!el.setPanel) return;
+    setRowState('mirror', !!state.mirror);
+    setRowState('loop', state.loop === 'one');
+    setRowState('autonext', !!state.autoNext);
+    if (el.setRateVal && el.player) {
+      el.setRateVal.textContent = rateText(el.player.playbackRate || 1);
+    }
+    if (el.setFitVal) el.setFitVal.textContent = FIT_LABEL[state.fit] || '适应';
+    if (el.setVol && el.player) {
+      el.setVol.value = el.player.muted ? 0 : el.player.volume;
+    }
+    // 二级列表的选中态
+    var r = el.player ? (el.player.playbackRate || 1) : 1;
+    [].forEach.call(el.setRateList ? el.setRateList.children : [], function (b) {
+      var v = parseFloat(b.getAttribute('data-rate')) || 1;
+      b.setAttribute('aria-checked', String(Math.abs(v - r) < 1e-3));
+    });
+    [].forEach.call(el.setFitList ? el.setFitList.children : [], function (b) {
+      b.setAttribute('aria-checked', String(b.getAttribute('data-fit') === state.fit));
+    });
+  }
+
+  function popPanel(name) { return name === 'qn' ? el.qualityPanel : el.setPanel; }
+  function popBtn(name) { return name === 'qn' ? el.btnQn : el.btnSettings; }
+
+  function closePops() {
+    [['qualityPanel', 'btnQn'], ['setPanel', 'btnSettings']].forEach(function (it) {
+      var p = el[it[0]], b = el[it[1]];
+      if (p) p.hidden = true;
+      if (b) b.setAttribute('aria-expanded', 'false');
+    });
+    // 二级列表跟着收起，免得下次打开还挂在展开态
+    if (el.setRateList) el.setRateList.hidden = true;
+    if (el.setFitList) el.setFitList.hidden = true;
+    if (el.setPanel) {
+      [].forEach.call(el.setPanel.querySelectorAll('.set-row[data-act]'), function (r) {
+        r.setAttribute('aria-expanded', 'false');
+      });
+    }
+  }
+
+  function fitPop(panel, btn) {
+    if (!panel || !btn || !el.playerBox) return;
+    var box = el.playerBox.getBoundingClientRect();
+    var b = btn.getBoundingClientRect();
+    var room = Math.round(b.top - box.top - 12);   // 按钮上方到播放器顶部的可用高度
+    panel.style.maxHeight = Math.max(120, room) + 'px';
+  }
+
+  function openPop(name, on) {
+    var panel = popPanel(name), btn = popBtn(name);
+    if (!panel || !btn) return;
+    if (!on) {
+      panel.hidden = true;
+      btn.setAttribute('aria-expanded', 'false');
+      if (name === 'set') collapseSubs('');    // 只收起二级列表，不动另一个面板
+      return;
+    }
+    closePops();                       // 互斥：开一个关另一个
+    if (name === 'qn') { renderQnList(); syncQnLabel(); }
+    else syncSetRows();
+    fitPop(panel, btn);
+    panel.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+  }
+
   function toggleQuality(on) {
-    var next = typeof on === 'boolean' ? on : el.qualityPanel.hidden;
-    el.qualityPanel.hidden = !next;
-    el.btnQuality.setAttribute('aria-expanded', String(next));
+    var next = typeof on === 'boolean' ? on : !(el.qualityPanel && !el.qualityPanel.hidden);
+    openPop('qn', next);
+  }
+
+  function collapseSubs(toAct) {
+    [['rate', el.setRateList], ['fit', el.setFitList]].forEach(function (it) {
+      var row = el.setPanel && el.setPanel.querySelector('.set-row[data-act="' + it[0] + '"]');
+      var keep = it[0] === toAct;
+      if (row) row.setAttribute('aria-expanded', keep ? 'true' : 'false');
+      if (it[1]) it[1].hidden = !keep;
+    });
+  }
+
+  function applyMirror() {
+    if (el.player) el.player.style.transform = state.mirror ? 'scaleX(-1)' : '';
+  }
+
+  function applyFit() {
+    if (el.player) el.player.style.objectFit = state.fit;
+  }
+
+  function buildSetSubs() {
+    if (el.setRateList) {
+      el.setRateList.innerHTML = SET_RATES.map(function (r) {
+        return '<button type="button" data-rate="' + r + '" aria-checked="false">'
+          + rateText(r) + '</button>';
+      }).join('');
+    }
+    if (el.setFitList) {
+      el.setFitList.innerHTML = SET_FITS.map(function (f) {
+        return '<button type="button" data-fit="' + f[0] + '" aria-checked="false">'
+          + f[1] + '</button>';
+      }).join('');
+    }
   }
 
   function syncSkip() {
@@ -5657,6 +5838,9 @@
     // 清晰度下拉：直播间里它是**直播画质**（原画/蓝光/超清），换挡要重开直播流；
     // 其它页面是回放分辨率，重新取该清晰度的流并从当前位置继续，都不离开本页
     el.quality.addEventListener('change', function () {
+      // 值变了先把两块 UI 同步：控制条按钮上的文字、面板里的选中项
+      syncQnLabel();
+      renderQnList();
       var qn = parseInt(el.quality.value, 10);
       if (state.view === 'broadcast') {
         if (qn) startLive(qn);
@@ -5712,6 +5896,115 @@
     el.lang.value = store.get('xl_lang', 'zh-Hans');
     el.lang.addEventListener('change', function () { setLang(el.lang.value); });
 
+    /* ------------------------ 画质面板 / 设置面板（复刻 B 站） ------------------------ */
+
+    syncQnLabel();
+    buildSetSubs();
+    applyMirror();
+    applyFit();
+
+    if (el.btnQn) {
+      el.btnQn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        toggleQuality();
+      });
+    }
+    if (el.qualityPanel) {
+      el.qualityPanel.addEventListener('click', function (e) {
+        var li = e.target.closest('.qn-item[data-qn]');
+        if (!li) return;
+        var qn = parseInt(li.getAttribute('data-qn'), 10);
+        if (!qn) return;
+        closePops();
+        if (String(qn) === el.quality.value) return;   // 已在这一档：只收面板，不重取流
+        el.quality.value = String(qn);
+        el.quality.dispatchEvent(new Event('change'));
+      });
+      // 菜单语义：↑↓ 移焦点、Enter/空格 选中，Esc 由全局 keydown 收
+      el.qualityPanel.addEventListener('keydown', function (e) {
+        var items = [].slice.call(el.qualityPanel.querySelectorAll('.qn-item[data-qn]'));
+        if (!items.length) return;
+        var i = items.indexOf(document.activeElement);
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          var n = i + (e.key === 'ArrowDown' ? 1 : -1);
+          if (n < 0) n = items.length - 1;
+          if (n >= items.length) n = 0;
+          items[n].focus();
+        } else if ((e.key === 'Enter' || e.key === ' ') && i >= 0) {
+          e.preventDefault();
+          items[i].click();
+        }
+      });
+    }
+
+    if (el.btnSettings) {
+      el.btnSettings.addEventListener('click', function (e) {
+        e.stopPropagation();
+        openPop('set', el.setPanel.hidden);
+      });
+    }
+    if (el.setPanel) {
+      el.setPanel.addEventListener('click', function (e) {
+        var sb = e.target.closest('.set-sublist button');
+        if (sb) {
+          if (sb.hasAttribute('data-rate')) {
+            var r = parseFloat(sb.getAttribute('data-rate')) || 1;
+            if (el.player) el.player.playbackRate = r;
+            if (el.ctrlRate) el.ctrlRate.textContent = rateText(r);
+          } else if (sb.hasAttribute('data-fit')) {
+            state.fit = sb.getAttribute('data-fit');
+            store.set('xl_fit', state.fit);
+            applyFit();
+          }
+          collapseSubs('');            // 选完就收起二级
+          fitPop(el.setPanel, el.btnSettings);
+          syncSetRows();
+          return;
+        }
+        var row = e.target.closest('.set-row');
+        if (!row) return;
+        if (row.id === 'set-more') {   // 「更多播放设置 ›」→ 本项目的设置板块
+          closePops();
+          setView('settings');
+          return;
+        }
+        var act = row.getAttribute('data-act');
+        if (act === 'mirror') {
+          state.mirror = !state.mirror;
+          store.set('xl_mirror', state.mirror);
+          applyMirror();
+          syncSetRows();
+        } else if (act === 'loop') {
+          setLoop(state.loop === 'one' ? 'off' : 'one');
+          syncSetRows();
+        } else if (act === 'autonext') {
+          setAutoNext(!state.autoNext);
+          syncSetRows();
+        } else if (act === 'rate' || act === 'fit') {
+          var list = act === 'rate' ? el.setRateList : el.setFitList;
+          collapseSubs(list.hidden ? act : '');
+          fitPop(el.setPanel, el.btnSettings);   // 展开后变高，重算可用高度
+          syncSetRows();
+        }
+      });
+      el.setPanel.addEventListener('input', function (e) {
+        if (e.target.id !== 'set-vol' || !el.player) return;
+        var v = parseFloat(e.target.value);
+        el.player.volume = v;
+        el.player.muted = v === 0;
+      });
+    }
+
+    // 点面板外收起（与音量弹层同一口径：用 pointerdown，点在 wrap 内不算）
+    document.addEventListener('pointerdown', function (e) {
+      var t = e.target;
+      if (!t || !t.closest) return;
+      if (t.closest('#qn-wrap') || t.closest('#set-wrap')) return;
+      if ((el.qualityPanel && !el.qualityPanel.hidden)
+          || (el.setPanel && !el.setPanel.hidden)) closePops();
+    });
+
     el.btnQuality.addEventListener('click', function () { toggleQuality(); });
 
     /* ------------------------ 原生播放控件 ------------------------ */
@@ -5764,10 +6057,10 @@
     }
 
     /* 倍速：只对点播/歌单有时间轴可调；直播流没有倍速，按钮在对应视图里由 CSS 隐藏 */
-    var RATES = [2, 1.5, 1.25, 1, 0.75, 0.5];
+    var RATES = SET_RATES;        // 与控制条上的倍速菜单同源（改一处就够）
     if (el.rateMenu && el.ctrlRate) {
       el.rateMenu.innerHTML = RATES.map(function (r) {
-        return '<button type="button" data-rate="' + r + '">' + r.toFixed(1) + 'x</button>';
+        return '<button type="button" data-rate="' + r + '">' + rateText(r) + '</button>';
       }).join('');
       el.ctrlRate.addEventListener('click', function (e) {
         e.stopPropagation();
@@ -5778,7 +6071,7 @@
         if (!b) return;
         var r = parseFloat(b.getAttribute('data-rate')) || 1;
         if (el.player) el.player.playbackRate = r;
-        el.ctrlRate.textContent = r.toFixed(1) + 'x';
+        el.ctrlRate.textContent = rateText(r);
         Array.prototype.forEach.call(el.rateMenu.children, function (x) {
           x.classList.toggle('on', Math.abs((parseFloat(x.getAttribute('data-rate')) || 1) - r) < 1e-3);
         });
@@ -5790,7 +6083,7 @@
         el.rateMenu.hidden = true;
       });
       var cur = el.player ? el.player.playbackRate : 1;
-      el.ctrlRate.textContent = cur.toFixed(1) + 'x';
+      el.ctrlRate.textContent = rateText(cur);
     }
 
     /* 画中画：浏览器不支持就整颗按钮不出现（.pv-ic[hidden] 已经确保 [hidden] 真的隐藏） */
@@ -6141,7 +6434,8 @@
         return;
       }
       if (e.key !== 'Escape') return;
-      if (!el.qualityPanel.hidden) { toggleQuality(false); return; }
+      if ((el.qualityPanel && !el.qualityPanel.hidden)
+          || (el.setPanel && !el.setPanel.hidden)) { closePops(); return; }
       if (!el.markPanel.hidden) { toggleMarking(false); return; }
       if (!el.chaptersPanel.hidden) { toggleChapters(false); return; }
       if (document.body.classList.contains('theater')) toggleTheater(false);
@@ -6212,6 +6506,8 @@
       el.btnLoop.title = '循环播放：' + LOOP_LABEL[state.loop]
         + '（点按切换 关 → 单集 → 列表）';
     }
+    // 设置面板里的三个开关与这两个状态是同源的两套入口，别让它们显示不一致
+    if (el.setPanel && !el.setPanel.hidden) syncSetRows();
   }
 
   /* 停在本段末尾。只暂停、不 seek：cyclePos 立刻定住，画面停在最后一帧。 */
@@ -6857,6 +7153,17 @@
       loginQr: document.getElementById('login-qr'),
       loginStatus: document.getElementById('login-status'),
       quality: document.getElementById('quality'),
+      qnLabel: document.getElementById('qn-label'),
+      qnList: document.getElementById('qn-list'),
+      btnQn: document.getElementById('btn-qn'),
+      btnSettings: document.getElementById('btn-settings'),
+      setPanel: document.getElementById('settings-panel'),
+      setRateVal: document.getElementById('set-rate-val'),
+      setFitVal: document.getElementById('set-fit-val'),
+      setRateList: document.getElementById('set-rate-list'),
+      setFitList: document.getElementById('set-fit-list'),
+      setVol: document.getElementById('set-vol'),
+      setMore: document.getElementById('set-more'),
       btnReloadPlayer: document.getElementById('btn-reload-player'),
       btnSkip: document.getElementById('btn-skip'),
       btnChapters: document.getElementById('btn-chapters'),

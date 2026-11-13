@@ -1168,6 +1168,164 @@ body.view-multi .pv-ratewrap { display: none; }
   cursor: pointer;
 }
 
+/* ------------------------------------------------ 播放器弹层：画质 / 设置（复刻 B 站）
+   共用 .pv-pop 基类：深色卡片、8px 圆角、右对齐贴在按钮上方。
+   ⚠️ 不用 backdrop-filter（项目规矩：播放器整组不做磨砂玻璃），靠高不透明度实色。
+   ⚠️ .player-box 有 overflow:hidden，面板向上弹可能被裁 —— 打开时由 JS 按可用高度写
+      max-height，这里必须保留 overflow-y:auto，否则小窗口下面板会被切掉一截。
+   ⚠️ z-index 要比 .pv-ctrl(3)、.pv-volpop 高，否则会被别的浮层盖住。 */
+.pv-popwrap { position: relative; display: inline-flex; }
+
+.pv-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 6;
+  padding: 6px 0;
+  border-radius: 8px;
+  background: rgba(22, 22, 24, .96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .07);
+  color: #e8e8ec;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.pv-pop[hidden] { display: none; }
+
+/* ---- 画质面板 ---- */
+.pv-qnpop { width: 172px; }
+.qn-list { margin: 0; padding: 0; list-style: none; }
+.qn-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  padding: 0 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  outline: none;
+}
+.qn-item:hover,
+.qn-item:focus-visible { background: rgba(255, 255, 255, .1); }
+.qn-name { font-size: 13px; }
+.qn-tag { font-size: 12px; color: rgba(255, 255, 255, .55); }
+/* 选中态：整行文字转 B 站蓝（原站就是这样，不是加勾） */
+.qn-item[aria-checked="true"] .qn-name,
+.qn-item[aria-checked="true"] .qn-tag { color: #00aeec; }
+/* 「大会员」粉色胶囊：只在高码率 / 高帧率档位出现 */
+.qn-vip {
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: #fb7299;
+  color: #fff;
+  font-size: 10px;
+  font-style: normal;
+  line-height: 16px;
+}
+
+/* ---- 设置面板 ---- */
+.pv-setpop { width: 218px; }
+.set-row {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 12px;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+.set-row:hover,
+.set-row:focus-visible { background: rgba(255, 255, 255, .1); }
+.set-label { flex: 1 1 auto; min-width: 0; }
+/* 开关：B 站样式 —— 关=半透明白轨，开=蓝轨，圆点白 */
+.set-sw {
+  flex: none;
+  position: relative;
+  width: 36px;
+  height: 20px;
+  margin-left: 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .24);
+  transition: background .18s;
+}
+.set-sw i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform .18s;
+}
+.set-row[aria-checked="true"] .set-sw { background: #00aeec; }
+.set-row[aria-checked="true"] .set-sw i { transform: translateX(16px); }
+.set-val { flex: none; margin-left: 8px; font-size: 12px; color: rgba(255, 255, 255, .62); }
+.set-arrow {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-left: 8px;
+  border-top: 1.4px solid rgba(255, 255, 255, .5);
+  border-right: 1.4px solid rgba(255, 255, 255, .5);
+  transform: rotate(45deg);
+  transition: transform .18s;
+}
+.set-row[aria-expanded="true"] .set-arrow { transform: rotate(-45deg); }
+.set-sublist { padding: 2px 0 6px; }
+.set-sublist[hidden] { display: none; }
+.set-sublist button {
+  display: block;
+  width: 100%;
+  height: 30px;
+  padding: 0 12px 0 24px;
+  border: 0;
+  background: none;
+  color: #e8e8ec;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.set-sublist button:hover { background: rgba(255, 255, 255, .1); }
+.set-sublist button[aria-checked="true"] { color: #00aeec; }
+/* 音量行不是开关也不是折叠项：整行 hover 高亮会误导，单独取消 */
+.set-volrow,
+.set-volrow:hover { background: none; cursor: default; }
+#set-vol {
+  flex: 0 0 88px;
+  height: 3px;
+  margin: 0;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, .3);
+  outline: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+#set-vol::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 11px;
+  height: 11px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  cursor: pointer;
+}
+/* 「更多播放设置」是单独一组，分隔线要看得见（.08 压在深色上几乎消失） */
+.set-more { margin-top: 4px; border-top: 1px solid rgba(255, 255, 255, .12); }
+
+/* 控制条上的画质按钮：文字随档位变长（"1080P 高码率"），窄窗口要能省略 */
+.pv-qnbtn { max-width: 104px; }
+.pv-qnbtn #qn-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pv-grow { flex: 1 1 auto; }
 
 .pv-sel {
