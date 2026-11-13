@@ -5730,15 +5730,30 @@
     });
 
     /* 音量弹层：B 站是悬停向上弹竖向滑杆；触屏没有 hover，所以点图标也能开合。
-       图标不是静音键（静音键已按需求删掉），只控制弹层显隐。 */
+       图标不是静音键（静音键已按需求删掉），只控制弹层显隐。
+
+       ⚠️ 关闭必须**延时**，不能 mouseleave 立刻关：
+       CSS 那边已经把图标与弹层的空隙做成无缝命中区，但鼠标移动是离散的，
+       中间还可能经过别的元素（进度条就压在这条缝上）。手稍微一抖、或者从图标
+       斜着划向滑杆时，mouseleave 会先于 mouseenter(弹层) 触发 —— 立刻关就等于
+       「弹层一闪就没，根本拖不到」。这里留 320ms 宽限，只要之后落回这一组内部就撤销。
+       relatedTarget 判断留着：真正移出整组（去点别的按钮）时不需要白等。 */
+    var volTimer = 0;
     function setVolPop(on) {
       if (!el.volPop) return;
+      if (on) { clearTimeout(volTimer); volTimer = 0; }
       el.volPop.hidden = !on;
       if (el.ctrlVolBtn) el.ctrlVolBtn.setAttribute('aria-expanded', on ? 'true' : 'false');
     }
     if (el.volWrap && el.volPop) {
       el.volWrap.addEventListener('mouseenter', function () { setVolPop(true); });
-      el.volWrap.addEventListener('mouseleave', function () { setVolPop(false); });
+      el.volWrap.addEventListener('mouseleave', function (e) {
+        if (e.relatedTarget && el.volWrap.contains(e.relatedTarget)) return;
+        clearTimeout(volTimer);
+        volTimer = setTimeout(function () { setVolPop(false); }, 320);
+      });
+      // 从那条无缝桥里重新进入时，mouseenter 不会冒泡到 volwrap，单独补一次
+      el.volPop.addEventListener('mouseenter', function () { setVolPop(true); });
       el.ctrlVolBtn.addEventListener('click', function (e) {
         e.stopPropagation();
         setVolPop(el.volPop.hidden);

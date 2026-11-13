@@ -1110,38 +1110,58 @@ body.view-multi .pv-ratewrap { display: none; }
 
 /* 音量：照 B 站的做法收成一个图标，悬停向上弹出**竖向**滑杆。
    它不是静音键（静音键已删）：点图标只展开/收起弹层。 */
+/* 音量弹层（B 站做法：悬停图标向上弹出竖向滑杆）。
+   ⚠️ 三个尺寸都不能凭直觉改，每一条都是「点不到」的直接原因：
+   1. **弹层必须与图标无缝相接**（bottom:100%），视觉上的 6px 间隙由 padding-bottom 让出来。
+      原来写 `bottom: calc(100% + 4px)` 留了一条真实空隙，鼠标从图标往上走会穿过它 ——
+      那一瞬间已离开 .pv-volwrap，mouseleave 立刻把弹层关掉，滑杆永远够不到（实测该点还落在进度条上）。
+   2. **bg 画在 ::before 上**，padding 那条「桥」保持透明：视觉是分开的，命中区是连着的。
+   3. **滑杆 24px 高**：range 旋转 -90° 后，元素高度变成横向命中宽度。原来 height:3px
+      → 可点区域只有 3px 宽，鼠标几乎不可能压中。轨道本身仍用伪元素画成 3px，视觉不变。 */
 .pv-volwrap { position: relative; display: flex; align-items: center; }
 .pv-volpop {
   position: absolute;
   left: 50%;
-  bottom: calc(100% + 4px);
+  bottom: 100%;
   transform: translateX(-50%);
-  width: 26px;
-  height: 92px;
+  width: 34px;
+  height: 100px;            /* 94px 视觉块 + 6px 无缝桥 */
+  padding-bottom: 6px;
+  box-sizing: border-box;
+}
+.pv-volpop::before {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 0; bottom: 6px;
   border-radius: 8px;
-  background: rgba(0, 0, 0, .82);
+  background: rgba(0, 0, 0, .86);
   box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
 }
 .pv-volpop[hidden] { display: none; }
 .pv-vol {
   position: absolute;
   left: 50%;
-  top: 50%;
-  width: 76px;
-  height: 3px;
+  top: calc((100% - 6px) / 2);     /* 在视觉块里居中，不掺进那条桥 */
+  width: 84px;
+  height: 24px;                    /* = 横向命中宽度（旋转后），别改回 3px */
   margin: 0;
   padding: 0;
   transform: translate(-50%, -50%) rotate(-90deg);
-  border-radius: 2px;
-  background: rgba(255, 255, 255, .34);
+  background: transparent;
   outline: none;
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
 }
+.pv-vol::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, .34);
+}
 .pv-vol::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 10px; height: 10px;
+  width: 12px; height: 12px;
+  margin-top: -4.5px;              /* (轨道 3 - 拇指 12) / 2，让拇指压在轨道正中 */
   border: 0;
   border-radius: 50%;
   background: #fff;
@@ -1752,8 +1772,10 @@ body.view-other .credits { display: none; }
   .pv-ic svg { width: 16px; height: 16px; }
   .pv-sel { padding: 4px 18px 4px 6px; font-size: 11px; }
   .pv-txt { padding: 0 8px; font-size: 11px; }
-  /* 竖向弹层在窄栏里也放得下，只把轨道缩短一点 */
-  .pv-vol { display: block; width: 68px; }
+  /* 窄栏播放器只有 288×162，弹层按 100px 会被 .player-box 的 overflow:hidden 裁掉顶，
+     所以这里把整体高度收到 88px、轨道缩到 64px（拇指两头才留得下余量）。 */
+  .pv-volpop { height: 88px; }
+  .pv-vol { display: block; width: 64px; }
   .np { padding: 13px; }
   .np-title { font-size: 14px; }
   .np-btns { gap: 6px; margin-top: 12px; }
