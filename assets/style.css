@@ -2276,6 +2276,11 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
     grid-template-columns: minmax(0, 1fr);
     /* 竖排后高度由内容决定（height:auto），1fr 行高没有意义，显式收回 auto */
     grid-template-rows: auto;
+    /* ⚠️ 必须 start：`min-height:100vh-顶栏` 留下的富余高度，默认（normal = stretch）
+       会被**平均摊到两条 auto 行**上 —— 第一行被撑高、播放器又有 align-self:center，
+       于是画面上下各空出一截，窗口越高缝越大（实测 700×1400 → 50px、
+       1280×2200 → 143px，就是用户截图里画面下方那条大空白）。 */
+    align-content: start;
     height: auto;
     min-height: calc(100vh - var(--topbar-h));
     padding-bottom: 14px;      /* 竖排后内容不再固定贴住浮标，无需那 64px 留白 */
@@ -3320,6 +3325,8 @@ body.view-multi .col-right { display: none; }
 }
 .ms-btn:hover { background: rgba(var(--ink), .16); }
 .ms-btn.on { background: var(--red); border-color: var(--red); color: var(--on-red); }
+/* 底栏的「打开原直播间」是个 <a>：外观走 .ms-btn，去掉下划线并垂直居中 */
+.ms-bar a.ms-btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
 
 /* 左上角「最小化这一路」：和底栏同一条显隐规则（悬停 / 键盘聚焦才浮出），
    否则整面墙上会一直挂着 9 个按钮，比画面还抢眼。 */

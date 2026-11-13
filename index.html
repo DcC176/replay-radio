@@ -402,7 +402,13 @@ window.__BOOT_T0 = Date.now();
 
     <section class="view" id="view-broadcast">
       <div class="live-card live-status-card">
-        <div class="live-card-h">直播状态</div>
+        <div class="live-card-h">直播状态
+          <!-- 在新标签页打开 B 站原直播间。用 <a target=_blank> 而不是 window.open：
+               不会被弹窗拦截，中键/右键「在新标签页打开」也照常可用。room 由
+               /api/live/playinfo 返回（room_id），拿到之前先藏着。 -->
+          <a class="btn small ghost live-wheel-btn" id="live-open" href="#"
+             target="_blank" rel="noopener noreferrer" hidden>原直播间 ↗</a>
+        </div>
         <div class="live-info" id="live-info">正在获取开播状态…</div>
       </div>
 

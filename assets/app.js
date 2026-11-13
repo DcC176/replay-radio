@@ -2887,6 +2887,18 @@
   function loadLiveInfo() {
     fetch('/api/live/playinfo').then(function (r) { return r.json(); }).then(function (d) {
       var qnList = d.qualities || [];
+      /* 「原直播间」按钮的落点：用服务端给的 room_id（就是当前板块的直播间号）。
+         未开播也能点进去看主页，所以放在 living 判断之前；号不可用就藏起来。 */
+      var room = String(d.room_id || '');
+      if (el.liveOpen) {
+        if (/^\d+$/.test(room)) {
+          el.liveOpen.href = 'https://live.bilibili.com/' + room;
+          el.liveOpen.title = '在新标签页打开 ' + (ST_SHORT || '') + ' 的原直播间';
+          el.liveOpen.hidden = false;
+        } else {
+          el.liveOpen.hidden = true;
+        }
+      }
       // 直播画质就填在播放器控制条那条下拉里（位置与回放一致，切换直接重开直播流）。
       // 直播间不再另放一个「清晰度」—— 同一个功能摆两处只会互相打架。
       if (qnList.length) setQualityList(qnList, d.current_qn);
@@ -6692,6 +6704,7 @@
     protoUnreg: document.getElementById('proto-unreg'),
     protoState: document.getElementById('proto-state'),
     liveInfo: document.getElementById('live-info'),
+    liveOpen: document.getElementById('live-open'),
     liveChat: document.getElementById('live-chat'),
     liveChatState: document.getElementById('live-chat-state'),
     liveCredState: document.getElementById('live-cred-state'),
@@ -7485,7 +7498,15 @@
   /* 格子底栏（两个来源共用）：名字 + 状态 + 单路画质 + 音量 + 独奏/全屏/聚焦。
      参照 DD_Monitor：每一路都能独立调音量与画质，而不是只有全局档。
      末尾的 .ms-h* 是「自由」布局下的拖动/缩放手柄，别的布局里由 CSS 藏起来。 */
-  function msBarHtml(tag, name, accent) {
+  function msBarHtml(tag, name, accent, room) {
+    /* 「打开原直播间」：用 <a target=_blank> 而不是按钮里 window.open ——
+       弹窗拦截、右键/中键新标签页、读屏器语义都更可靠。
+       号不是纯数字（没配直播间 / 关注源缺字段）就不放这个按钮，点了也没意义。 */
+    var open = /^\d+$/.test(String(room || ''))
+      ? '<a class="ms-btn" data-act="open" href="https://live.bilibili.com/' + esc(room) + '"'
+        + ' target="_blank" rel="noopener noreferrer"'
+        + ' aria-label="在新标签页打开原直播间" title="在新标签页打开原直播间">↗</a>'
+      : '';
     return '<div class="ms-bar">'
       + '<span class="ms-tag" style="background:' + esc(accent) + '">' + esc(tag) + '</span>'
       + '<span class="ms-name">' + esc(name) + '</span>'
@@ -7500,6 +7521,7 @@
       + ' title="这一路全屏">⛶</button>'
       + '<button class="ms-btn" data-act="zoom" type="button" aria-label="聚焦或取消聚焦这一路"'
       + ' aria-pressed="false" title="聚焦 / 取消聚焦">⤢</button>'
+      + open
       + '</span></div>'
       + msHandlesHtml();
   }
@@ -7533,7 +7555,7 @@
       + '<video muted playsinline></video>'
       + msMinHtml()
       + msOffHtml(s.short || s.name, s.face, '正在获取开播状态…')
-      + msBarHtml(s.tag || '', s.short || s.name, accent) + '</div>';
+      + msBarHtml(s.tag || '', s.short || s.name, accent, s.room) + '</div>';
   }
 
   function startMultiCell(s, cell, src) {
@@ -7550,6 +7572,10 @@
     var sub = cell.querySelector('.ms-off-sub');
     var stateEl = cell.querySelector('[data-role="state"]');
     var maxTry = 2;                      // 断流重连次数
+    /* 看门狗的基准必须跟**这一次连接**绑定，见 watchdog 那段注释。
+       lastT：见过的最新播放位置；lastProgress：最近一次真的在动的时刻；
+       loadedAt：本次连接开始装载的时刻（装载期不算卡住）。 */
+    var lastT = -1, lastProgress = Date.now(), loadedAt = Date.now(), stallN = 0;
 
     function live(title) {
       if (title) cell._title = title;
@@ -7581,6 +7607,13 @@
         video.removeAttribute('src');
         try { video.load(); } catch (e) { /* 忽略 */ }
       }
+      /* ⚠️ 上面这一下会让 currentTime 归零、从头再走。看门狗的基准不同步复位，
+         重连之后「有前进」就永远不成立（旧的绝对位置再也追不上）→ 明明在播却
+         连报 6 次卡住、锁死在「画面已停止」，只能点一下卡片才恢复。
+         这里复位时间基准，装载期另由 loadedAt 给预算。 */
+      lastT = -1;
+      lastProgress = Date.now();
+      loadedAt = Date.now();
       var qn = cell._qn || multiPickQn(multiQnChoice(), qualities);   // 单路选择优先于全局
       var p = mpegts.createPlayer({
         type: 'flv', isLive: true,
@@ -7632,15 +7665,27 @@
        以前只能整页刷新。这里只认一个事实：currentTime 有多久没往前走了
        —— 按「最近一次前进的时刻」算，不用连续计数（追帧 seek 会让 currentTime
        来回跳，计数会被这些小跳重置，反而永远不触发）。
-       超过 12 秒没前进 → 销毁这一路重连（退避 2/4/6…秒，最多 5 次）。 */
-    var lastT = -1, lastProgress = Date.now(), stallN = 0;
+       超过 12 秒没前进 → 销毁这一路重连（退避 2/4/6…秒，最多 5 次）。
+
+       ⚠️ 2026-11-13 修误报：判据的基准**必须随每次 connect() 复位**。
+       重连会把 <video> 的 src 摘掉重接，currentTime 从 0 重走；基准若留着重连前的
+       绝对位置（比如看了半小时 = 1800），新流要再放半小时才能超过它 ——
+       中间每 12 秒判一次「没前进」，连判 6 次就锁死在「画面已停止」，
+       而画面其实一直在正常播。实测（1600×900，播 40 秒后人为定住）：
+       重连后 t 从 0 一路涨到 30，文案仍停在「画面已停止」，只能点卡片才恢复。
+       现在：connect() 里复位 lastT/lastProgress/loadedAt；装载期（readyState<2）
+       给 20 秒预算；时间轴回退（< lastT-1，被追帧拉回或换了媒体）也按重新计时。 */
     var dog = setInterval(function () {
       if (!cell.isConnected || state.view !== 'multi' || cell._gen !== gen) {
         clearInterval(dog);
         return;
       }
       var t = video.currentTime;
-      if (t > lastT + 0.2) {
+      if (video.readyState < 2) {
+        /* 连首帧都还没有：这是「还没开始」，不是「卡住」。装载期间不断续期，
+           超过 20 秒才算真的连不上，落到下面按卡死处理。 */
+        if (Date.now() - loadedAt < 20000) { lastProgress = Date.now(); return; }
+      } else if (t > lastT + 0.2 || t < lastT - 1) {
         lastT = t;
         lastProgress = Date.now();
         if (stallN) { stallN = 0; live(); }          // 恢复后把退避与文案清掉
@@ -8437,7 +8482,7 @@
     var n = cells.length;
     var order = multiOrderCells(cells);
     var focus = !!multiFocusId && n > 1 && multiLayout !== 'free';
-    var cols = availW >= 480 ? 2 : 1;   // 600 宽窗口去掉左右内边距约 542，仍分两列
+    var cols = (n === 1 || availW < 480) ? 1 : 2;   // 只有一路就别按两列排（会只占半宽）
     var cellW = Math.floor((availW - g * (cols - 1)) / cols);
     var cellH = Math.round(cellW * 9 / 16);
     var main = null;
@@ -8738,7 +8783,7 @@
       + '<video muted playsinline></video>'
       + msMinHtml()
       + msOffHtml(s.uname, s.face, '正在获取开播状态…')
-      + msBarHtml('关注', s.uname, '#8a8a95') + '</div>';
+      + msBarHtml('关注', s.uname, '#8a8a95', s.room) + '</div>';
   }
 
   function startMultiFollowCell(s, cell) {
