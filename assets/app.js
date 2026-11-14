@@ -1679,6 +1679,7 @@
     qnDegraded: false,                      // 本次档位是不是「降级来的」（是的话不写进 xl_qn）
     /* 播放器「设置」面板里的两项（v1.9.11）：镜像 / 画面比例。
        都是纯前端显示变换，记在本机，下次沿用。 */
+    qnHint: null,                            // 限流降级时「本片最高可用档」{qn, desc}，画质面板底部那行
     mirror: store.get('xl_mirror', false) === true,
     fit: (function () {
       var v = store.get('xl_fit', 'contain');
@@ -2185,19 +2186,15 @@
     syncQnLabel();
   }
 
-  /* 播放器顶栏那枚「可选 1080P60」提示（v1.0.27）。
+  /* 「可选 1080P60」提示（v1.0.27 在顶栏，v1.9.12 顶栏清空后并进画质面板）。
 
      为什么要有它：清晰度是**记在本地**的（`xl_qn`），而限流降级时下拉只列到 480P ——
      用户在那时选一次「最高可用」就会被永久记住，等限流解除后画面仍停在 480P，
-     看起来像「一直被限」。所以只要当前请求档位低于**本片可用最高档**，就在顶栏摆一句
-     可点的提示，点了直接切过去。传 null 收起。 */
+     看起来像「一直被限」。所以当前请求档位低于**本片可用最高档**时，在画质面板底部
+     多一行可点的「可选 XXXP」，点了直接切过去。传 null 收起。 */
   function showQnHint(top) {
-    var b = el.btnQnHint;
-    if (!b) return;
-    if (!top) { b.hidden = true; b.textContent = ''; return; }
-    b.textContent = '可选 ' + top.desc;
-    b.dataset.qn = String(top.qn);
-    b.hidden = false;
+    state.qnHint = top ? { qn: top.qn, desc: top.desc } : null;
+    if (el.qnList) renderQnList();      // 面板没开也重画，下次打开就是新的
   }
 
   // MP4（durl）通道：实现简单，但**封顶 720P**，只作为 DASH 失败时的兜底。
@@ -4425,13 +4422,15 @@
      状态只挂两个 body 类（side-l-off / side-r-off），CSS 按类改列定义 ——
      不碰 state、不重排播放器，所以收起时画面继续播、进度不丢。 */
   function syncSideBtns() {
+    /* 收起按钮常驻在各自侧栏的标题行里，语义永远是「收起」；
+       展开由播放器边缘的把手负责（只在 body.side-*-off 时可见，见 CSS）。 */
     [['btnSideL', 'side-l-off', '左'], ['btnSideR', 'side-r-off', '右']]
       .forEach(function (it) {
         var b = el[it[0]];
         if (!b) return;
         var off = document.body.classList.contains(it[1]);
         b.setAttribute('aria-pressed', String(off));
-        b.title = (off ? '展开' : '收起') + it[2] + '侧边栏';
+        b.title = '收起' + it[2] + '侧边栏';
         b.setAttribute('aria-label', b.title);
       });
   }
@@ -4489,6 +4488,16 @@
         + (p.vip ? '<em class="qn-vip">大会员</em>' : '')
         + '</li>';
     }).join('');
+
+    /* 限流降级时当前档低于本片最高可用档 —— 在列表底部补一行可点的提示
+       （原来长在播放器顶栏，顶栏清空后挪到这里）。它不是「清晰度档位」，
+       所以放在最后、用分隔线隔开，并且只有当它和当前档不同时才出现。 */
+    if (state.qnHint && state.qnHint.qn !== cur) {
+      el.qnList.innerHTML += '<li class="qn-item qn-hint" role="menuitemradio" tabindex="0"'
+        + ' data-qn="' + state.qnHint.qn + '" aria-checked="false">'
+        + '<span class="qn-name">可选最高</span>'
+        + '<span class="qn-tag">' + esc(state.qnHint.desc) + '</span></li>';
+    }
   }
 
   /* 控制条按钮上显示当前档位（B 站就是直接把 "1080P 高码率" 写在按钮里）。
@@ -4830,7 +4839,7 @@
     var next = typeof on === 'boolean' ? on : el.markPanel.hidden;
     el.markPanel.hidden = !next;
     state.marking = next;
-    el.btnMark.setAttribute('aria-pressed', String(next));
+    if (el.btnMark) el.btnMark.setAttribute('aria-pressed', String(next));
     // 标注时关掉「跳过空白」，否则会在已裁剪的片段里再标一次
     if (next && state.skip) {
       state.skip = false;
@@ -5465,7 +5474,7 @@
   function toggleChapters(on) {
     var next = typeof on === 'boolean' ? on : el.chaptersPanel.hidden;
     el.chaptersPanel.hidden = !next;
-    el.btnChapters.setAttribute('aria-expanded', String(next));
+    if (el.btnChapters) el.btnChapters.setAttribute('aria-expanded', String(next));
     if (next) {
       renderChapters();
       clipEnsureDir();
@@ -5855,16 +5864,12 @@
       loadMedia(seg, keep, anchor);
     });
 
-    // 顶栏那枚「可选 1080P60」：点了切到该档位。走同一个 change 通路，逻辑只有一份。
-    if (el.btnQnHint) el.btnQnHint.addEventListener('click', function () {
-      var q = parseInt(el.btnQnHint.dataset.qn, 10);
-      if (!q) return;
-      el.quality.value = String(q);
-      el.quality.dispatchEvent(new Event('change'));
-    });
-
     el.btnTheater.addEventListener('click', function () { toggleTheater(); });
-    [['btnSideL', 'side-l-off'], ['btnSideR', 'side-r-off']].forEach(function (it) {
+    /* 侧栏的收起与展开是同一件事的两个入口：
+       收起按钮在侧栏标题行里（收掉后就跟着消失），展开把手贴在播放器边缘
+       （只在 body.side-*-off 时出现）。两者都只切 body 上的类，互不依赖。 */
+    [['btnSideL', 'side-l-off'], ['btnSideR', 'side-r-off'],
+     ['handleSideL', 'side-l-off'], ['handleSideR', 'side-r-off']].forEach(function (it) {
       var b = el[it[0]];
       if (!b) return;
       b.addEventListener('click', function () {
@@ -5902,6 +5907,7 @@
     buildSetSubs();
     applyMirror();
     applyFit();
+    syncSetRows();      // 刷新后开关要立刻反映 state（不能等面板打开才同步）
 
     if (el.btnQn) {
       el.btnQn.addEventListener('click', function (e) {
@@ -6005,7 +6011,7 @@
           || (el.setPanel && !el.setPanel.hidden)) closePops();
     });
 
-    el.btnQuality.addEventListener('click', function () { toggleQuality(); });
+    /* 顶栏的「画质」按钮已删（v1.9.12）：控制条上的 #btn-qn 就是入口。 */
 
     /* ------------------------ 原生播放控件 ------------------------ */
 
@@ -6298,16 +6304,16 @@
       });
     });
 
-    el.btnChapters.addEventListener('click', function () { toggleChapters(); });
-
-    // 播放选项：自动连播（两态）/ 循环（关 → 单集 → 列表）。状态跨板块共用一份。
-    if (el.btnAutonext) el.btnAutonext.addEventListener('click', function () {
-      setAutoNext(!state.autoNext);
+    /* 「分段」「标注」的入口从顶栏搬到了「设置 → 分段与标注」。
+       两个面板长在播放器上，所以在设置页点要先切回录播页；面板本身与视图无关，
+       立即打开即可（不用等切换动画结束）。 */
+    if (el.btnOpenChapters) el.btnOpenChapters.addEventListener('click', function () {
+      setView('live');
+      toggleChapters(true);
     });
-    if (el.btnLoop) el.btnLoop.addEventListener('click', function () {
-      var seq = ['off', 'one', 'list'];
-      var cur = seq.indexOf(state.loop);        // random（歌单旧档）点一下就回到 off
-      setLoop(seq[(cur + 1) % seq.length]);
+    if (el.btnOpenMark) el.btnOpenMark.addEventListener('click', function () {
+      setView('live');
+      toggleMarking(true);
     });
 
     var clipModeBtn = document.getElementById('clip-mode');
@@ -6369,7 +6375,6 @@
       if (state.view === 'schedule') renderSchedule();
     });
 
-    el.btnMark.addEventListener('click', function () { toggleMarking(); });
 
     el.btnMarkUndo.addEventListener('click', function () {
       if (state.pendingStart) {           // 只撤「记了起点还没记终点」的那一次
@@ -6493,20 +6498,10 @@
     }, 2200);
   }
 
+  /* 连播 / 循环的状态变化要落到 UI 上。
+     v1.9.12 起顶栏那两枚图标按钮已删，这两个状态的入口只剩「设置」面板里的开关，
+     所以这里只需要把面板同步一次。 */
   function syncPlayOptions() {
-    if (el.btnAutonext) {
-      el.btnAutonext.setAttribute('aria-pressed', state.autoNext ? 'true' : 'false');
-      el.btnAutonext.title = state.autoNext
-        ? '自动连播：开（关闭后每段播完停住）'
-        : '自动连播：关（每段播完停住，点播放继续）';
-    }
-    if (el.btnLoop) {
-      el.btnLoop.setAttribute('data-loop', state.loop);
-      el.btnLoop.setAttribute('aria-pressed', state.loop === 'off' ? 'false' : 'true');
-      el.btnLoop.title = '循环播放：' + LOOP_LABEL[state.loop]
-        + '（点按切换 关 → 单集 → 列表）';
-    }
-    // 设置面板里的三个开关与这两个状态是同源的两套入口，别让它们显示不一致
     if (el.setPanel && !el.setPanel.hidden) syncSetRows();
   }
 
@@ -7116,8 +7111,10 @@
       btnTheater: document.getElementById('btn-theater'),
       btnSideL: document.getElementById('btn-side-l'),
       btnSideR: document.getElementById('btn-side-r'),
-      btnQuality: document.getElementById('btn-quality'),
-      btnQnHint: document.getElementById('btn-qn-hint'),
+      handleSideL: document.getElementById('handle-side-l'),
+      handleSideR: document.getElementById('handle-side-r'),
+      btnOpenChapters: document.getElementById('btn-open-chapters'),
+      btnOpenMark: document.getElementById('btn-open-mark'),
       qualityPanel: document.getElementById('quality-panel'),
       btnQpClose: document.getElementById('btn-qp-close'),
       btnLogin: document.getElementById('btn-login'),
@@ -7127,8 +7124,6 @@
       ctrlTip: document.getElementById('ctrl-tip'),
       pvWait: document.getElementById('pv-wait'),
       pvToast: document.getElementById('pv-toast'),
-      btnAutonext: document.getElementById('btn-autonext'),
-      btnLoop: document.getElementById('btn-loop'),
       ctrlDot: document.getElementById('ctrl-dot'),
       ctrlPlay: document.getElementById('ctrl-play'),
       ctrlVol: document.getElementById('ctrl-vol'),
@@ -7166,14 +7161,12 @@
       setMore: document.getElementById('set-more'),
       btnReloadPlayer: document.getElementById('btn-reload-player'),
       btnSkip: document.getElementById('btn-skip'),
-      btnChapters: document.getElementById('btn-chapters'),
       chaptersPanel: document.getElementById('chapters-panel'),
       chaptersSub: document.getElementById('chapters-sub'),
       chapList: document.getElementById('chap-list'),
       stripLeftSub: document.getElementById('strip-left-sub'),
       stripLeftBody: document.getElementById('strip-left-body'),
       stripRightBody: document.getElementById('strip-right-body'),
-      btnMark: document.getElementById('btn-mark'),
       markPanel: document.getElementById('mark-panel'),
       markCur: document.getElementById('mark-cur'),
       markList: document.getElementById('mark-list'),

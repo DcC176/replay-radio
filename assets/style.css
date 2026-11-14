@@ -1225,6 +1225,16 @@ body.view-multi .pv-ratewrap { display: none; }
   line-height: 16px;
 }
 
+/* 面板底部的「可选最高」：限流降级时才出现，用分隔线与真正的档位区分开 */
+.qn-hint {
+  margin-top: 4px;
+  padding-top: 4px;
+  height: 38px;
+  border-top: 1px solid rgba(255, 255, 255, .12);
+}
+.qn-hint .qn-name { color: rgba(255, 255, 255, .72); }
+.qn-hint .qn-tag { color: #00aeec; }
+
 /* ---- 设置面板 ---- */
 .pv-setpop { width: 218px; }
 .set-row {
@@ -1490,18 +1500,8 @@ body.view-multi .pv-ratewrap { display: none; }
   white-space: nowrap;
 }
 .pv-topbtns { display: flex; gap: 6px; flex: 0 0 auto; }
-/* 宽屏专用：两侧边栏开关。图标随状态翻转（收起→指向内，展开→指向外） */
-.pv-side { display: none; align-items: center; padding: 3px 8px; }
-body.theater .pv-side { display: inline-flex; }
-.pv-side svg { width: 12px; height: 12px; display: block; }
-.pv-side .i-exp { display: none; }
-body.side-l-off #btn-side-l .i-col,
-body.side-r-off #btn-side-r .i-col { display: none; }
-body.side-l-off #btn-side-l .i-exp,
-body.side-r-off #btn-side-r .i-exp { display: block; }
-/* 收起状态用主色实心，跟「已按下」的语义一致 */
-body.side-l-off #btn-side-l,
-body.side-r-off #btn-side-r { background: rgba(245, 71, 91, .92); }
+/* v1.9.12：顶栏只留用户 ID。收起侧栏的按钮移进了各自侧栏的标题行（.strip-fold），
+   连播 / 循环在设置面板、画质在控制条，顶部那几枚已删。 */
 .pv-btn {
   padding: 3px 11px;
   border: 0;
@@ -1514,16 +1514,6 @@ body.side-r-off #btn-side-r { background: rgba(245, 71, 91, .92); }
   transition: background .15s;
 }
 .pv-btn:hover { background: var(--red); }
-
-/* 播放选项（自动连播 / 循环）：图标按钮，比文字按钮窄 —— 顶栏在 288px 的
-   侧栏里已经把标题挤到极限，再塞两个文字按钮必然溢出。 */
-.pv-opt { padding: 3px 7px; display: inline-flex; align-items: center; justify-content: center; min-width: 27px; }
-.pv-opt svg { width: 13px; height: 13px; display: block; }
-.pv-opt[aria-pressed="true"] { background: rgba(245, 71, 91, .92); }
-.pv-opt[aria-pressed="true"]:hover { background: #f5475b; }
-/* 「单集」态在循环图标中间叠一个 1，其余状态只有一个回环箭头 */
-.pv-opt .i-one { display: none; }
-#btn-loop[data-loop="one"] .i-one { display: block; }
 
 /* 播放器内的一次性提示：贴在控制条上方（控制条 50px + 8px 间隙），水平居中 */
 .pv-toast {
@@ -1723,12 +1713,37 @@ body.side-r-off #btn-side-r { background: rgba(245, 71, 91, .92); }
 .strip { display: none; }
 
 .strip-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   color: var(--muted-2);
   margin-bottom: 10px;
   padding-left: 2px;
 }
 .strip-h span { margin-left: 6px; color: var(--muted-2); }
+
+/* 侧栏自己的「收起」按钮：贴在标题行最右，幽灵样式，悬停才显色。
+   ⚠️ 只在宽屏（影院模式）出现 —— 其它宽度下侧栏本就不存在，点它没有对象。
+   收起后整条 .strip 被 display:none，这枚按钮跟着消失，展开靠 .side-handle。 */
+.strip-fold {
+  margin-left: auto;
+  width: 22px;
+  height: 20px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(var(--ink), .06);
+  color: var(--muted-2);
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+body.theater .strip-fold { display: flex; }
+.strip-fold:hover { background: rgba(var(--ink), .16); color: var(--text); }
+.strip-fold svg { width: 11px; height: 11px; display: block; }
 /* 分段标签的来源说明：截图里的「第16首」其实是第 16 次登记，不写清楚就会被
    当成全场第 16 首（用户 2026-11-10 反馈的误标）。 */
 .strip-note {
@@ -1978,9 +1993,45 @@ body.theater .wrap {
   body.theater.side-r-off #strip-right { display: none; }
 }
 @media (max-width: 1280px) {
-  /* 这个宽度下侧栏本来就是隐藏的，开关没有可操作对象，别露出来 */
-  body.theater .pv-side { display: none; }
+  /* 这个宽度下侧栏本来就是隐藏的，按钮没有可操作对象，别露出来 */
+  body.theater .strip-fold { display: none; }
 }
+/* 收起态的展开入口：贴在三栏区域的左右边缘。
+   ⚠️ 绝对定位、不占网格列 —— 收起后播放器必须真正铺满（用户 2026-11-11 的要求），
+      给它留 24px 列会让「收起」名不副实。
+   ⚠️ 只在「确实收掉了那一侧」且宽度 >1280 时才有 display:flex，平时是 display:none，
+      否则会成为一个看不见但能聚焦/能点到的东西。 */
+.side-handle {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 4;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 76px;
+  padding: 0;
+  border: 0;
+  background: rgba(0, 0, 0, .55);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .18s, background .15s;
+}
+.side-handle svg { width: 12px; height: 12px; display: block; }
+.side-handle-l { left: 0; border-radius: 0 8px 8px 0; }
+.side-handle-r { right: 0; border-radius: 8px 0 0 8px; }
+@media (min-width: 1281px) {
+  body.theater.side-l-off .side-handle-l,
+  body.theater.side-r-off .side-handle-r { display: flex; }
+}
+/* 鼠标移到三栏区域才显形（不挡画面）；键盘聚焦时也要能看见，否则 Tab 到它等于没有 */
+body.theater.side-l-off .wrap:hover .side-handle-l,
+body.theater.side-r-off .wrap:hover .side-handle-r,
+.side-handle:focus-visible { opacity: .92; }
+.side-handle:hover { opacity: 1; background: var(--red); }
+
 /* 画面跟着列宽一起长，不要瞬移 */
 body.theater .player-box { transition: width .22s ease; }
 
