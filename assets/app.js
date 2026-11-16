@@ -1816,6 +1816,21 @@
   function singUnits(part) {
     var segs = segmentsOf(part.cid);
     if (!segs || !segs.length) return [];
+    // 自动歌切给的是**每首歌的起止**，比「登记点铺到下一个登记点」准：
+    // 两首之间的聊天不会再被算进前一首。没有 songs.js 的场仍走下面的旧逻辑。
+    var songs = (window.SONGS || {})[String(part.cid)] || [];
+    if (songs.length) {
+      var out0 = [];
+      songs.forEach(function (s) {
+        var a = Math.max(0, +s.t0 || 0);
+        var b = Math.min(part.duration, +s.t1 || 0);
+        if (b - a >= 20) out0.push({ start: a, duration: b - a, label: s.name || '' });
+      });
+      if (out0.length) {
+        out0.sort(function (x, y) { return x.start - y.start; });
+        return out0;
+      }
+    }
     var keys = (window.SUNGKEYS || {})[String(part.cid)] || [];
     var out = [];
     segs.slice().sort(function (a, b) { return a.start - b.start; }).forEach(function (s) {
@@ -1913,9 +1928,19 @@
 
     var segments = [];
     var acc = 0;
+    // 「仅播放唱歌」要有据可依：分段或自动歌切。两样都没有的场，singUnits 会返回空 ——
+    // 整场 20 期全是这种场时，时间轴就成 0 秒、页面一片空白（v1.9.13 之前就是这样）。
+    // 这里退一步：全空时按整段铺，并提示原因，至少让人能看。
+    var singEmpty = state.playOrder === 'sing' && !arr.some(function (p) {
+      return p.parts.some(function (part) {
+        var cid = String(part.cid);
+        return ((window.SEGMENTS || {})[cid] || []).length
+          || ((window.SONGS || {})[cid] || []).length;
+      });
+    });
     arr.forEach(function (p) {
       p.parts.forEach(function (part) {
-        (state.playOrder === 'sing' ? singUnits(part) : effectiveUnits(part)).forEach(function (u) {
+        ((state.playOrder === 'sing' && !singEmpty) ? singUnits(part) : effectiveUnits(part)).forEach(function (u) {
           segments.push({
             bvid: p.bvid,
             page: part.page,
@@ -1930,6 +1955,7 @@
         });
       });
     });
+    state.singEmpty = !!singEmpty;
     return { order: arr, segments: segments, total: acc };
   }
 
@@ -2101,6 +2127,9 @@
     syncPlayOrder();
     rebuildKeepingCurrent();
     refreshCycleViews();
+    if (v === 'sing' && state.singEmpty) {
+      pvToast('这些场还没有分段或歌切，「仅播放唱歌」暂按整段播放');
+    }
   }
 
   /* 把频道位置重新瞄到「cid 这支的第 at 秒」，**一个字节都不动播放器**。
@@ -7465,6 +7494,7 @@
       // 直接合并不冲突，但残留会让「换板块」后还认得别人的分P）
       window.SEGMENTS = {};
       window.SUNGKEYS = {};
+      window.SONGS = {};          // 自动歌切的歌级切点（有则优先于「登记点」）
       // 歌单/人工标注保留静态文件里的旧数据（cid 全局唯一，合并不会串人）
       window.SETLISTS = window.SETLISTS || {};
       window.SEGLABELS = window.SEGLABELS || {};
@@ -7472,13 +7502,13 @@
       // 以前后两份只走全局静态文件 → 一个主播的歌单和标注没法跟着它走。
       return Promise.all(ST_SET.map(function (id) {
         var q = '?station=' + encodeURIComponent(id);
-        return Promise.all(['segments', 'sung', 'setlists', 'labels'].map(function (name) {
+        return Promise.all(['segments', 'sung', 'setlists', 'labels', 'songs'].map(function (name) {
           return fetch('data/' + name + '.js' + q)
             .then(function (r) { return r.ok ? r.text() : ''; })
             .then(segObject).catch(function () { return null; });
         }));   // 离线时忽略，页面会提示没有分段
       })).then(function (pairs) {
-        var boxes = [{}, {}, {}, {}];
+        var boxes = [{}, {}, {}, {}, {}];
         pairs.forEach(function (pair) {
           boxes.forEach(function (box, i) {
             var o = pair[i];
@@ -7492,6 +7522,7 @@
         window.SUNGKEYS = boxes[1];
         window.SETLISTS = boxes[2];
         window.SEGLABELS = boxes[3];
+        window.SONGS = boxes[4];
       });
     }
 
