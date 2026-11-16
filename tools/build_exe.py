@@ -35,7 +35,7 @@ OUT = os.path.join(ROOT, "发布")
 # 这些 build_* 目录纯属缓存（不进包、不进版本库），可以随时手动删除。
 BUILD = os.path.join(ROOT, "build_%s" % time.strftime("%Y%m%d_%H%M%S"))
 
-APP_VERSION = "1.9.12"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.9.13"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
@@ -262,6 +262,10 @@ def build_exe():
         # 边界精修：读画面「已唱」浮层峰值定歌边界，靠它才不会把歌从中间切开。
         # 实测纯音频 25 段 / 带精修 27 段，与已有产物一致的是带精修那份 —— 必须一起打包。
         "--add-data", os.path.join(ROOT, "tools", "seg_refine.py") + os.pathsep + "tools",
+        # 自动歌切：serve.py 的 /api/songcut/* 在后台线程里 import 它（同一套抽帧+差分）。
+        # 与 auto_segments/seg_refine 一样是运行时才 import，静态分析看不到，必须显式带上。
+        "--add-data", os.path.join(ROOT, "tools", "songcut.py") + os.pathsep + "tools",
+        "--hidden-import", "songcut",
         # 它们只被动态加载的 seg_refine 用到，静态分析看不到，得显式声明
         # （numpy 34MB + pillow 7MB，EXE 会从 9.6MB 涨到 40MB 上下）。
         "--hidden-import", "numpy",

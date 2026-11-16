@@ -5476,9 +5476,194 @@
     el.chaptersPanel.hidden = !next;
     if (el.btnChapters) el.btnChapters.setAttribute('aria-expanded', String(next));
     if (next) {
+      if (el.songcutPanel) el.songcutPanel.hidden = true;   // 两块面板占同一位置
       renderChapters();
       clipEnsureDir();
     }
+  }
+
+  /* ---------------------------------------------------------- 自动歌切
+     识别在后端跑（/api/songcut/*：抽帧 → 行首聚类 → 差分切点），
+     前端只做三件事：触发、显示进度、让人改。
+     ⚠️ 不在这里做任何图像/音频计算 —— 浏览器端 seek 抽帧实测 708ms/帧，
+        一场要 18 分钟，算法必须留在后端。 */
+
+  var scState = { cid: '', bvid: '', songs: [], timer: 0, running: false };
+
+  function scParseTime(txt) {
+    var m = String(txt || '').trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2})$/);
+    if (!m) return NaN;
+    return (+(m[1] || 0)) * 3600 + (+m[2]) * 60 + (+m[3]);
+  }
+
+  function scRenderProgress(phase, ratio, elapsed) {
+    if (!el.scProgress) return;
+    el.scProgress.hidden = false;
+    if (el.scBar) el.scBar.style.width = Math.round(Math.max(0, Math.min(1, +ratio || 0)) * 100) + '%';
+    if (el.scNote) {
+      el.scNote.textContent = phase
+        ? (phase + (elapsed ? '（已用 ' + Math.round(elapsed) + ' 秒）' : ''))
+        : '';
+    }
+  }
+
+  function scRender(list) {
+    scState.songs = (list || []).map(function (x) {
+      return { t0: +x.t0 || 0, t1: +x.t1 || 0, name: String(x.name || ''),
+               conf: +x.conf || 0, src: String(x.src || 'frame') };
+    });
+    if (el.scList) {
+      el.scList.innerHTML = scState.songs.length ? scState.songs.map(function (x, i) {
+        return '<div class="sc-row" data-i="' + i + '">'
+          + '<span class="sc-n">' + (i + 1) + '</span>'
+          + '<input class="sc-t" data-k="t0" value="' + fmtClock(x.t0) + '" aria-label="开始时间">'
+          + '<span class="sc-dur" data-k="dur">' + Math.round((x.t1 - x.t0) / 60) + ' 分</span>'
+          + '<input class="sc-t" data-k="t1" value="' + fmtClock(x.t1) + '" aria-label="结束时间">'
+          + '<input class="sc-name" data-k="name" value="' + esc(x.name)
+          + '" placeholder="歌名（可空）">'
+          + '<button class="sc-del" data-k="del" title="删掉这一首" aria-label="删掉这一首">×</button>'
+          + '</div>';
+      }).join('') : '<div class="sc-empty">还没有结果。点「开始识别」会在后台分析这一场。</div>';
+    }
+    if (el.scCount) {
+      el.scCount.textContent = scState.songs.length ? ('共 ' + scState.songs.length + ' 首') : '';
+    }
+    if (el.scApply) el.scApply.disabled = !scState.songs.length || scState.running;
+  }
+
+  function scStop() {
+    scState.running = false;
+    if (scState.timer) { clearTimeout(scState.timer); scState.timer = 0; }
+    if (el.scRun) el.scRun.disabled = false;
+    if (el.scProgress) el.scProgress.hidden = true;
+    if (el.scApply) el.scApply.disabled = !scState.songs.length;
+  }
+
+  function scFail(msg) {
+    scStop();
+    if (el.scNote) el.scNote.textContent = '识别失败：' + (msg || '未知原因');
+    pvToast('自动歌切失败：' + (msg || '未知原因'));
+  }
+
+  function scPoll() {
+    if (!scState.cid) return;
+    var q = '?cid=' + encodeURIComponent(scState.cid)
+          + '&station=' + encodeURIComponent(ST || '');
+    fetch('/api/songcut/status' + q).then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.running) {
+          scState.running = true;
+          scRenderProgress(d.phase, d.progress, d.elapsed);
+          scState.timer = setTimeout(scPoll, 1200);
+          return;
+        }
+        scStop();
+        if (d.error) { scFail(d.error); return; }
+        var got = d.songs && d.songs.length ? d.songs : (d.saved || []);
+        if (got.length) {
+          scRender(got);
+          if (el.scNote) {
+            el.scNote.textContent = '识别完成：' + got.length + ' 首（' + Math.round(d.elapsed || 0)
+              + ' 秒）。可改起止时间与歌名，再点「应用到本场」。';
+          }
+        } else {
+          scRender([]);
+          if (el.scNote) el.scNote.textContent = '没有找到「歌名」行 —— 这一场的画面上可能没有歌名浮层。';
+        }
+      })
+      .catch(function () { scState.timer = setTimeout(scPoll, 2500); });
+  }
+
+  function scStart() {
+    var seg = currentSeg();
+    if (!seg) { pvToast('还没有正在播放的场次'); return; }
+    if (!el.scRun || el.scRun.disabled) return;
+    scState.cid = seg.cid;
+    scState.bvid = seg.bvid;
+    el.scRun.disabled = true;
+    scRenderProgress('提交任务', 0, 0);
+    // 把这一场的时长带过去：后端用它把 ffmpeg 的「已处理时长」换算成真实百分比。
+    // ⚠️ cycle.order 的每一项是**节目**，分P 在 .parts[] 里 —— 直接按 p.cid 匹配会全落空。
+    var dur = 0;
+    var order = (state.cycle && state.cycle.order) || [];
+    for (var oi = 0; oi < order.length && !dur; oi++) {
+      var parts = order[oi].parts || [];
+      for (var pi = 0; pi < parts.length; pi++) {
+        if (String(parts[pi].cid) === String(seg.cid)) {
+          dur = +parts[pi].duration || +order[oi].duration || 0;
+          break;
+        }
+      }
+    }
+    fetch('/api/songcut/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bvid: seg.bvid, cid: seg.cid, station: ST || '',
+                             dur: dur })
+    }).then(function (r) {
+      return r.json().then(function (d) { return { ok: r.ok, d: d }; });
+    }).then(function (x) {
+      if (!x.ok) { scFail((x.d && x.d.error) || '启动失败'); return; }
+      scState.running = true;
+      scPoll();
+    }).catch(function (e) { scFail(String(e)); });
+  }
+
+  function scApply() {
+    if (!scState.songs.length) return;
+    var bad = scState.songs.filter(function (x) { return !(x.t1 > x.t0 + 10); });
+    if (bad.length) { pvToast('有 ' + bad.length + ' 首的起止时间不合法（结束要比开始晚 10 秒以上）'); return; }
+    if (el.scApply) el.scApply.disabled = true;
+    fetch('/api/songcut/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ station: ST || '', cid: scState.cid, songs: scState.songs })
+    }).then(function (r) {
+      return r.json().then(function (d) { return { ok: r.ok, d: d }; });
+    }).then(function (x) {
+      if (!x.ok) { pvToast('写入失败：' + ((x.d && x.d.error) || '未知')); return; }
+      pvToast('已写入本场 ' + x.d.count + ' 首（stations/<主播>/songs.js）');
+      if (el.scNote) el.scNote.textContent = '已写入。播放器的「仅播放唱歌」下次加载会按这份歌单走。';
+      if (el.scApply) el.scApply.disabled = false;
+    }).catch(function (e) { pvToast('写入失败：' + e); });
+  }
+
+  function openSongcut() {
+    var seg = currentSeg();
+    if (!seg) { pvToast('还没有正在播放的场次'); return; }
+    setView('live');
+    scState.cid = seg.cid;
+    scState.bvid = seg.bvid;
+    if (el.chaptersPanel) el.chaptersPanel.hidden = true;
+    if (el.markPanel) el.markPanel.hidden = true;
+    if (el.songcutPanel) el.songcutPanel.hidden = false;
+    if (el.songcutSub) el.songcutSub.textContent = (seg.title || '').slice(0, 20);
+    if (el.scNote) el.scNote.textContent = '正在读取这一场已保存的结果…';
+    scRender([]);
+    fetch('/api/songcut/status?cid=' + encodeURIComponent(seg.cid)
+          + '&station=' + encodeURIComponent(ST || ''))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.running) {
+          scState.running = true;
+          el.scRun.disabled = true;
+          scRenderProgress(d.phase, d.progress, d.elapsed);
+          scPoll();
+          return;
+        }
+        if ((d.saved || []).length) {
+          scRender(d.saved);
+          if (el.scNote) el.scNote.textContent = '已载入上次保存的 ' + d.saved.length + ' 首，可以直接改。';
+        } else if (el.scNote) {
+          el.scNote.textContent = '这一场还没识别过。点「开始识别」，后台大约需要 1~2 分钟。';
+        }
+      })
+      .catch(function () { if (el.scNote) el.scNote.textContent = '读取失败，可以直接点「开始识别」。'; });
+  }
+
+  function closeSongcut() {
+    if (el.songcutPanel) el.songcutPanel.hidden = true;
+    scStop();
   }
 
   /* ---------------------------------------------------------- 片段保存
@@ -6316,6 +6501,36 @@
       toggleMarking(true);
     });
 
+    /* 自动歌切：入口在设置页，面板在播放器下方。识别全部走后端。 */
+    if (el.btnOpenSongcut) el.btnOpenSongcut.addEventListener('click', openSongcut);
+    if (el.scRun) el.scRun.addEventListener('click', scStart);
+    if (el.scApply) el.scApply.addEventListener('click', scApply);
+    if (el.scClose) el.scClose.addEventListener('click', closeSongcut);
+    if (el.scList) {
+      // 改时间/歌名：只更新内存，点「应用」才落盘（避免每敲一个字就写文件）
+      el.scList.addEventListener('input', function (e) {
+        var row = e.target.closest('.sc-row');
+        if (!row) return;
+        var s0 = scState.songs[+row.getAttribute('data-i')];
+        if (!s0) return;
+        var k = e.target.getAttribute('data-k');
+        if (k === 'name') { s0.name = e.target.value; return; }
+        if (k !== 't0' && k !== 't1') return;
+        var v = scParseTime(e.target.value);
+        if (!isFinite(v)) return;
+        s0[k] = v;
+        var d = row.querySelector('[data-k="dur"]');
+        if (d) d.textContent = Math.round((s0.t1 - s0.t0) / 60) + ' 分';
+      });
+      el.scList.addEventListener('click', function (e) {
+        var btn = e.target.closest('.sc-del');
+        if (!btn) return;
+        var row = btn.closest('.sc-row');
+        scState.songs.splice(+row.getAttribute('data-i'), 1);
+        scRender(scState.songs);
+      });
+    }
+
     var clipModeBtn = document.getElementById('clip-mode');
     if (clipModeBtn) clipModeBtn.addEventListener('click', function () { setClipMode(!state.clipMode); });
     var clipPickBtn = document.getElementById('clip-pick');
@@ -6443,6 +6658,7 @@
           || (el.setPanel && !el.setPanel.hidden)) { closePops(); return; }
       if (!el.markPanel.hidden) { toggleMarking(false); return; }
       if (!el.chaptersPanel.hidden) { toggleChapters(false); return; }
+      if (el.songcutPanel && !el.songcutPanel.hidden) { closeSongcut(); return; }
       if (document.body.classList.contains('theater')) toggleTheater(false);
     });
 
@@ -7115,6 +7331,18 @@
       handleSideR: document.getElementById('handle-side-r'),
       btnOpenChapters: document.getElementById('btn-open-chapters'),
       btnOpenMark: document.getElementById('btn-open-mark'),
+      btnOpenSongcut: document.getElementById('btn-open-songcut'),
+      songcutPanel: document.getElementById('songcut-panel'),
+      songcutSub: document.getElementById('songcut-sub'),
+      songcutNote: document.getElementById('songcut-note'),
+      scNote: document.getElementById('songcut-note'),
+      scRun: document.getElementById('songcut-run'),
+      scApply: document.getElementById('songcut-apply'),
+      scCount: document.getElementById('songcut-count'),
+      scProgress: document.getElementById('songcut-progress'),
+      scBar: document.getElementById('songcut-bar'),
+      scList: document.getElementById('songcut-list'),
+      scClose: document.getElementById('songcut-close'),
       qualityPanel: document.getElementById('quality-panel'),
       btnQpClose: document.getElementById('btn-qp-close'),
       btnLogin: document.getElementById('btn-login'),

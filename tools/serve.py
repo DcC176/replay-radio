@@ -1630,6 +1630,150 @@ def api_clip_pick(obj):
     return 200, {"ok": True, "dir": p}
 
 
+# ---------------------------------------------------------------- 自动歌切（v1.9.13）
+# 前端只负责触发与展示；识别在这里跑（画面抽帧 + 行首聚类 + 差分切点）。
+# 与 clip 同一套模式：一个全局任务槽 + 后台线程 + 轮询 status。
+
+SONG_LOCK = threading.Lock()
+SONG_JOB = {"running": False, "cid": "", "bvid": "", "station": "", "phase": "",
+            "progress": 0.0, "songs": [], "frames": 0, "peaks": 0,
+            "hasSongline": False, "error": "", "started": 0.0, "elapsed": 0.0}
+SONG_STEP_DEFAULT = 5.0
+SONG_MAX_SEC = 4 * 3600          # 单场超过 4 小时不跑（一跑就是半小时，且多为多人联动）
+
+
+def _song_js_path(sid):
+    st = find_station(str(sid or ""))
+    if not st:
+        raise RuntimeError("找不到主播 %s" % sid)
+    return os.path.join(station_dir(st), "songs.js")
+
+
+def _song_write(sid, cid, songs):
+    """把一场的结果写进 stations/<id>/songs.js（按 cid 索引，其它场次原样保留）。"""
+    p = _song_js_path(sid)
+    cur = _read_js_map(p, "SONGS") if os.path.exists(p) else {}
+    cur[str(cid)] = songs
+    if os.path.exists(p):
+        try:
+            shutil.copyfile(p, p + ".bak")
+        except OSError:
+            pass
+    body = json.dumps(cur, ensure_ascii=False, sort_keys=True)
+    with open(p, "w", encoding="utf-8", newline="") as f:
+        f.write("/* 自动歌切结果：每首歌的起止 +（可选的）歌名。\n"
+                "   由「自动歌切」生成；面板里改过之后会整场覆盖写回。 */\n")
+        f.write("window.SONGS = %s;\n" % body)
+    return os.path.basename(p), len(songs)
+
+
+def _songcut_worker(bvid, cid, step, region, dur):
+    global SONG_JOB
+    try:
+        from songcut import run as songcut_run
+        def progress(phase, ratio):
+            with SONG_LOCK:
+                SONG_JOB["phase"] = phase
+                SONG_JOB["progress"] = round(float(ratio), 3)
+                SONG_JOB["elapsed"] = round(time.time() - SONG_JOB["started"], 1)
+        r = songcut_run(bvid, cid, step, region, dur, progress)
+        with SONG_LOCK:
+            SONG_JOB.update(running=False, phase="完成", progress=1.0,
+                            songs=r.get("songs") or [], frames=r.get("frames") or 0,
+                            peaks=r.get("peaks") or 0,
+                            hasSongline=bool(r.get("hasSongline")),
+                            elapsed=r.get("elapsed") or 0)
+    except Exception as e:
+        with SONG_LOCK:
+            SONG_JOB.update(running=False, phase="失败", error=str(e),
+                            elapsed=round(time.time() - SONG_JOB["started"], 1))
+
+
+def api_songcut_start(obj):
+    """POST /api/songcut/start {bvid, cid, station?, step?} —— 起一个识别任务。"""
+    global SONG_JOB
+    bvid = str(obj.get("bvid") or "").strip()
+    cid = str(obj.get("cid") or "").strip()
+    if not re.match(r"^BV[0-9A-Za-z]{10}$", bvid) or not cid.isdigit():
+        return 400, {"error": "缺少有效的 bvid / cid"}
+    if seg_ffmpeg() == "":
+        return 400, {"error": "本机没找到 ffmpeg，无法抽帧"}
+    try:
+        step = float(obj.get("step") or SONG_STEP_DEFAULT)
+    except (TypeError, ValueError):
+        step = SONG_STEP_DEFAULT
+    step = max(3.0, min(15.0, step))
+    region = str(obj.get("region") or "songline")
+    if region not in ("songline", "center", "right-top"):
+        region = "songline"
+    try:
+        dur = float(obj.get("dur") or 0)
+    except (TypeError, ValueError):
+        dur = 0
+    if dur > SONG_MAX_SEC:
+        return 400, {"error": "这一场超过 %d 小时，自动歌切不处理" % (SONG_MAX_SEC // 3600)}
+    sid = str(obj.get("station") or cur_mid())
+    with SONG_LOCK:
+        if SONG_JOB.get("running"):
+            return 409, {"error": "上一场还在识别（%s），请等它结束" % (SONG_JOB.get("phase") or "")}
+        SONG_JOB = {"running": True, "cid": cid, "bvid": bvid, "station": sid,
+                    "phase": "排队", "progress": 0.0, "songs": [], "frames": 0,
+                    "peaks": 0, "hasSongline": False, "error": "",
+                    "started": time.time(), "elapsed": 0.0}
+    threading.Thread(target=_songcut_worker, args=(bvid, cid, step, region, dur),
+                     daemon=True).start()
+    return 200, {"ok": True, "cid": cid, "step": step}
+
+
+def api_songcut_status(query):
+    """GET /api/songcut/status?station=&cid= —— 进度；空闲时带回已保存的结果。"""
+    sid = (query.get("station", [""])[0] or cur_mid())
+    cid = (query.get("cid", [""])[0]).strip()
+    with SONG_LOCK:
+        d = dict(SONG_JOB)
+        d["songs"] = list(SONG_JOB.get("songs") or [])
+    d["ffmpeg"] = seg_ffmpeg() != ""
+    d["saved"] = []
+    if not d["running"] and cid.isdigit():
+        try:
+            m = _read_js_map(_song_js_path(sid), "SONGS")
+            d["saved"] = m.get(cid) or []
+        except Exception:
+            d["saved"] = []
+    return 200, d
+
+
+def api_songcut_apply(obj):
+    """POST /api/songcut/apply {station?, cid, songs:[{t0,t1,name?}]} —— 落盘。"""
+    sid = str(obj.get("station") or cur_mid())
+    cid = str(obj.get("cid") or "").strip()
+    songs = obj.get("songs")
+    if not cid.isdigit():
+        return 400, {"error": "缺少 cid"}
+    if not isinstance(songs, list) or not songs:
+        return 400, {"error": "没有可保存的结果"}
+    clean = []
+    for it in songs[:400]:
+        try:
+            t0 = max(0.0, float(it.get("t0")))
+            t1 = float(it.get("t1"))
+        except (TypeError, ValueError):
+            continue
+        if not (t1 > t0 + 10):
+            continue
+        clean.append({"t0": round(t0, 1), "t1": round(t1, 1),
+                      "name": str(it.get("name") or "").strip()[:80],
+                      "conf": round(float(it.get("conf") or 0), 2),
+                      "src": str(it.get("src") or "frame")[:12]})
+    if not clean:
+        return 400, {"error": "结果为空或不合法（每首至少 10 秒）"}
+    try:
+        name, n = _song_write(sid, cid, clean)
+    except Exception as e:
+        return 400, {"error": str(e)}
+    return 200, {"ok": True, "count": n, "file": name}
+
+
 def api_status(force=False):
     """本机登录态。带 ?refresh=1 时绕过缓存（登录/登出之后必须拿到新结果）。"""
     if not force:
@@ -6299,6 +6443,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(code, obj)
         if parsed.path == "/api/clip/status":
             return self._json(*api_clip_status())
+        if parsed.path == "/api/songcut/status":
+            return self._json(*api_songcut_status(q))
         if parsed.path == "/api/dd/actions":
             return self._json(*api_dd_actions(q))
         if parsed.path == "/api/dd/profile":
@@ -6374,7 +6520,8 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/series":
             return self._json(*api_series_status())
         if parsed.path in ("/data/segments.js", "/data/sung.js",
-                           "/data/setlists.js", "/data/labels.js"):
+                           "/data/setlists.js", "/data/labels.js",
+                           "/data/songs.js"):
             # 带 station 时按主播给；不带则落回静态文件（首屏引导等场景）。
             # 四份同源同目录：分段、登记时刻、歌单、人工标注必须来自同一位主播。
             _sid = q.get("station", [""])[0]
@@ -6382,6 +6529,8 @@ class Handler(SimpleHTTPRequestHandler):
                 _txt = station_segments_js(_sid)
             elif parsed.path.endswith("sung.js"):
                 _txt = station_sung_js(_sid)
+            elif parsed.path.endswith("songs.js"):
+                _txt = station_sidecar_js(_sid, "songs.js", "SONGS")
             elif parsed.path.endswith("setlists.js"):
                 _txt = station_sidecar_js(_sid, "setlists.js", "SETLISTS")
             else:
@@ -6486,6 +6635,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_segments_save(obj))
         if parsed.path == "/api/clip/start":
             return self._json(*api_clip_start(obj))
+        if parsed.path == "/api/songcut/start":
+            return self._json(*api_songcut_start(obj))
+        if parsed.path == "/api/songcut/apply":
+            return self._json(*api_songcut_apply(obj))
         if parsed.path == "/api/clip/pick":
             return self._json(*api_clip_pick(obj))
         if parsed.path == "/api/series/refresh":

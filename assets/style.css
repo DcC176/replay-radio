@@ -1567,6 +1567,77 @@ body.view-multi .pv-ratewrap { display: none; }
 .quality-panel b,
 .mark-panel b { color: var(--text); font-weight: 500; }
 .qp-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
+
+/* ------------------------------------------------ 自动歌切面板（v1.9.13）
+   与分段面板同一套外观：它也是「本场的工具」，放在播放器下方同一列。
+   行内要能改起止时间与歌名，所以输入框要小、要能缩（288px 侧栏下也放得下）。 */
+.sc-close { float: right; margin-top: -2px; }
+.sc-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 4px; }
+.sc-progress {
+  height: 4px;
+  margin: 6px 0 8px;
+  border-radius: 2px;
+  background: var(--line-2);
+  overflow: hidden;
+}
+.sc-progress[hidden] { display: none; }
+.sc-progress i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--red);
+  transition: width .3s ease;
+}
+.sc-list { display: flex; flex-direction: column; gap: 3px; max-height: 340px; overflow-y: auto; }
+.sc-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--line);
+}
+.sc-row:last-child { border-bottom: 0; }
+.sc-n { width: 20px; text-align: right; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.sc-t {
+  width: 56px;
+  padding: 3px 5px;
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.sc-dur { color: var(--muted-2); font-size: 11.5px; min-width: 44px; }
+.sc-name {
+  flex: 1 1 96px;
+  min-width: 0;
+  padding: 3px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+.sc-name::placeholder { color: var(--muted-2); }
+.sc-del {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.sc-del:hover { background: rgba(var(--ink), .12); color: var(--text); }
+.sc-empty { padding: 8px 2px; color: var(--muted-2); font-size: 12px; }
 .qp-btns .btn { text-decoration: none; display: inline-flex; align-items: center; }
 
 .mark-panel code,
