@@ -4,7 +4,7 @@
 为什么要这个小工具
     自动分段只能给出「哪几秒有内容」，歌名要靠画面左上角的「歌名：XXX」浮层。
     `seg_refine.py` 读的是「已唱」列表的**累积高度**，遇到列表在右上、或被礼物卡
-    盖住的场次会读错（祈心iko 雨夜歌回：23 个登记点，实际只有 9 首歌）。
+    盖住的场次会读错（某歌回：23 个登记点，实际只有 9 首歌）。
     这里把「抽帧人工核对 → 写回 labels/setlists/sung」固化成一条命令，后续任何
     一场都能照做，不用再手改 JS。
 
@@ -13,7 +13,7 @@
        python tools/label_songs.py sheet --bvid BV1TEpn6cETF --cid 42656730115
        # 图片在 tools/.labels/<cid>/sheet_NN.png
     2) 照着画面把结果写成 JSON（格式见下），再应用：
-       python tools/label_songs.py apply --station 3707047143016490 --json my.json
+       python tools/label_songs.py apply --station <主播id> --json my.json
 
     JSON 格式：
     {
