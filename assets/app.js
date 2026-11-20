@@ -85,7 +85,9 @@
        / weibo*(微博) / dynamic(动态) / series(回放来源) —— 后几个是补上的。
      不带 station 的：/api/status(B站登录态)、/api/stations(主播注册表)、
        /api/img(图片代理)、/api/protocol、/api/ping —— 都是全局的。
-       /api/dd/*(DD 看播档案) 也是全局的：它读的是**登录者自己**的 vtb.cat 记录。 */
+       /api/dd/*(DD 看播档案) 也是全局的：它读的是**登录者自己**的 vtb.cat 记录。
+       **唯一例外是 dd/fans**：粉丝趋势要的是「当前主播」的粉丝数（v1.9.14 修正），
+       所以它单独在下面的名单里。 */
   var STATION_RE = new RegExp('^/api/(' + [
     'programs',
     'segments/',
@@ -94,10 +96,11 @@
     'status-board',
     'weibo',
     'dynamic',
-    'series'
-    /* ⚠️ `dd/` **不在**这里：DD 看播档案读的是**登录者自己**的 vtb.cat 记录
-       （「我看过谁 / 我发过什么」），跟当前板块是哪位主播无关。
-       曾经把 dd/ 加进来过 —— 那是错的，会让「自己的档案」变成「主播的档案」。 */
+    'series',
+    /* ⚠️ 只加 `dd/fans` 一条，**不要**写成 `dd/`：DD 的其余卡片（常去主播榜、互动流、
+       直播日历、词云）读的都是**登录者自己**的 vtb.cat 记录，加了 station 就会
+       变成「主播的档案」—— 那是错的。粉丝趋势相反，它必须是当前主播的粉丝数。 */
+    'dd/fans'
   ].join('|') + ')');
   /* ---------- 主题色：随「板块」（当前在看的主播）切换 ----------
      每位主播在 data/stations.json 里有一个 accent。切换时把它写进 --red / --red-soft，
@@ -1305,8 +1308,11 @@
     var empty = document.getElementById('dl-fans-empty');
     if (!box) return;
     var pts = d.points || [];
+    // 这张图是**当前主播**的粉丝数（不是登录者自己的）：把名字写在最前面，
+    // 否则「今日 43382」看不出是谁的
     dlSetTxt('dl-fans-stat',
-      '今日 ' + (d.today || 0) + '　1d ' + (d.d1 >= 0 ? '+' : '') + (d.d1 || 0)
+      (d.who ? d.who + ' · ' : '') + '今日 ' + (d.today || 0)
+      + '　1d ' + (d.d1 >= 0 ? '+' : '') + (d.d1 || 0)
       + (d.d7 !== null && d.d7 !== undefined ? '　7d ' + (d.d7 >= 0 ? '+' : '') + d.d7 : '')
       + (d.d30 !== null && d.d30 !== undefined ? '　30d ' + (d.d30 >= 0 ? '+' : '') + d.d30 : ''));
     if (pts.length < 2) {
@@ -9636,7 +9642,7 @@
   var PL_AXES = [['lang', '语言'], ['style', '风格'], ['artist', '演唱者']];
 
   /* 条目唯一键。⚠️ **不能拿 bvid 当唯一标识**：合集里每个条目可能自己就是多P视频
-     （实测「羽啾啾」16 期歌切、每期 6~21 首，同一 bvid 下十几首不同的歌），
+     （实测「某合集」16 期歌切、每期 6~21 首，同一 bvid 下十几首不同的歌），
      只按 bvid 定位会让它们互相串 —— 症状是「点第二首却播第一首」「高亮永远在第一行」
      「勾一首连带选上一串」。后端随条目给了 `key`（cid 优先），这里只是兜底。 */
   function plKeyOf(it) {
@@ -10115,7 +10121,7 @@
     var items = plFiltered();
     if (stat) {
       // 名字与来源高度重合时只显示一次（合集导入时歌单名就是合集名，例如
-      // name=「合集「羽啾啾」」、source=「合集「羽啾啾」」→ 别并排出两遍）
+      // name=「合集「某合集」」、source=「合集「某合集」」→ 别并排出两遍）
       var nm = PL.data.name || '';
       var srcTxt = PL.data.source || '';
       stat.textContent = items.length + ' / ' + PL.data.items.length + ' 首 · ' + nm

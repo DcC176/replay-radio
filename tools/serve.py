@@ -696,8 +696,8 @@ def api_stations_save(obj):
             return 502, {"error": str(e)}
         base_name = p["name"] or ("主播 " + mid)
         # 第一位自动成为主站 —— 空表起步时没有它，main_station() 就一直取不到人
-        # short 不再自动截断 —— 原工程切前 6 个字符（「小松绿Viridis」会变成
-        # 「小松绿Vir」），通用版里它还会被拼进大标题，截断就成了「名字显示不完全」。
+        # short 不再自动截断 —— 原工程切前 6 个字符（「示例主播长名字」会变成
+        # 「示例主播长」），通用版里它还会被拼进大标题，截断就成了「名字显示不完全」。
         # 长名字交给 CSS 省略号（窄槽各自处理），数据层永远存全名。
         cur = {"id": sid, "mid": mid, "main": not items,
                "name": base_name, "short": base_name, "room": p["room"],
@@ -2892,7 +2892,7 @@ def _artist_lang(artist):
 def _pl_item_key(it):
     """条目唯一键。
 
-    ⚠️ **不能用 bvid 当唯一标识**：合集内部是多P视频时（如「羽啾啾」16 期歌切），
+    ⚠️ **不能用 bvid 当唯一标识**：合集内部是多P视频时（如「某合集」16 期歌切），
     同一 bvid 下有十几首不同的歌。只按 bvid 定位会让它们互相串 ——
     表现为「点第二首却播第一首」「高亮永远在第一行」「勾选一首连带选上一串」。
     cid 是分P级唯一的，最准；没有 cid 时退回 bvid+pN。
@@ -3000,7 +3000,7 @@ def _pl_prefix(title):
     """取标题开头的【…】/[…] 前缀原文。
 
     展开合集内层分P时要把外层前缀带上：分P名通常只有歌名（`001_非国民的ヒーロー`），
-    而演唱者信息在外层条目标题里（`【羽啾chu2u】20260810歌切合集`）。
+    而演唱者信息在外层条目标题里（`【示例主播】20260810歌切合集`）。
     """
     m = re.match(r"^[【\[]([^】\]]+)[】\]]", (title or "").strip())
     return m.group(1).strip() if m else ""
@@ -3085,7 +3085,7 @@ def _pl_fav_items(fid, limit):
 def _pl_entries(data):
     """条目来源优先级：合集（ugc_season）> 多P（pages）> 单个视频。
 
-    ⚠️ **合集条目自己可能又是一个多P视频** —— 2026-10-15 实测：合集「羽啾啾」16 个条目，
+    ⚠️ **合集条目自己可能又是一个多P视频** —— 2026-10-15 实测：合集「某合集」16 个条目，
     每个条目是「某日歌切」，内层 `pages` 才是单曲（6~21 个/期，共 169 首）。
     这种形状下合集条目的 `page` 只给**第一个分P**、`arc.duration` 是**整期时长**（如 4076 秒），
     只看它们会把每期压成一首、时长还按整期算 → 表现为「导入后每期只有第一首」。
@@ -3370,6 +3370,19 @@ def dd_uid():
     except Exception:
         u = 0
     return str(u or "")
+
+
+def dd_liver_station(sid=""):
+    """DD 粉丝趋势要的是**被看的主播** —— 与 dd_uid()（看的人）正好相反。
+
+    sid 可以是主播 id / mid / 房间号（前端传的是 ST），空则取当前板块。
+    ⚠️ 显式传了 sid 却查不到时返回 None，**绝不回退到当前主播** ——
+       否则一位已删除/改名的主播会静默显示成别人的粉丝数（本项目的老坑）。
+    ⚠️ 也绝不回退到登录者，那正是 v1.9.14 之前的问题：
+       切到哪位主播，曲线都还是「我自己」的粉丝数。
+    """
+    sid = str(sid or "").strip()
+    return find_station(sid) if sid else cur_station()
 
 
 def _dd_fetch(params):
@@ -3857,14 +3870,22 @@ def _dd_fans_read(mid):
 
 
 def api_dd_fans(query):
-    """GET /api/dd/fans —— 粉丝趋势：今天还没记就记一次，然后回整段历史。
+    """GET /api/dd/fans?station= —— 当前主播的粉丝趋势：今天还没记就记一次，然后回整段历史。
 
-    ⚠️ 只记 B 站 `x/relation/stat` 的 follower。**一天一条**，多了没意义，
-       而且这是主站域接口 —— 记太勤会给自己找 412。
+    数据源是 B 站 `x/relation/stat?vmid=<主播 mid>` 的 follower（公开接口，不需要登录）。
+    ⚠️ **必须按当前主播取**（dd_liver_station）。DD 板块的其余卡片（常去榜 / 互动流 / 日历）
+       读的是登录者自己的 vtb.cat 记录，唯独这一张是主播的 —— 两者语义相反，
+       改这里之前先确认拿的是哪一个。
+    ⚠️ 一天一条，多了没意义，而且这是主站域接口 —— 记太勤会给自己找 412。
     """
-    mid = dd_uid()
+    sid = query.get("station", [""])[0]
+    st = dd_liver_station(sid)
+    mid = str((st or {}).get("mid") or "")
     if not mid.isdigit():
-        return 400, {"error": "DD 读的是你自己账号的记录：请先在「设置」里登录 B 站"}
+        # 两种原因要分开说：没选主播 vs 选了但这位已不在注册表里
+        return 400, {"error": "找不到这位主播" if str(sid or "").strip()
+                     else "还没有选主播，看不到粉丝趋势"}
+    who = (st or {}).get("name") or ""
     hist = _dd_fans_read(mid)
     today = time.strftime("%Y-%m-%d")
     if not hist or hist[-1].get("d") != today:
@@ -3877,7 +3898,8 @@ def api_dd_fans(query):
         except Exception as e:
             # 记不到不影响展示历史：能画多少画多少
             err = "今日粉丝数取不到（%s）" % str(e)[:60]
-            return 200, {"ok": True, "uid": mid, "points": hist, "error": err}
+            return 200, {"ok": True, "uid": mid, "who": who, "src": "liver",
+                         "points": hist, "error": err}
         hist.append({"d": today, "n": n})
         try:
             os.makedirs(DD_FANS_DIR, exist_ok=True)
@@ -3891,7 +3913,7 @@ def api_dd_fans(query):
         n = int(p.get("n") or 0)
         pts.append({"d": p.get("d"), "n": n, "delta": (n - prev) if prev is not None else 0})
         prev = n
-    return 200, {"ok": True, "uid": mid, "points": pts,
+    return 200, {"ok": True, "uid": mid, "who": who, "src": "liver", "points": pts,
                  "today": pts[-1]["n"] if pts else 0,
                  "d1": (pts[-1]["delta"] if pts else 0),
                  "d7": (pts[-1]["n"] - pts[-8]["n"]) if len(pts) >= 8 else None,
@@ -5494,7 +5516,7 @@ def _seg_mine():
     """当前这个分段作业是不是**本主播**的。
 
     SEG_JOB 是全局一份（单线程队列，跨主播共用），running/queue 不筛的话，
-    主站会显示「正在更新：还有 3 个投稿排队」—— 而那几期其实是羽啾的。
+    主站会显示「正在更新：还有 3 个投稿排队」—— 而那几期其实是该主播的。
     排队时记下的 stations 映射就是用来在报状态时认人的。
     """
     sid = str(cur_station().get("id"))
