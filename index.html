@@ -222,6 +222,14 @@ html[data-theme="light"] .gal:hover{box-shadow:0 30px 66px -30px rgba(20,20,40,.
 .mirror .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mirror .lat{font-family:var(--mono);font-size:13px;color:var(--dim)}
 .mirror .lat.ok{color:#4caf7d}.mirror .lat.bad{color:#d9534f}.mirror .lat.run{color:var(--muted)}
+/* 国内加速入口：沿用 mirror 行样式，a 标签本身作为可点击下载项 */
+.cn-list{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+.cn-item{display:flex;align-items:center;gap:10px;padding:11px 14px;border:1px solid var(--line);
+  border-radius:10px;font-size:13px;background:color-mix(in srgb,var(--bg) 30%,transparent);transition:.2s}
+.cn-item:hover{border-color:var(--line-strong);background:var(--card-2)}
+.cn-item .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cn-item .tag{font-family:var(--mono);font-size:12px;color:var(--dim);white-space:nowrap}
+.cn-note{margin-top:11px;font-size:12px;line-height:1.7;color:var(--dim)}
 
 /* ---------- faq ---------- */
 .faq{display:grid;grid-template-columns:.8fr 1.2fr;gap:clamp(24px,4vw,56px);margin-top:8px}
@@ -270,7 +278,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
 @media (max-width:680px){
   .cards{grid-template-columns:1fr}
   .gallery{columns:1}
-  .mirror-list{grid-template-columns:1fr}
+  .mirror-list,.cn-list{grid-template-columns:1fr}
   .asset{grid-template-columns:1fr;gap:12px}
   .os-ic{display:none}
   .asset-act{grid-column:1/-1;width:100%;justify-content:stretch}
@@ -505,6 +513,21 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
         </div>
         <div class="warn" id="platWarn">当前平台暂未提供打包版。可以克隆仓库后用 <code>python tools/serve.py</code> 从源码运行。</div>
 
+        <div class="mirrors" id="cnFast">
+          <div class="mirrors-head">
+            <p>国内加速下载 · 点选任一入口即可下载同一个安装包</p>
+          </div>
+          <div class="cn-list" id="cnList">
+            <a class="cn-item" id="cnGhProxy" href="https://github.com/DcC176/replay-radio/releases/latest" target="_blank" rel="noopener">
+              <span class="nm">GH-Proxy 加速</span><span class="tag">gh-proxy.com</span></a>
+            <a class="cn-item" id="cnGhFast" href="https://github.com/DcC176/replay-radio/releases/latest" target="_blank" rel="noopener">
+              <span class="nm">GhFast 加速</span><span class="tag">ghfast.top</span></a>
+            <a class="cn-item" id="cnGhproxyNet" href="https://github.com/DcC176/replay-radio/releases/latest" target="_blank" rel="noopener">
+              <span class="nm">GHProxy.net 加速</span><span class="tag">ghproxy.net</span></a>
+          </div>
+          <p class="cn-note">适用于在中国大陆、直连 GitHub 下载慢或超时的用户：三个入口由公共镜像中转同一个官方安装包，无需访问境外节点。文件未经本项目托管，下载后请核对 Release 页的 SHA-256；若某入口失效，换用其他入口或上方官方链接。</p>
+        </div>
+
         <div class="mirrors">
           <div class="mirrors-head">
             <p>连通性测速 · 接口往返耗时（非下载速度）</p>
@@ -592,6 +615,12 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
   var ASSET_SIZE_MB = 53;
   var ASSET_NAME = "ReplayRadio-v" + VERSION + ".exe";
   var ASSET_URL = "https://github.com/" + REPO + "/releases/download/v" + VERSION + "/" + ASSET_NAME;
+  /* 国内加速：公共镜像前缀 + 同一个官方安装包；任一失效不影响其余入口。 */
+  var CN_MIRRORS = [
+    ["cnGhProxy", "https://gh-proxy.com/"],
+    ["cnGhFast", "https://ghfast.top/"],
+    ["cnGhproxyNet", "https://ghproxy.net/"]
+  ];
 
   function applyVersion(){
     document.getElementById("verChip").textContent = VERSION;
@@ -599,6 +628,9 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
     document.getElementById("assetVer").textContent = "版本 v" + VERSION;
     document.getElementById("assetSize").textContent = "体积约 " + ASSET_SIZE_MB + " MB";
     document.getElementById("dlBtn").href = ASSET_URL;
+    CN_MIRRORS.forEach(function(m){
+      document.getElementById(m[0]).href = m[1] + ASSET_URL;
+    });
   }
 
   /* ---------- theme ---------- */
@@ -659,6 +691,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
     document.getElementById("assetVer").textContent = "版本 v" + VERSION;
     document.getElementById("assetSize").textContent = plat === "win" ? "体积约 " + ASSET_SIZE_MB + " MB" : "需从源码运行";
     document.getElementById("platWarn").classList.toggle("on", !ok);
+    document.getElementById("cnFast").hidden = !ok;
     var btn = document.getElementById("assetBtn");
     btn.href = ok ? ASSET_URL : "https://github.com/" + REPO;
     document.getElementById("assetBtnLabel").textContent = ok ? "下载" : "查看源码说明";
