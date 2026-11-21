@@ -133,6 +133,7 @@ html[data-theme="light"] .win{box-shadow:0 30px 64px -34px rgba(20,20,40,.4)}
 .linkchips{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
 .linkchip{display:inline-flex;align-items:center;gap:7px;height:38px;padding:0 17px;border-radius:10px;
   border:1px solid var(--line);color:var(--muted);font-size:13px;font-weight:400;
+  font-family:var(--font);cursor:pointer;
   background:color-mix(in srgb,var(--card) 70%,transparent);
   transition:transform .2s,color .2s,border-color .2s,background .2s}
 .linkchip svg{width:16px;height:16px;flex:none}
@@ -376,6 +377,10 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.9-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg>
           GitHub
         </a>
+        <button class="linkchip" id="qqChip" type="button" title="点击复制群号">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 0 0-10 10c0 2.3.8 4.4 2.1 6.1L3 21l3.2-1.1A9.96 9.96 0 0 0 12 22a10 10 0 0 0 10-10A10 10 0 0 0 12 2zM7.5 11a1.3 1.3 0 1 1 0-2.6 1.3 1.3 0 0 1 0 2.6zm4.5 0a1.3 1.3 0 1 1 0-2.6 1.3 1.3 0 0 1 0 2.6zm4.5 0a1.3 1.3 0 1 1 0-2.6 1.3 1.3 0 0 1 0 2.6z"/></svg>
+          <span id="qqChipLabel">QQ 群 1134780703</span>
+        </button>
       </div>
       <ul class="meta-row">
         <li>免费 · 开源</li><li>Windows 10 / 11</li>
@@ -645,6 +650,18 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
     var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
     root.setAttribute("data-theme", next);
     try { localStorage.setItem("rr-theme", next); } catch (e) {}
+  });
+
+  /* ---------- QQ 群号一键复制 ---------- */
+  var qqChip = document.getElementById("qqChip");
+  var qqTimer;
+  qqChip.addEventListener("click", function(){
+    navigator.clipboard.writeText("1134780703").then(function(){
+      var label = document.getElementById("qqChipLabel");
+      label.textContent = "已复制群号 ✓";
+      clearTimeout(qqTimer);
+      qqTimer = setTimeout(function(){ label.textContent = "QQ 群 1134780703"; }, 1600);
+    });
   });
 
   /* ---------- reveal on scroll ---------- */
