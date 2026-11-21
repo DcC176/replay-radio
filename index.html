@@ -9,7 +9,7 @@
 <meta property="og:title" content="噼里啪啦 · 第三方 B 站客户端" />
 <meta property="og:description" content="简洁全能，让你畅享全新的 B 站体验。六个板块，一个页面。" />
 <meta property="og:type" content="website" />
-<!-- 与桌面版/本地网页统一用同一枚应用图标；favicon.png 由 tools/make_icon.py 生成 -->
+<!-- 官网标签页图标（site/favicon.png）与左上角 logo 同源；EXE/快捷方式图标仍由 tools/make_icon.py 生成 -->
 <link rel="icon" type="image/png" href="favicon.png" />
 <link rel="apple-touch-icon" href="favicon.png" />
 <style>
@@ -45,7 +45,8 @@ h1,h2,h3,p{margin:0}
 .nav-in{max-width:var(--maxw);margin:0 auto;padding:0 clamp(20px,4vw,40px);height:64px;
   display:flex;align-items:center;gap:28px}
 .brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:.2px}
-.brand svg{width:28px;height:28px;flex:none}
+.brand svg,.brand .brand-logo{width:28px;height:28px;flex:none}
+.brand .brand-logo{border-radius:9px;object-fit:cover;display:block}
 .brand b{font-size:15px}
 .brand span{font-size:12px;color:var(--dim);font-family:var(--mono);letter-spacing:.08em;
   border:1px solid var(--line);border-radius:999px;padding:2px 7px}
@@ -306,7 +307,7 @@ footer{border-top:1px solid var(--line);padding:44px 0 56px;background:var(--bg-
 <header class="nav">
   <div class="nav-in">
     <a class="brand" href="#top" aria-label="噼里啪啦 首页">
-      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="#16161b"/><rect x="0.5" y="0.5" width="31" height="31" rx="8.5" fill="none" stroke="rgba(255,255,255,.12)"/><path d="M9 20V12M13 23V9M17 19v-6M21 22V10" stroke="#f5475b" stroke-width="2.4" stroke-linecap="round"/></svg>
+      <img class="brand-logo" src="assets/brand-logo.webp" alt="" aria-hidden="true" />
       <b>噼里啪啦</b><span>CLIENT</span>
     </a>
     <nav class="nav-links" aria-label="主导航">
