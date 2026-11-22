@@ -6077,25 +6077,33 @@
     rcSyncTraySwitches(s);
   }
 
-  function rcSyncTraySwitches(s) {
-    s = s || ((rcState.data && rcState.data.settings) || {});
-    var on = !!s.tray;
+  /* 两个开关（录播姬设置 / 全局设置）都指向同一个设置项。
+     ⚠️ 只能按**刚保存的值**回填：这里如果去读 rcState.data，全局设置页上那份
+     数据是进入页面时拉的快照（rcLoad 在非录播姬页会直接 return，不会刷新），
+     点一下就会被旧值立刻翻回原样 —— 表现就是「开关点了没反应」。 */
+  function rcApplyTraySwitch(on) {
+    on = !!on;
     var a = document.querySelector('[data-rc-set="tray"]');
     if (a && a.checked !== on) a.checked = on;
     var b = rcQ('set-tray');
     if (b && b.checked !== on) b.checked = on;
     var note = rcQ('set-tray-note');
-    var tn = rcQ('rc-tray-note');
-    var tray = (rcState.data && rcState.data.tray) || {};
     if (note) {
       note.textContent = on
         ? '图标已显示在系统托盘。关闭图标不会影响录制；网页全部关闭且没有录制任务时后台进程会自动退出。'
         : '图标已隐藏（不影响录制）。网页全部关闭且没有录制任务时后台进程会自动退出；'
           + '如果还有录制在写盘，进程会留在后台，把当前文件完整写完再安全退出。';
     }
+    var tn = rcQ('rc-tray-note');
+    var tray = (rcState.data && rcState.data.tray) || {};
     if (tn && tray.failed) {
       tn.textContent = '这台系统没能显示托盘图标：' + tray.failed + '（不影响录制）';
     }
+  }
+
+  function rcSyncTraySwitches(s) {
+    s = s || ((rcState.data && rcState.data.settings) || {});
+    rcApplyTraySwitch(!!s.tray);
   }
 
   function rcApplyUI() {
@@ -6183,8 +6191,15 @@
   function rcSaveSettings(body, key) {
     return rcPost('/api/recorder/settings', body).then(function (ok) {
       if (!ok) return false;
+      if (key === 'tray') {
+        // 先把「保存后的值」写进本地快照再回填，避免被旧快照翻回去
+        if (rcState.data && rcState.data.settings) {
+          rcState.data.settings.tray = !!body.tray;
+        }
+        rcApplyTraySwitch(!!body.tray);
+        setTimeout(rcTrayLoad, 320);       // 再向后台确认一次（含 tray.failed）
+      }
       pvToast('设置已保存');
-      if (key === 'tray') rcSyncTraySwitches();
       if (key === 'filenameDefault' || key === 'filename') rcFnamePreview(true);
       return true;
     });
