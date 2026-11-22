@@ -610,12 +610,36 @@ def probe_mid(mid):
     来源列表直接复用 discover_series()，不另写一套发现逻辑 ——
     「哪个系列算回放」的判断只有一份，才不会出现两处挑出不同结果。
     """
-    mid = str(mid or "").strip()
-    if not mid.isdigit():
-        raise RuntimeError("UID 必须是纯数字（B 站空间号：个人主页网址"
-                           " space.bilibili.com/<数字> 里那串数字）")
+    raw = str(mid or "").strip()
+    via_room = ""
+    m = re.search(r"live\.bilibili\.com/(\d+)", raw)
+    if m:
+        # 直接粘了直播间链接：先按房间号换成真实 UID，避免把房间号当 UID
+        meta = _live_room_info(m.group(1))
+        if not meta["uid"]:
+            raise RuntimeError("这个直播间没有绑定主播 UID")
+        mid, via_room = meta["uid"], meta["room_id"]
+    else:
+        if not raw.isdigit():
+            raise RuntimeError("UID 必须是纯数字（B 站空间号：个人主页网址"
+                               " space.bilibili.com/<数字> 里那串数字）")
+        mid = raw
+        # 常见误填：把**直播间号**当成 UID。若这个数字确实是一个直播间、
+        # 其主播 UID 不是它，且该 UID 自己没在播 —— 这就是明显的误填。
+        # 这时改用房间的真实 UID，并在结果里标 via_room，界面会明确告知。
+        try:
+            meta = _live_room_info(raw)
+            if meta["uid"] and meta["uid"] != raw:
+                d0 = bili_get("https://api.live.bilibili.com/room/v1/Room/"
+                              "get_status_info_by_uids?uids[]=%s" % urllib.parse.quote(raw),
+                              "https://live.bilibili.com/")
+                own = ((d0.get("data") or {}).get(raw)) or {}
+                if meta["living"] and int(own.get("live_status") or 0) != 1:
+                    mid, via_room = meta["uid"], raw
+        except Exception:
+            pass
     live = bili_get("https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids"
-                    "?uids[]=%s" % mid, "https://live.bilibili.com/")
+                    "?uids[]=%s" % urllib.parse.quote(mid), "https://live.bilibili.com/")
     if live.get("code") != 0:
         raise RuntimeError("查主播接口 code=%s %s" % (live.get("code"), live.get("message")))
     info = ((live.get("data") or {}).get(mid)) or {}
@@ -635,7 +659,8 @@ def probe_mid(mid):
             err = "这位的「合集和系列」里还没有内容"
     except Exception as e:
         err = str(e)
-    return {"mid": mid, "name": str(info.get("uname") or "").strip(),
+    return {"mid": mid, "via_room": via_room,
+            "name": str(info.get("uname") or "").strip(),
             "room": str(info.get("room_id") or ""),
             # 头像：页面拿它自动挑一个板块色（图片经 /api/img 代理，同源，canvas 能读像素）
             "face": str(info.get("face") or "").strip(),
@@ -1062,6 +1087,7 @@ def read_build_stamp():
 # 其余一律回空应答（前端此时正停在引导页上，本来也不会去取节目单）。
 STATIONLESS_OK = (
     "/api/stations", "/api/stations/probe", "/api/stations/save", "/api/stations/delete",
+    "/api/stations/following", "/api/stations/bulk",
     "/api/stations/main",
     "/api/ping", "/api/status", "/api/img", "/api/quit",
     "/api/clip/cover", "/api/clip/cover/preview",
@@ -4354,6 +4380,98 @@ def live_play_url(room, qn):
     return c
 
 
+# 新版取流接口：老 playUrl 对一部分直播间（B 站新的 HLS/fMP4 流）直接报
+# 19001012「调用bvc-play-url-one出错」，但它只影响 **FLV**，状态接口仍是准的。
+# 所以这里补一条 HLS 通道：状态照常显示直播中，取流时再用本机 ffmpeg 转成 FLV
+# 交给原有的 mpegts 播放链路（前端一行都不用改）。
+LIVE_PLAYINFO_API = "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo"
+_LIVE_HLS_CACHE = {}
+LIVE_HLS_TTL = 60
+
+
+def _live_room_info(room):
+    """按房间号取权威开播状态（get_info 不需要登录，也不受新版流影响）。"""
+    room = str(room or "")
+    d = bili_get("%s?room_id=%s" % (LIVE_ROOM_INFO_API, urllib.parse.quote(room)),
+                 "https://live.bilibili.com/%s" % room, fallback_anon=True)
+    if d.get("code") != 0:
+        raise RuntimeError("直播间信息 code=%s" % d.get("code"))
+    x = d.get("data") or {}
+    if not str(x.get("room_id") or "").isdigit():
+        raise RuntimeError("直播间不存在")
+    try:
+        start = int(x.get("live_time") or 0)
+    except (TypeError, ValueError):
+        start = 0
+    return {"uid": str(x.get("uid") or ""), "room_id": str(x.get("room_id") or room),
+            "living": int(x.get("live_status") or 0) == 1,
+            "title": x.get("title") or "", "area": x.get("area_name") or "",
+            "cover": x.get("keyframe") or x.get("user_cover") or "",
+            "online": int(x.get("online") or 0), "start": start}
+
+
+def _live_hls_url(room, qn):
+    """新版 getRoomPlayInfo → HLS(fMP4) 地址。
+
+    一个房间通常只有一种协议（老房间给 http_stream/flv，新房间只给 http_hls）。
+    这里只挑 avc 编码：mpegts.js 与 FLV 都只认 H.264。
+    """
+    room = str(room or "")
+    now = time.time()
+    hit = _LIVE_HLS_CACHE.get(room)
+    if hit and now - hit["at"] < LIVE_HLS_TTL:
+        return hit
+    url = (LIVE_PLAYINFO_API + "?room_id=%s&protocol=0,1&format=0,1,2&codec=0,1"
+           "&qn=%s&platform=web&ptype=8&dolby=5&panorama=1"
+           % (urllib.parse.quote(room), urllib.parse.quote(str(qn))))
+    d = bili_get(url, "https://live.bilibili.com/%s" % room, fallback_anon=True)
+    if d.get("code") != 0:
+        raise RuntimeError("新版取流 code=%s" % d.get("code"))
+    p = (((d.get("data") or {}).get("playurl_info") or {}).get("playurl") or {})
+    desc = {int(g.get("qn") or 0): g.get("desc") or ""
+            for g in (p.get("g_qn_desc") or [])}
+    for st in (p.get("stream") or []):
+        for fm in (st.get("format") or []):
+            for co in (fm.get("codec") or []):
+                if str(co.get("codec_name") or "") != "avc":
+                    continue
+                infos = co.get("url_info") or []
+                base = co.get("base_url") or ""
+                if not infos or not base:
+                    continue
+                u = infos[0]
+                full = (u.get("host") or "") + base + (u.get("extra") or "")
+                cur = int(co.get("current_qn") or qn)
+                acc = [int(x) for x in (co.get("accept_qn") or []) if str(x).isdigit()]
+                out = {"at": now, "qn": qn, "kind": "hls", "url": full,
+                       "current_qn": cur,
+                       "qualities": [{"qn": q, "desc": desc.get(q) or str(q)}
+                                     for q in acc]}
+                _LIVE_HLS_CACHE[room] = out
+                return out
+    raise RuntimeError("新版取流没有可用的 H.264 通道")
+
+
+def _fill_live_stream(out, room, qn):
+    """先试 FLV（老接口），失败再试 HLS。返回 True 表示拿到了可取流的地址。
+
+    ⚠️ living 与「取不取得到流」必须分开：状态接口说在播就显示直播中，
+       取流失败只写 error，绝不把在播判成未开播（19001012 就是这么骗人的）。
+    """
+    try:
+        c = live_play_url(room, qn)
+        out.update(qualities=c["qualities"], current_qn=c["current_qn"])
+        return True
+    except Exception as e1:
+        try:
+            h = _live_hls_url(room, qn)
+            out.update(qualities=h["qualities"], current_qn=h["current_qn"], hls=True)
+            return True
+        except Exception as e2:
+            out["error"] = "直播中，但取流失败：%s；HLS：%s" % (str(e1)[:50], str(e2)[:50])
+            return False
+
+
 # ---------------------------------------------------------------- 关注列表（监控室）
 # 读**登录账号**的关注列表，过滤出正在直播的 —— 监控室「关注的直播」的数据源。
 # 两步：followings 翻页拿 uid（必须带 SESSDATA）→ get_status_info_by_uids 批量查开播。
@@ -4457,6 +4575,63 @@ def _following_uids():
     FOLLOW_CACHE["uids_at"] = now
     print("[follow] 关注名单 %d 人（%d 页，并发 %d）" % (len(out), pages, FOLLOW_WORKERS))
     return out
+
+
+FOLLOW_PEOPLE_CACHE = {"at": 0.0, "list": []}
+FOLLOW_PEOPLE_TTL = 300
+
+
+def _following_people(force=False):
+    """关注的人 + 昵称/头像/是否有直播间（批量添加主播用）。
+
+    ⚠️ get_status_info_by_uids 只返回**有直播间**的账号；没有直播间的关注直接略过 ——
+    加进电台也播不了，列出来只会让人以为漏了。
+    """
+    now = time.time()
+    if (not force and FOLLOW_PEOPLE_CACHE["list"]
+            and now - FOLLOW_PEOPLE_CACHE["at"] < FOLLOW_PEOPLE_TTL):
+        return list(FOLLOW_PEOPLE_CACHE["list"])
+    uids = _following_uids()
+    batches = [uids[i:i + FOLLOW_BATCH] for i in range(0, len(uids), FOLLOW_BATCH)]
+
+    def one(batch):
+        q = "&".join("uids[]=%s" % u for u in batch)
+        try:
+            d = _follow_json("https://api.live.bilibili.com/room/v1/Room/"
+                             "get_status_info_by_uids?%s" % q,
+                             "https://live.bilibili.com/")
+        except Exception as e:
+            print("[follow] 批量资料取失败：%s" % e)
+            return None
+        if d.get("code") != 0:
+            return None
+        return d.get("data") or {}
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(FOLLOW_WORKERS, max(1, len(batches)))) as ex:
+        got = list(ex.map(one, batches))
+    if any(g is None for g in got):
+        raise RuntimeError("关注资料有部分批次取失败，请稍后重试")
+    people = []
+    for data in got:
+        for uid, info in data.items():
+            room = str(info.get("room_id") or "")
+            if not room or room == "0":
+                continue
+            people.append({
+                "mid": str(uid),
+                "uname": info.get("uname") or "",
+                "face": info.get("face") or "",
+                "room": room,
+                "title": info.get("title") or "",
+                "area": info.get("area_v2_name") or "",
+                "living": int(info.get("live_status") or 0) == 1,
+            })
+    # 在播优先；没昵称的排到最后（API 偶尔缺 uname，别让它占住列表顶部）
+    people.sort(key=lambda x: (not x["living"], not bool(x["uname"]), x["uname"]))
+    FOLLOW_PEOPLE_CACHE["list"] = people
+    FOLLOW_PEOPLE_CACHE["at"] = now
+    return list(people)
 
 
 def _follow_batch(batch):
@@ -4615,6 +4790,79 @@ def api_following_live(force=False):
     ms = int((time.time() - t0) * 1000)
     print("[follow] 取到 %d 位在播，耗时 %d ms" % (len(live), ms))
     return 200, {"list": live, "ms": ms}
+
+
+def api_stations_following(force=False):
+    """GET /api/stations/following —— 关注列表（带是否已添加），供首页批量添加。"""
+    if not self_uid():
+        return 401, {"error": "需要登录：先在设置页扫码登录 B 站，才能读取关注列表"}
+    try:
+        people = _following_people(force)
+    except Exception as e:
+        return 502, {"error": str(e)}
+    added = {str(s.get("mid")) for s in load_stations(force=True)}
+    for p in people:
+        p["added"] = p["mid"] in added
+    return 200, {"list": people, "total": len(people),
+                 "added": sum(1 for p in people if p["added"])}
+
+
+def api_stations_bulk(obj):
+    """POST /api/stations/bulk {mids:[...]} —— 批量添加关注的人。
+
+    只写 stations.json（名字/房间/头像），**不探测合集系列**：几十位一起探测会
+    打几十次接口、等几十秒。回放来源可以之后在设置里单个补。
+    """
+    raw = obj.get("mids")
+    if not isinstance(raw, list) or not raw:
+        return 400, {"error": "没有选中任何人"}
+    mids = []
+    for x in raw:
+        x = str(x or "").strip()
+        if x.isdigit() and x not in mids:
+            mids.append(x)
+    if not mids:
+        return 400, {"error": "选中的条目不是有效 UID"}
+    if len(mids) > 40:
+        return 400, {"error": "一次最多添加 40 位"}
+    doc = _stations_doc_read()
+    items = [s for s in doc["stations"] if isinstance(s, dict)]
+    exist = {str(s.get("mid")) for s in items}
+    todo = [m for m in mids if m not in exist]
+    skipped = [m for m in mids if m in exist]
+    data = {}
+    for i in range(0, len(todo), FOLLOW_BATCH):
+        batch = todo[i:i + FOLLOW_BATCH]
+        q = "&".join("uids[]=%s" % u for u in batch)
+        try:
+            d = _follow_json("https://api.live.bilibili.com/room/v1/Room/"
+                             "get_status_info_by_uids?%s" % q,
+                             "https://live.bilibili.com/")
+        except Exception as e:
+            return 502, {"error": "取主播资料失败：%s" % str(e)[:80]}
+        if d.get("code") != 0:
+            return 502, {"error": "取主播资料 code=%s" % d.get("code")}
+        data.update(d.get("data") or {})
+    added, failed = [], []
+    for mid in todo:
+        info = data.get(mid) or {}
+        room = str(info.get("room_id") or "")
+        if not room or room == "0":
+            failed.append({"mid": mid, "error": "这个账号没有直播间"})
+            continue
+        if len(items) >= MAX_STATIONS:
+            failed.append({"mid": mid, "error": "最多 %d 位主播" % MAX_STATIONS})
+            continue
+        name = str(info.get("uname") or ("主播 " + mid))[:128]
+        items.append({"id": mid, "mid": mid, "main": not items,
+                      "name": name, "short": name, "room": room,
+                      "face": str(info.get("face") or "")[:512]})
+        added.append({"mid": mid, "name": name})
+    if added:
+        doc["stations"] = items
+        _stations_doc_write(doc)
+    FOLLOW_PEOPLE_CACHE["at"] = 0.0        # 下次读关注列表时重新算 added
+    return 200, {"ok": True, "added": added, "skipped": skipped, "failed": failed}
 
 
 # --- 添加任意直播间（监控室）：房间号 / 直播间链接 / b23.tv 短链 → 可直接播的卡片 ---
@@ -6094,12 +6342,7 @@ def api_live_playinfo(query):
                    area=live.get("area") or "", start=live.get("start") or 0,
                    url=live.get("url") or "")
         if out["living"] and out["room_id"]:
-            try:
-                info = live_play_url(out["room_id"], DEFAULT_LIVE_QN)
-                out["qualities"] = info["qualities"]
-                out["current_qn"] = info["current_qn"]
-            except Exception as e:
-                out["error"] = str(e)
+            _fill_live_stream(out, out["room_id"], DEFAULT_LIVE_QN)
         return 200, out
     out = {"room_id": cur_room(), "mid": cur_mid(), "station": station_head()}
     try:
@@ -6125,67 +6368,109 @@ def api_live_playinfo(query):
                area=live.get("area") or "", start=live.get("start") or 0,
                url=live.get("url") or "")
     if out["living"]:
-        try:
-            info = live_play_url(cur_room(), DEFAULT_LIVE_QN)
-            out["qualities"] = info["qualities"]
-            out["current_qn"] = info["current_qn"]
-        except Exception as e:
-            out["error"] = str(e)
+        _fill_live_stream(out, cur_room(), DEFAULT_LIVE_QN)
     return 200, out
+
+
+def _open_live_stream(room, qn):
+    """打开一路直播字节流：先 FLV（老接口），失败再 HLS→ffmpeg 转 FLV。
+
+    返回 (stream, proc, err)。stream 同时支持 read1/read；
+    proc 是 HLS 转封装时的 ffmpeg 进程，FLV 直连时为 None。
+    """
+    room = str(room or "")
+    try:
+        media = live_play_url(room, qn)["url"]
+        req = urllib.request.Request(media, headers={
+            "User-Agent": UA, "Referer": "https://live.bilibili.com/%s" % room,
+            "Accept": "*/*",
+        })
+        return urlopen(req, 30), None, ""
+    except Exception as e1:
+        try:
+            h = _live_hls_url(room, qn)
+        except Exception:
+            return None, None, "取直播流失败：%s" % bili_err(e1)
+        ff = seg_ffmpeg()
+        if not ff:
+            return None, None, "取直播流失败：%s（且没有 ffmpeg 可转 HLS）" % bili_err(e1)
+        try:
+            from auto_segments import NO_WINDOW, HIDE_SI
+        except Exception:
+            NO_WINDOW, HIDE_SI = 0, None
+        hdr = "Referer: https://live.bilibili.com/%s\r\nUser-Agent: %s\r\n" % (room, UA)
+        cmd = [ff, "-hide_banner", "-loglevel", "error", "-headers", hdr,
+               "-i", h["url"], "-c", "copy", "-f", "flv", "pipe:1"]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                    creationflags=NO_WINDOW, startupinfo=HIDE_SI)
+        except OSError as e:
+            return None, None, "启动 ffmpeg 失败：%s" % e
+        return proc.stdout, proc, ""
+
+
+def _close_live_stream(stream, proc):
+    try:
+        if stream:
+            stream.close()
+    except Exception:
+        pass
+    if proc is not None:
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=3)
+        except Exception:
+            pass
 
 
 def api_live_stream(handler, query):
     """转发直播流。直播是持续流，不支持 Range；断开由客户端决定（关页面 / 切走）。
 
     ?room=<真实房间号>：播**注册表之外**的直播间（监控室「关注的直播」用）；
-    不带则跟当前板块走（原有行为不变）。
+    不带则跟当前板块走（原有行为不变）。新版 HLS 房间由本机 ffmpeg 转成 FLV 再转发。
     """
     room = (query.get("room", [""])[0] or "").strip() or cur_room()
     qn = parse_int(query.get("qn", ["0"])[0], DEFAULT_LIVE_QN)
-    try:
-        media = live_play_url(room, qn)["url"]
-    except Exception as e:
-        return 502, {"error": "取直播流失败：%s" % bili_err(e)}
-    req = urllib.request.Request(media, headers={
-        "User-Agent": UA, "Referer": "https://live.bilibili.com/%s" % room,
-        "Accept": "*/*",
-    })
-    try:
-        resp = urlopen(req, 30)
-    except Exception as e:
-        return 502, {"error": "连接直播流失败：%s" % e}
+    stream, proc, err = _open_live_stream(room, qn)
+    if err:
+        return 502, {"error": err}
     handler.send_response(200)
     handler.send_header("Content-Type", "video/x-flv")
     handler.end_headers()
     try:
         while True:
-            chunk = resp.read(262144)
+            chunk = stream.read1(WS_CHUNK)
             if not chunk:
                 break
             handler.wfile.write(chunk)
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
         pass                       # 观众关页面 / 切走，属正常断开
     finally:
-        try:
-            resp.close()
-        except Exception:
-            pass
+        _close_live_stream(stream, proc)
     return None, None
 
 
 def playinfo_by_room(room):
-    """按**房间号**确认「这一路现在能不能播」，只打一次 playUrl（比按 uid 查少一趟接口）。
+    """按**房间号**确认「这一路现在能不能播」。
 
-    监控室「关注的直播」在左栏就已经拿到了标题 / 主播名 / 是否在播，这里只为画质档位
-    与一次确认：取不到流地址就是「没在播 / 刚下播」。
+    ⚠️ 开播状态以 get_info 的 live_status 为准，**不能**用「取不到 FLV 地址」推断未开播：
+    新版 HLS/fMP4 房间的 playUrl 会报 19001012，但它们确实在播（2026-11-22 实测
+    13308358）。取流失败只写 error，状态仍是直播中。
     """
     out = {"room_id": str(room), "mid": "", "living": False}
     try:
-        info = live_play_url(room, DEFAULT_LIVE_QN)
+        meta = _live_room_info(room)
     except Exception as e:
-        out["error"] = str(e)
+        out["error"] = "开播状态获取失败：%s" % str(e)[:60]
         return out
-    out.update(living=True, qualities=info["qualities"], current_qn=info["current_qn"])
+    out.update(mid=meta["uid"], room_id=meta["room_id"], living=meta["living"],
+               title=meta["title"], area=meta["area"], cover=meta["cover"],
+               online=meta["online"], start=meta["start"])
+    if not meta["living"]:
+        return out
+    _fill_live_stream(out, room, DEFAULT_LIVE_QN)
     return out
 
 
@@ -6276,21 +6561,15 @@ def api_live_ws(handler, query):
     if not ws_accept(handler):
         return
     handler.close_connection = True          # 别指望这条连接还能再收 HTTP 请求
-    try:
-        media = live_play_url(room, qn)["url"]
-        req = urllib.request.Request(media, headers={
-            "User-Agent": UA, "Referer": "https://live.bilibili.com/%s" % room,
-            "Accept": "*/*",
-        })
-        resp = urlopen(req, 30)
-    except Exception as e:
+    stream, proc, err = _open_live_stream(room, qn)
+    if err:
         # 握手已经回过 101 了，只能用「一条关闭帧」把失败告诉前端
         try:
             handler.wfile.write(struct.pack("!BBH", 0x88, 2, 1011))
             handler.wfile.flush()
         except Exception:
             pass
-        print("[play] ws 房间 %s 取流失败：%s" % (room, bili_err(e)))
+        print("[play] ws 房间 %s 取流失败：%s" % (room, err))
         return
     try:
         while True:
@@ -6306,17 +6585,14 @@ def api_live_ws(handler, query):
             #    每隔两秒才到一批数据，缓冲一空就 waiting，追帧再 seek 一次
             #    就可能彻底停住（表现为「播一阵后画面定住、状态还是直播中」）。
             #    read1(n) 有多少返回多少，最多 n 字节 → 到货即转发，抖动 < 100ms。
-            chunk = resp.read1(WS_CHUNK)
+            chunk = stream.read1(WS_CHUNK)
             if not chunk:
                 break
             handler.wfile.write(ws_frame(chunk))
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
         pass                       # 观众关页面 / 取消勾选，属正常断开
     finally:
-        try:
-            resp.close()
-        except Exception:
-            pass
+        _close_live_stream(stream, proc)
 
 
 def api_live_credential(obj):
@@ -8480,6 +8756,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(code, obj)
         if parsed.path == "/api/stations":
             return self._json(*api_stations())
+        if parsed.path == "/api/stations/following":
+            return self._json(*api_stations_following("refresh" in q))
         if parsed.path == "/api/dynamic":
             return self._json(*api_dynamic(q))
         if parsed.path == "/api/weibo":
@@ -8588,6 +8866,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_playlist_tag(obj))
         if parsed.path == "/api/stations/probe":
             return self._json(*api_stations_probe(obj))
+        if parsed.path == "/api/stations/bulk":
+            return self._json(*api_stations_bulk(obj))
         if parsed.path == "/api/stations/save":
             return self._json(*api_stations_save(obj))
         if parsed.path == "/api/stations/delete":

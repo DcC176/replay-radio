@@ -156,10 +156,12 @@ window.__BOOT_T0 = Date.now();
   <div class="ob-card ob-card-form" id="ob-form" hidden>
     <div class="ob-row">
       <input id="ob-mid" type="text" inputmode="numeric" autocomplete="off" spellcheck="false"
-             placeholder="主播 UID" aria-label="主播 UID">
+             placeholder="B 站 UID（必填）" aria-label="B 站 UID（必填）">
       <button class="btn primary" id="ob-probe" type="button">检测</button>
     </div>
-    <p class="ob-hint">UID 是个人主页网址里那串数字：<b>space.bilibili.com/1512246445</b></p>
+    <p class="ob-hint"><b>必须填 B 站 UID</b> —— 个人主页地址
+      <b>space.bilibili.com/1512246445</b> 里那串数字。<br>
+      不是直播间号，也不是昵称；直接粘贴直播间链接也可以，会自动换算成对应的 UID。</p>
 
     <div class="ob-result" id="ob-result"></div>
 
@@ -185,6 +187,22 @@ window.__BOOT_T0 = Date.now();
     </div>
 
     <button class="btn primary ob-go" id="ob-save" type="button" hidden>就听 TA 的 →</button>
+
+    <div class="ob-bulk" id="ob-bulk">
+      <button class="ob-bulk-open" id="ob-bulk-open" type="button">从关注列表批量添加 →</button>
+      <div class="ob-bulk-box" id="ob-bulk-box" hidden>
+        <div class="ob-bulk-bar">
+          <input class="ob-bulk-filter" id="ob-bulk-filter" type="search"
+                 placeholder="搜索昵称或 UID" autocomplete="off" aria-label="搜索关注">
+          <span class="ob-bulk-stat" id="ob-bulk-stat">正在读取关注列表…</span>
+          <button class="ob-bulk-link" id="ob-bulk-clear" type="button">清空选择</button>
+          <button class="btn small primary" id="ob-bulk-add" type="button" disabled>添加选中的 0 位</button>
+        </div>
+        <p class="ob-bulk-note">点卡片或按住拖动框选；已添加的不会再被选中。只列出有直播间的关注；
+          批量添加只写主播资料，回放来源可以之后在「设置 → 主播管理」里补。</p>
+        <div class="ob-bulk-grid" id="ob-bulk-grid"></div>
+      </div>
+    </div>
   </div>
 
   <p class="ob-foot">
@@ -1203,13 +1221,15 @@ window.__BOOT_T0 = Date.now();
       </div>
       <div class="live-card" style="margin-top:18px">
         <div class="live-card-h">主播管理</div>
-        <p class="live-note">填 B 站<b>空间号</b>（个人主页网址
-          <code>space.bilibili.com/&lt;数字&gt;</code> 里那串数字），点「检测」自动查出
+        <p class="live-note"><b>必须填 B 站 UID（空间号）</b>（个人主页网址
+          <code>space.bilibili.com/&lt;数字&gt;</code> 里那串数字，<b>不是直播间号</b>），
+          点「检测」自动查出
           主播名、直播间号与可选的回放来源。加进来的人会出现在顶栏那排色灯里 ——
           <b>不用再手工改 data/stations.json</b>。下面列表里<b>点一下主播名就能改显示名</b>，
           <b>点 ☆ 设为默认板块</b>（主站，顶栏品牌名跟着它走），<b>点 × 删除</b>。</p>
         <div class="live-send">
-          <input id="st-mid" inputmode="numeric" autocomplete="off" placeholder="主播 UID">
+          <input id="st-mid" inputmode="numeric" autocomplete="off"
+                 placeholder="B 站 UID（必填，不是直播间号）">
           <button class="btn small primary" id="st-probe" type="button">检测</button>
         </div>
         <label class="seg-auto" id="st-source-box" hidden>回放来源

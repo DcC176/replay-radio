@@ -4395,6 +4395,90 @@ body.view-multi .col-right { display: none; }
 .ob-go { margin-top: 18px; width: 100%; justify-content: center; }
 .ob-go[hidden] { display: none; }
 
+/* 从关注列表批量添加（v1.9.21）：表单展开成两倍宽，卡片按可用宽度自动排。
+   拖动框选靠 pointerdown + pointerover，所以整块要 user-select:none。 */
+.ob-card-form { transition: max-width .2s ease; }
+.ob-card-form.bulk-open { max-width: 780px; }
+/* .ob-card 是 flex column + align-items:center，子项默认按内容宽度收缩；
+   批量区要占满表单宽度，显式 stretch。 */
+.ob-bulk {
+  align-self: stretch;
+  width: 100%;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.ob-bulk-open {
+  display: block; width: 100%; padding: 9px;
+  border: 1px dashed var(--line-2); border-radius: 9px;
+  background: none; color: var(--text-2);
+  font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.ob-bulk-open:hover { border-color: var(--red); color: var(--text); }
+.ob-bulk-open[hidden] { display: none; }
+.ob-bulk-box[hidden] { display: none; }
+.ob-bulk-box { margin-top: 12px; }
+.ob-bulk-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.ob-bulk-filter {
+  flex: 0 1 190px; min-width: 120px;
+  padding: 5px 9px;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel-2); color: var(--text);
+  font: inherit; font-size: 12px; outline: none;
+}
+.ob-bulk-filter:focus { border-color: var(--red); }
+.ob-bulk-stat { font-size: 12px; color: var(--muted); }
+.ob-bulk-link {
+  margin-left: auto; padding: 0; border: 0; background: none;
+  color: var(--muted); font: inherit; font-size: 12px;
+  text-decoration: underline; cursor: pointer;
+}
+.ob-bulk-link:hover { color: var(--text); }
+.ob-bulk-note { margin: 8px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--muted-2); }
+.ob-bulk-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+  gap: 8px;
+  max-height: 300px;
+  overflow: auto;
+  margin-top: 10px;
+  padding: 2px;
+  user-select: none;
+}
+.ob-bulk-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.ob-bulk-card:hover { border-color: var(--line-2); }
+.ob-bulk-card.sel { border-color: var(--red); background: var(--red-soft); }
+.ob-bulk-card.added { opacity: .55; cursor: default; }
+.ob-bulk-card .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ob-bulk-card .fw { position: relative; flex: 0 0 auto; display: grid; }
+.ob-bulk-card.live .fw::after {
+  content: ""; position: absolute; right: 0; bottom: 0;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--red); border: 1.5px solid var(--panel-2);
+}
+.ob-bulk-face {
+  width: 28px; height: 28px; border-radius: 50%;
+  object-fit: cover; background: var(--panel);
+}
+.ob-bulk-face-ph { display: grid; place-items: center; font-size: 12px; color: var(--muted); }
+.ob-bulk-card .tag { margin-left: auto; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.ob-bulk-card .mark { display: none; margin-left: auto; font-size: 11px; font-style: normal; color: var(--red); }
+.ob-bulk-card.sel .mark { display: block; }
+
 .ob-foot { margin-top: 26px; font-size: 12px; color: var(--muted-2); text-align: center; }
 .ob-foot a { color: var(--muted); }
 .ob-foot a:hover { color: var(--text); }

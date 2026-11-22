@@ -2962,6 +2962,14 @@
       }
       el.liveInfo.innerHTML = '<b>直播中</b> · ' + esc(d.title || '（无标题）')
         + (d.online ? ' · 人气 ' + fmtNum(d.online) : '');
+      /* 状态是直播中、但两条取流通道都没拿到地址：不要把画面留黑，
+         直接把原因写在横幅里，用户至少知道该去原直播间。 */
+      if (d.error && !(d.qualities || []).length) {
+        el.banner.hidden = false;
+        el.banner.innerHTML = '<div>' + esc('直播中，但取不到直播流：' + d.error) + '</div>';
+        chatStart();
+        return;
+      }
       el.banner.hidden = true;
       startLive(d.current_qn);
       chatStart();
@@ -3829,6 +3837,10 @@
       .then(function (d) {
         if (d.error) { stTip('<b>' + esc(d.error) + '</b>'); return; }
         stProbe = d.probe || null;
+        if (stProbe && stProbe.mid && stProbe.mid !== mid) {
+          mid = stProbe.mid;
+          input.value = mid;      // 直播间链接/房间号 → 换成真实 UID
+        }
         var srcs = (stProbe && stProbe.sources) || [];
         sel.innerHTML = '<option value="">自动（推荐：以后新系列会自己跟上）</option>'
           + srcs.map(function (s) {
@@ -3851,16 +3863,23 @@
         }
         if (colorBox) colorBox.hidden = false;
         if (stProbe && stProbe.face) stAccentAuto(stProbe.face);   // 自动按头像配色
-        stTip('查到 <b>' + esc((stProbe && stProbe.name) || ('UID ' + mid))
-          + '</b>' + ((stProbe && stProbe.room) ? '，房间号 ' + esc(stProbe.room) : '')
-          + '，确认无误就点保存。');
+        var who2 = esc((stProbe && stProbe.name) || ('UID ' + mid));
+        if (stProbe && stProbe.via_room) {
+          stTip('你填的是直播间 <b>' + esc(stProbe.via_room) + '</b>，已换算为 UID <b>'
+            + esc(mid) + '</b>（' + who2 + '），确认无误就点保存。');
+        } else {
+          stTip('查到 <b>' + who2 + '</b>'
+            + ((stProbe && stProbe.room) ? '，房间号 ' + esc(stProbe.room) : '')
+            + '，确认无误就点保存。');
+        }
       })
       .catch(function () { stTip('检测失败，请重试'); });
   }
 
   function saveStation() {
     var sel = document.getElementById('st-source');
-    var mid = (document.getElementById('st-mid').value || '').trim();
+    var mid = (stProbe && stProbe.mid)
+      ? stProbe.mid : (document.getElementById('st-mid').value || '').trim();
     if (!mid) { stTip('先填主播 UID'); return; }
     var body = { mid: mid };
     // 这位已经在列表里就带上它的 id：明确是「更新这一位」。
@@ -8097,6 +8116,15 @@
     var colorBox = document.getElementById('ob-color-box');
     var palBox = document.getElementById('ob-palette');
     var picked = null;
+    /* 批量添加（v1.9.21）：关注列表 + 选择态。sel 用对象当集合，mid -> 1。 */
+    var bulk = {loaded: false, list: [], sel: {}, busy: false, filter: ''};
+    var bulkTgl = document.getElementById('ob-bulk-open');
+    var bulkBox = document.getElementById('ob-bulk-box');
+    var bulkGrid = document.getElementById('ob-bulk-grid');
+    var bulkStat = document.getElementById('ob-bulk-stat');
+    var bulkAdd = document.getElementById('ob-bulk-add');
+    var bulkClear = document.getElementById('ob-bulk-clear');
+    var bulkFilter = document.getElementById('ob-bulk-filter');
 
     /* 候选色块：点一下换成那个色（只改本地的 picked，跟着「就听 TA 的」一起提交）。
        用 onclick 赋值而不是 addEventListener —— showPicker 可能被调用多次，
@@ -8140,6 +8168,12 @@
       postJSON('/api/stations/probe', { mid: mid }).then(function (d) {
         if (d.error) { say('<b>' + esc(d.error) + '</b>'); return; }
         picked = d.probe || null;
+        /* 后端可能把「直播间链接/直播间号」换算成了真实 UID（via_room）：
+           输入框直接改成 UID，后面保存/再检测都不会再走错。 */
+        if (picked && picked.mid && picked.mid !== mid) {
+          mid = picked.mid;
+          input.value = mid;
+        }
         var srcs = (picked && picked.sources) || [];
         sel.innerHTML = '<option value="">自动（推荐：以后新系列会自己跟上）</option>'
           + srcs.map(function (s) {
@@ -8182,14 +8216,20 @@
               + '加进来也能用，但回放清单会是空的（等 TA 建了合集或系列再点保存即可）。';
           }
         }
-        say('查到 <b>' + esc((picked && picked.name) || ('UID ' + mid)) + '</b>'
-          + ((picked && picked.room) ? '，房间号 ' + esc(picked.room) : '')
-          + '。确认无误就点「就听 TA 的」。');
+        var who = esc((picked && picked.name) || ('UID ' + mid));
+        if (picked && picked.via_room) {
+          say('你填的是直播间 <b>' + esc(picked.via_room) + '</b>，已换算为 UID <b>'
+            + esc(mid) + '</b>（' + who + '）。确认无误就点「就听 TA 的」。');
+        } else {
+          say('查到 <b>' + who + '</b>'
+            + ((picked && picked.room) ? '，房间号 ' + esc(picked.room) : '')
+            + '。确认无误就点「就听 TA 的」。');
+        }
       }).catch(function () { say('检测失败，请重试'); });
     }
 
     function save() {
-      var mid = (input.value || '').trim();
+      var mid = (picked && picked.mid) ? picked.mid : (input.value || '').trim();
       if (!mid) { say('先填主播 UID'); return; }
       var body = { mid: mid };
       if (picked) {
@@ -8224,6 +8264,108 @@
       });
     }
 
+    function bulkCount() { return Object.keys(bulk.sel).length; }
+
+    function bulkSync() {
+      var n = bulkCount();
+      if (bulkAdd) {
+        bulkAdd.disabled = bulk.busy || n === 0;
+        bulkAdd.textContent = '添加选中的 ' + n + ' 位';
+      }
+    }
+
+    function bulkRender() {
+      if (!bulkGrid) return;
+      var q = (bulk.filter || '').trim().toLowerCase();
+      var shown = bulk.list.filter(function (p) {
+        return !q || (p.uname || '').toLowerCase().indexOf(q) >= 0
+          || String(p.mid).indexOf(q) >= 0;
+      });
+      if (bulk.loaded && bulkStat) {
+        var addedN = bulk.list.filter(function (p) { return p.added; }).length;
+        bulkStat.textContent = '关注 ' + bulk.list.length + ' 位（已添加 ' + addedN + ' 位）'
+          + (q ? ' · 匹配 ' + shown.length : '');
+      }
+      if (!bulk.list.length) {
+        bulkGrid.innerHTML = '<p class="ob-bulk-note" style="margin:0">关注列表里没有可添加的直播间。</p>';
+        bulkSync();
+        return;
+      }
+      if (!shown.length) {
+        bulkGrid.innerHTML = '<p class="ob-bulk-note" style="margin:0">没有匹配的关注。</p>';
+        bulkSync();
+        return;
+      }
+      bulkGrid.innerHTML = shown.map(function (p) {
+        var added = !!p.added;
+        var sel = !!bulk.sel[p.mid];
+        return '<button type="button" class="ob-bulk-card' + (added ? ' added' : '')
+          + (sel ? ' sel' : '') + (p.living ? ' live' : '') + '"'
+          + ' data-bmid="' + esc(p.mid) + '" data-added="' + (added ? '1' : '0') + '"'
+          + ' aria-pressed="' + (sel ? 'true' : 'false') + '"'
+          + (added ? ' aria-disabled="true"' : '') + '>'
+          + '<span class="fw">'
+          + (p.face ? faceHtml(p.face, 'ob-bulk-face', p.uname || p.mid)
+                    : '<span class="ob-bulk-face ob-bulk-face-ph"></span>')
+          + '</span>'
+          + '<span class="nm" title="' + esc(p.uname) + '">' + esc(p.uname || p.mid) + '</span>'
+          + (added ? '<span class="tag">已添加</span>' : '<i class="mark">✓</i>')
+          + '</button>';
+      }).join('');
+      bindFaceFallback(bulkGrid);
+      bulkSync();
+    }
+
+    function bulkLoad(force) {
+      if (bulk.loaded && !force) return;
+      if (bulkStat) bulkStat.textContent = '正在读取关注列表…';
+      fetch('/api/stations/following' + (force ? '?refresh=1' : ''))
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (x) {
+          if (!x.ok || !x.d || x.d.error) {
+            if (bulkStat) bulkStat.textContent = (x.d && x.d.error) || '读取关注列表失败';
+            return;
+          }
+          bulk.loaded = true;
+          bulk.list = x.d.list || [];
+          bulkRender();
+        })
+        .catch(function () { if (bulkStat) bulkStat.textContent = '读取关注列表失败'; });
+    }
+
+    function bulkSet(card, on) {
+      if (!card || card.getAttribute('data-added') === '1') return;
+      var mid = card.getAttribute('data-bmid');
+      if (!mid) return;
+      if (on) bulk.sel[mid] = 1;
+      else delete bulk.sel[mid];
+      card.classList.toggle('sel', on);
+      card.setAttribute('aria-pressed', on ? 'true' : 'false');
+      bulkSync();
+    }
+
+    var bulkDrag = { on: false, mode: true };
+
+    function bulkBind() {
+      if (!bulkGrid || bulkGrid.getAttribute('data-bound') === '1') return;
+      bulkGrid.setAttribute('data-bound', '1');
+      bulkGrid.addEventListener('pointerdown', function (e) {
+        var card = e.target.closest ? e.target.closest('.ob-bulk-card') : null;
+        if (!card) return;
+        e.preventDefault();
+        bulkDrag.on = true;
+        bulkDrag.mode = !card.classList.contains('sel');
+        bulkSet(card, bulkDrag.mode);
+      });
+      bulkGrid.addEventListener('pointermove', function (e) {
+        if (!bulkDrag.on) return;
+        var el = document.elementFromPoint(e.clientX, e.clientY);
+        var card = el && el.closest ? el.closest('.ob-bulk-card') : null;
+        if (card) bulkSet(card, bulkDrag.mode);
+      });
+      window.addEventListener('pointerup', function () { bulkDrag.on = false; });
+    }
+
     function renderCards(list) {
       if (!grid) return;
       grid.innerHTML = list.map(function (s) {
@@ -8240,6 +8382,87 @@
     }
 
     renderCards(STATIONS || []);
+    bulkBind();
+    if (bulkTgl && bulkBox) {
+      bulkTgl.onclick = function () {
+        var open = bulkBox.hidden;
+        bulkBox.hidden = !open;
+        form.classList.toggle('bulk-open', open);
+        bulkTgl.textContent = open ? '收起关注列表' : '从关注列表批量添加 →';
+        if (open) bulkLoad(false);
+      };
+    }
+    if (bulkFilter) {
+      bulkFilter.oninput = function () {
+        bulk.filter = bulkFilter.value || '';
+        bulkRender();
+      };
+    }
+    if (bulkClear) {
+      bulkClear.onclick = function () {
+        bulk.sel = {};
+        Array.prototype.forEach.call(bulkGrid.querySelectorAll('.ob-bulk-card.sel'), function (c) {
+          c.classList.remove('sel');
+          c.setAttribute('aria-pressed', 'false');
+        });
+        bulkSync();
+      };
+    }
+    if (bulkAdd) {
+      bulkAdd.onclick = function () {
+        var mids = Object.keys(bulk.sel);
+        if (!mids.length || bulk.busy) return;
+        bulk.busy = true;
+        bulkSync();
+        if (bulkStat) bulkStat.textContent = '正在添加 ' + mids.length + ' 位…';
+        postJSON('/api/stations/bulk', { mids: mids }).then(function (d) {
+          bulk.busy = false;
+          if (d.error) {
+            if (bulkStat) bulkStat.textContent = d.error;
+            bulkSync();
+            return;
+          }
+          var added = d.added || [];
+          var skipped = d.skipped || [];
+          var failed = d.failed || [];
+          added.forEach(function (x) {
+            var card = bulkGrid.querySelector('[data-bmid="' + x.mid + '"]');
+            if (!card) return;
+            card.classList.add('added');
+            card.classList.remove('sel');
+            card.setAttribute('data-added', '1');
+            card.setAttribute('aria-disabled', 'true');
+            var mark = card.querySelector('.mark');
+            if (mark) mark.remove();
+            if (!card.querySelector('.tag')) {
+              var tag = document.createElement('span');
+              tag.className = 'tag';
+              tag.textContent = '已添加';
+              card.appendChild(tag);
+            }
+          });
+          bulk.sel = {};
+          bulkSync();
+          if (bulkStat) {
+            bulkStat.textContent = '已添加 ' + added.length + ' 位'
+              + (skipped.length ? '，跳过已在列表的 ' + skipped.length + ' 位' : '')
+              + (failed.length ? '，失败 ' + failed.length + ' 位（'
+                 + esc((failed[0] && failed[0].error) || '') + '）' : '');
+          }
+          return fetch('/api/stations').then(function (r) { return r.json(); })
+            .then(function (dd) {
+              if (dd && dd.stations) {
+                STATIONS = dd.stations;
+                renderCards(STATIONS);
+              }
+            });
+        }).catch(function () {
+          bulk.busy = false;
+          bulkSync();
+          if (bulkStat) bulkStat.textContent = '添加失败，请重试';
+        });
+      };
+    }
     if (grid) {
       grid.addEventListener('click', function (e) {
         var t = e.target;
