@@ -108,5 +108,7 @@ data/buvid.json
 data/dd_faces.json
 # fans/：粉丝数历史（运行时写，本机专属）
 data/fans/
+# recorder.json：录播姬的房间列表与输出目录（v1.9.15 起，本机专属）
+data/recorder.json
 # .tmp/：测试/临时脚本目录，非仓库内容
 .tmp/
