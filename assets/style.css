@@ -818,20 +818,105 @@ tr.live-row td { background: color-mix(in srgb, var(--red) 7%, transparent); }
 .quality-sel option { background: var(--panel-2); color: #e8e8ec; }
 
 /* 扫码登录面板：盖在画面上，不跳走 */
+/* v1.9.16：从「播放器内的绝对定位覆盖层」改成全局 fixed 弹窗。
+   原因：录播姬 / DD 会把播放器缩到 1px，原来那三处入口在有播放器的板块才点得到。
+   z-index 1200：要压过切页遮罩（1100）。 */
 .login-panel {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  z-index: 4;
+  z-index: 1200;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 11px;
-  background: rgba(8, 8, 10, .95);   /* fallback：老浏览器不支持 color-mix */
-  background: color-mix(in srgb, var(--bg) 95%, transparent);
+  padding: 24px;
+  background: rgba(0, 0, 0, .55);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
 }
 .login-panel[hidden] { display: none; }
+.login-box {
+  width: min(360px, 100%);
+  padding: 16px 20px 20px;
+  border: 1px solid var(--line-2);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .45);
+}
+.lp-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.lp-head b { font-size: 14px; font-weight: 600; color: var(--text); }
+.lp-x {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.lp-x:hover { background: rgba(var(--ink), .1); color: var(--text); }
+.lp-note { margin: 9px 0 0; font-size: 11.5px; color: var(--muted); text-align: center; line-height: 1.6; }
+.lp-anon[hidden], .lp-me[hidden] { display: none; }
+
+/* 已登录：头像 + 昵称 + UID（这就是「当前登录 ID 的状态窗口」） */
+.lp-me { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 4px 0 6px; }
+.lp-face {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(var(--ink), .08);
+  color: var(--muted);
+  font-size: 20px;
+}
+.lp-face img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.lp-face .lp-face-img-ph { font-size: 20px; color: var(--muted); }
+.lp-me-id { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.lp-me-id b { font-size: 14px; font-weight: 600; color: var(--text); }
+.lp-me-id span { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.lp-me-id em {
+  margin-top: 2px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #fb7299;
+  color: #fff;
+  font-size: 10.5px;
+  font-style: normal;
+}
+.lp-btns { display: flex; gap: 8px; margin-top: 4px; }
+
+/* 顶栏的账号入口。
+   ⚠️ 文字用 .tb-login-txt 而不是 .gbtxt：@media(max-width:1600px) 会把 .gbtxt 全藏掉，
+      那样未登录时只剩一个与「主播空间」几乎一样的图标，看不出是登录入口。
+   未登录：只有「登录」两个字（两字约 24px，比原来那颗图标还多 4px，不会撑破顶栏）；
+   已登录：只有头像（名字放 title）。 */
+.tb-login { gap: 6px; }
+.tb-login-txt { white-space: nowrap; }
+#tb-login:not(.on) .tb-login-face { display: none; }
+#tb-login.on .tb-login-txt { display: none; }
+.tb-login-face {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex: 0 0 auto;
+  background: rgba(var(--ink), .08);
+}
+.tb-login-face svg { width: 13px; height: 13px; display: block; }
+.tb-login-face img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tb-login-face .tb-face-ph { font-size: 9px; color: var(--muted); }
+.tb-login.on .tb-login-face { background: rgba(var(--ink), .14); }
 .login-qr {
+  margin: 0 auto;
   width: 168px;
   height: 168px;
   padding: 8px;
@@ -5438,7 +5523,7 @@ body.view-dd .views { grid-column: 1 / -1; }
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
-  margin: 13px 0 15px;
+  margin: 0 0 14px;
 }
 .rc-meta {
   display: flex;
@@ -5450,6 +5535,94 @@ body.view-dd .views { grid-column: 1 / -1; }
 .rc-meta b { color: var(--text); font-weight: 500; }
 .rc-meta .warn { color: #c8862a; }
 .rc-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+
+/* 两栏：左侧功能区 / 右侧内容区。
+   左栏观感对齐录播页的 .strip（12px 小标题 + 12px 条目 + 8px 圆角 + rgba(ink,.035) 底），
+   但类名独立 —— .strip 在非录播板块是 display:none，复用会被连带藏掉。 */
+.rc-layout {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+.rc-side { display: flex; flex-direction: column; position: sticky; top: 76px; }
+.rc-side-h {
+  margin: 4px 0 8px;
+  padding-left: 2px;
+  font-size: 12px;
+  color: var(--muted-2);
+}
+.rc-side-h:not(:first-child) { margin-top: 16px; }
+
+.rc-nav { display: flex; flex-direction: column; gap: 3px; }
+.rc-nav button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: rgba(var(--ink), .035);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.rc-nav button:hover { background: rgba(var(--ink), .08); color: var(--text); }
+.rc-nav button.on {
+  background: var(--red-soft);
+  border-color: color-mix(in srgb, var(--red) 42%, transparent);
+  color: var(--text);
+}
+.rc-cnt {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.rc-nav-rooms button { font-size: 11.5px; gap: 7px; }
+.rc-nav-rooms .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-nav-rooms .dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted-2);
+}
+.rc-nav-rooms .dot.rec { background: var(--red); }
+.rc-nav-rooms .dot.wait { background: #c8862a; }
+.rc-nav-rooms .dot.err { background: #d9534f; }
+.rc-nav button[disabled] { opacity: .55; cursor: default; }
+/* 从左栏点房间 → 右侧对应卡片闪一下，让人知道点到了哪张 */
+.rc-room.flash {
+  border-color: color-mix(in srgb, var(--red) 60%, transparent);
+  box-shadow: 0 0 0 3px var(--red-soft);
+}
+
+.rc-auto {
+  margin-top: 16px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.rc-auto-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+.rc-auto-row input { width: 14px; height: 14px; accent-color: var(--red); flex: 0 0 auto; }
+.rc-auto-note { margin: 6px 0 0; font-size: 11px; line-height: 1.6; color: var(--muted); }
+.rc-auto-inline { margin-top: 4px; }
+
+.rc-main { min-width: 0; }
+.rc-pane[hidden] { display: none; }
 
 .rc-grid {
   display: grid;
@@ -5604,8 +5777,20 @@ body.view-dd .views { grid-column: 1 / -1; }
 .rc-log .lv-err { color: var(--red); }
 .rc-log .msg { min-width: 0; word-break: break-all; }
 
+@media (max-width: 900px) {
+  /* 左栏折成横向标签条：竖排 208px 在窄屏里会把内容区压到不可用 */
+  .rc-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .rc-side { position: static; }
+  .rc-side-h { display: none; }
+  .rc-nav { flex-direction: row; flex-wrap: wrap; }
+  .rc-nav button { width: auto; }
+  .rc-nav-rooms { display: none; }
+  .rc-auto { margin-top: 10px; }
+}
+
 @media (max-width: 640px) {
   /* 窄屏只留文件名与大小；时间放不下时先砍 —— 文件名里本来就带开录时间 */
   .rc-file { grid-template-columns: minmax(0, 1fr) 70px; }
   .rc-file .tm { display: none; }
+  .rc-bar .rc-actions { margin-left: 0; }
 }

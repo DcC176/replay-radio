@@ -226,6 +226,18 @@ window.__BOOT_T0 = Date.now();
          主站默认点亮，不允许全部熄灭。 -->
     <div class="station-lamps" id="station-lamps" role="group"
          title="点亮谁就看谁的内容，可同时点亮多位（混合播放）"></div>
+    <!-- B 站账号：未登录显示入口，已登录显示头像 + 名字（点开是账号状态窗口）。
+         播放器内那枚「登录」在录播姬/DD 这类把播放器缩到 1px 的板块点不到，所以这里必须有。 -->
+    <button class="ghost-btn tb-login" id="tb-login" type="button" title="登录 B 站">
+      <span class="tb-login-face" id="tb-login-face" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="5.5" width="18" height="13" rx="3"/>
+          <path d="M7.5 3l2.6 2.5M16.5 3l-2.6 2.5M8.6 10.6v1.6M15.4 10.6v1.6"/>
+        </svg>
+      </span>
+      <span class="tb-login-txt" id="tb-login-name">登录</span>
+    </button>
     <a class="ghost-btn" id="tb-space" href="#" target="_blank" rel="noopener">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16v12H4z"/><path d="M8 3l4 3 4-3"/></svg>
       <span class="gbtxt" id="gbtxt">主播B站空间</span>
@@ -246,6 +258,35 @@ window.__BOOT_T0 = Date.now();
     </label>
   </div>
 </header>
+
+  <!-- 全局登录弹窗（v1.9.16）。原来它只在播放器里（绝对定位、覆盖播放器），
+       录播姬 / DD 这类把播放器缩到 1px 的板块根本点不到 —— 改成 fixed 遮罩 + 居中卡片，
+       顶栏、设置页、播放器三处入口共用同一个弹窗与同一套扫码逻辑。 -->
+  <div class="login-panel" id="login-panel" hidden>
+    <div class="login-box" role="dialog" aria-modal="true" aria-label="B 站账号">
+      <div class="lp-head">
+        <b id="lp-title">登录 B 站</b>
+        <button class="lp-x" id="btn-login-close" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div class="lp-anon" id="lp-anon">
+        <div class="login-qr" id="login-qr"></div>
+        <div class="login-status" id="login-status">正在获取二维码…</div>
+        <p class="lp-note">用 B 站手机 App 扫码，全程在本页完成，不会跳转</p>
+      </div>
+      <div class="lp-me" id="lp-me" hidden>
+        <div class="lp-face" id="lp-face"></div>
+        <div class="lp-me-id">
+          <b id="lp-name">—</b>
+          <span id="lp-uid">UID —</span>
+          <em id="lp-vip" hidden>大会员</em>
+        </div>
+        <div class="lp-btns">
+          <button class="btn small ghost" id="btn-logout" type="button">退出登录</button>
+          <button class="btn small ghost" id="btn-login-close-2" type="button">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
 <main class="wrap">
   <aside class="strip strip-left" id="strip-left">
@@ -771,46 +812,84 @@ window.__BOOT_T0 = Date.now();
 
     <section class="view" id="view-recorder">
       <h1 class="title sm">录播姬</h1>
-      <p class="sub">给任意 B 站直播间开录制：点<b>开始监控</b>后，开播自动录、下播自动停。
-        文件按 FLV 直存（不转码，CPU 几乎为 0），随时可以打开所在目录。</p>
+      <p class="sub">给任意 B 站直播间开录制：<b>自动录制</b>开着时，启动就会持续检测，
+        开播直接录、下播自动停。文件按 FLV 直存（不转码，CPU 几乎为 0）。</p>
 
-      <div class="rc-bar">
-        <span class="rc-meta" id="rc-meta"></span>
-        <span class="rc-actions">
-          <button class="btn small ghost" id="rc-all-start" type="button">全部开始</button>
-          <button class="btn small ghost" id="rc-all-stop" type="button">全部停止</button>
-          <button class="btn small ghost" id="rc-open-dir" type="button">打开输出目录</button>
-          <button class="btn small ghost" id="rc-refresh" type="button">刷新</button>
-        </span>
-      </div>
+      <div class="rc-layout">
+        <!-- 左侧功能区：与录播页左栏同一套观感（小标题 + 12px 条目 + 8px 圆角） -->
+        <aside class="rc-side">
+          <div class="rc-side-h">功能</div>
+          <div class="rc-nav" id="rc-nav">
+            <button type="button" data-tab="rooms" class="on">房间<span class="rc-cnt" id="rc-nav-rooms">0</span></button>
+            <button type="button" data-tab="files">录制文件<span class="rc-cnt" id="rc-nav-files">0</span></button>
+            <button type="button" data-tab="log">运行日志</button>
+            <button type="button" data-tab="settings">设置</button>
+          </div>
 
-      <div class="rc-grid" id="rc-grid"></div>
+          <div class="rc-side-h">监控中</div>
+          <div class="rc-nav rc-nav-rooms" id="rc-nav-rooms-list"></div>
 
-      <div class="live-card rc-card">
-        <div class="live-card-h">输出目录</div>
-        <div class="rc-dirrow">
-          <input class="rc-input" id="rc-dir" type="text" spellcheck="false" aria-label="录制输出目录">
-          <select class="rc-sel" id="rc-qn" title="录制画质">
-            <option value="10000">原画</option>
-            <option value="400">蓝光</option>
-            <option value="250">超清</option>
-            <option value="150">高清</option>
-          </select>
-          <button class="btn small ghost" id="rc-pick" type="button">选择…</button>
-          <button class="btn small primary" id="rc-save" type="button">保存</button>
+          <div class="rc-auto">
+            <label class="rc-auto-row">
+              <input type="checkbox" id="rc-auto" data-rc-auto>
+              <span>自动录制</span>
+            </label>
+            <p class="rc-auto-note">启动应用后持续检测，开播即录，不用手动点开始。</p>
+          </div>
+        </aside>
+
+        <div class="rc-main">
+          <div class="rc-bar">
+            <span class="rc-meta" id="rc-meta"></span>
+            <span class="rc-actions">
+              <button class="btn small ghost" id="rc-all-start" type="button">全部开始</button>
+              <button class="btn small ghost" id="rc-all-stop" type="button">全部停止</button>
+              <button class="btn small ghost" id="rc-open-dir" type="button">打开输出目录</button>
+              <button class="btn small ghost" id="rc-refresh" type="button">刷新</button>
+            </span>
+          </div>
+
+          <div class="rc-pane" id="rc-pane-rooms">
+            <div class="rc-grid" id="rc-grid"></div>
+          </div>
+
+          <div class="rc-pane" id="rc-pane-files" hidden>
+            <div class="live-card">
+              <div class="live-card-h">录制文件<em class="rc-hsub" id="rc-files-stat"></em></div>
+              <div class="rc-files" id="rc-files"></div>
+            </div>
+          </div>
+
+          <div class="rc-pane" id="rc-pane-log" hidden>
+            <div class="live-card">
+              <div class="live-card-h">运行日志<em class="rc-hsub">最近 120 条</em></div>
+              <div class="rc-log" id="rc-log"></div>
+            </div>
+          </div>
+
+          <div class="rc-pane" id="rc-pane-settings" hidden>
+            <div class="live-card">
+              <div class="live-card-h">录制设置</div>
+              <div class="rc-dirrow">
+                <input class="rc-input" id="rc-dir" type="text" spellcheck="false" aria-label="录制输出目录">
+                <select class="rc-sel" id="rc-qn" title="录制画质">
+                  <option value="10000">原画</option>
+                  <option value="400">蓝光</option>
+                  <option value="250">超清</option>
+                  <option value="150">高清</option>
+                </select>
+                <button class="btn small ghost" id="rc-pick" type="button">选择…</button>
+                <button class="btn small primary" id="rc-save" type="button">保存</button>
+              </div>
+              <p class="live-note">同时最多录 4 路；剩余空间低于 2 GB 时不再开新录制。
+                画质由 B 站按登录态决定，未登录通常只能拿到较低档。</p>
+              <label class="rc-auto-row rc-auto-inline">
+                <input type="checkbox" id="rc-auto2" data-rc-auto>
+                <span>自动录制（启动后持续检测，开播即录）</span>
+              </label>
+            </div>
+          </div>
         </div>
-        <p class="live-note">同时最多录 4 路；剩余空间低于 2 GB 时不再开新录制。
-          画质由 B 站按登录态决定，未登录通常只能拿到较低档。</p>
-      </div>
-
-      <div class="live-card rc-card">
-        <div class="live-card-h">录制文件<em class="rc-hsub" id="rc-files-stat"></em></div>
-        <div class="rc-files" id="rc-files"></div>
-      </div>
-
-      <div class="live-card rc-card">
-        <div class="live-card-h">运行日志<em class="rc-hsub">最近 120 条</em></div>
-        <div class="rc-log" id="rc-log"></div>
       </div>
     </section>
 
@@ -823,6 +902,17 @@ window.__BOOT_T0 = Date.now();
       <h1 class="title sm">设置</h1>
 
       <div class="live-card">
+        <div class="live-card-h">B 站账号</div>
+        <p class="live-note" id="set-acc-state">正在检查登录状态…</p>
+        <div class="qp-btns" style="margin-top:2px">
+          <button class="btn small primary" id="btn-acc-login" type="button">扫码登录 B 站</button>
+          <button class="btn small ghost" id="btn-acc-logout" type="button" hidden>退出登录</button>
+        </div>
+        <p class="live-note">登录后：回放最高 1080P、能发弹幕、录制能拿到更高画质。
+          凭据只保存在本机 <code>sessdata.txt</code>，只发给 B 站自己的接口。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
         <div class="live-card-h">外观</div>
         <label class="seg-auto">
           <input type="checkbox" id="theme-light"> 浅色模式（不勾就是默认的黑红配色）
@@ -1135,15 +1225,6 @@ window.__BOOT_T0 = Date.now();
           <button class="pv-ic" id="ctrl-fs" title="全屏">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 011-1h4M15 4h4a1 1 0 011 1v4M20 15v4a1 1 0 01-1 1h-4M9 20H5a1 1 0 01-1-1v-4"/></svg>
           </button>
-        </div>
-      </div>
-
-      <div class="login-panel" id="login-panel" hidden>
-        <div class="login-qr" id="login-qr"></div>
-        <div class="login-status" id="login-status">正在获取二维码…</div>
-        <div class="qp-btns">
-          <button class="btn small ghost" id="btn-logout" hidden>退出登录</button>
-          <button class="btn small ghost" id="btn-login-close">收起</button>
         </div>
       </div>
 

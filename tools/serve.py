@@ -1826,9 +1826,12 @@ def _rc_doc():
                       "face": str(r.get("face") or ""),
                       "enabled": bool(r.get("enabled")),
                       "dir": str(r.get("dir") or "")})
+    auto = st.get("auto")
     return {"version": 1,
             "settings": {"dir": st.get("dir") or _rc_default_dir(),
-                         "qn": int(st.get("qn") or RC_QN)},
+                         "qn": int(st.get("qn") or RC_QN),
+                         # 自动录制：启动即把房间置为监控，开播就录（默认开）
+                         "auto": True if auto is None else bool(auto)},
             "rooms": rooms}
 
 
@@ -2142,6 +2145,28 @@ def _rc_room_payload(doc, r):
     return out
 
 
+def recorder_kick():
+    """应用启动就进入「持续检测」：auto 开着时把所有房间置为监控。
+
+    这是「打开软件就自动等开播、开播就录」的落点 —— 调度线程本身早就在跑，
+    缺的只是「房间的 enabled 初始为真」。没有它，用户每次启动都要逐个点开始。
+    """
+    try:
+        doc = _rc_doc()
+        if doc["settings"].get("auto", True):
+            off = [r for r in doc["rooms"] if not r["enabled"]]
+            if off:
+                for r in off:
+                    r["enabled"] = True
+                _rc_save(doc)
+                _rc_log("自动录制：%d 个房间已置为监控" % len(off))
+        _rc_ensure_loop()
+        _rc_log("录制调度已启动（%d 个房间%s）" % (
+            len(doc["rooms"]), "，自动录制开" if doc["settings"].get("auto", True) else ""))
+    except Exception as e:
+        print("[recorder] 启动调度失败：%s" % e)
+
+
 def api_rc_state(query):
     """GET /api/recorder/state —— 房间 + 运行态 + 设置 + 磁盘 + 日志尾部。"""
     _rc_ensure_loop()
@@ -2210,8 +2235,9 @@ def api_rc_add(obj):
         return 400, {"error": str(e)[:160]}
     if any(r["room"] == room for r in doc["rooms"]):
         return 400, {"error": "这个直播间已经加过了（房间 %s）" % room}
+    # 自动录制开着时，加进来就开始监控 —— 用户不必再点一次「开始监控」
     doc["rooms"].append({"room": room, "uid": uid, "name": name, "face": face,
-                         "enabled": False, "dir": ""})
+                         "enabled": bool(doc["settings"].get("auto", True)), "dir": ""})
     _rc_save(doc)
     _rc_log("添加房间 %s" % room, room, name, "ok")
     return 200, {"ok": True, "room": room, "name": name, "uid": uid}
@@ -2282,6 +2308,12 @@ def api_rc_settings(obj):
         except (TypeError, ValueError):
             qn = RC_QN
         doc["settings"]["qn"] = qn if qn in (10000, 400, 250, 150) else RC_QN
+    if "auto" in obj:
+        doc["settings"]["auto"] = bool(obj.get("auto"))
+        # 打开时把现有房间一并置为监控（否则「打开了却还在等用户点」）
+        if doc["settings"]["auto"]:
+            for r in doc["rooms"]:
+                r["enabled"] = True
     _rc_save(doc)
     return 200, {"ok": True, "settings": doc["settings"]}
 
@@ -8396,6 +8428,8 @@ def main():
     start_page_watchdog()
     # 回放清单自动发现：只填了 name + UID 的主播靠这一步补齐（后台跑，不挡启动）
     series_kick()
+    # 录播姬：启动即开始按房间检测开播（auto 开着时不需要手动点「开始监控」）
+    recorder_kick()
     print("  退出时机：网页全部关闭后自动退出（另有 %d 分钟无心跳兜底）"
           % int(PAGE_IDLE // 60))
 

@@ -5444,21 +5444,106 @@
     if (qrTimer) { clearInterval(qrTimer); qrTimer = null; }
   }
 
+  /* 未登录时顶栏那颗头像位显示的图标（登出后要能还原回来，所以先存下来） */
+  var TB_LOGIN_ICON = '';
+  /* 最近一次 /api/status。打开登录弹窗时先按它渲染，避免「先闪一下二维码、
+     0.5 秒后才变成账号卡」—— 那一下不只是难看，按钮位置也会跳，真实点击会落空。 */
+  var lastStatus = null;
+
   function refreshStatus(force) {
     // 服务端缓存 30 秒；登录/登出之后必须拿新的，所以那两处传 true
     fetch('/api/status' + (force ? '?refresh=1' : ''))
-      .then(function (r) { return r.json(); }).then(function (d) {
-      el.loginLabel.textContent = d.logged ? (d.uname || '已登录') : '登录';
-      el.btnLogin.setAttribute('title', d.logged
+      .then(function (r) { return r.json(); }).then(applyLoginUI)
+      .catch(function () { /* 服务未启动时忽略 */ });
+  }
+
+  /* 登录态的**唯一渲染入口**：播放器按钮、顶栏、设置页、弹窗四处都在这里更新。
+     openLogin 拿到新鲜状态后也调它 —— 否则「弹窗里显示已登录、顶栏还写着登录」
+     （服务端状态缓存 30 秒，这个不一致是真实存在的）。 */
+  function applyLoginUI(d) {
+    if (!d) return;
+    lastStatus = d;
+    (function () {
+      var logged = !!d.logged;
+
+      // 播放器内那颗（录播页右上角）
+      el.loginLabel.textContent = logged ? (d.uname || '已登录') : '登录';
+      el.btnLogin.setAttribute('title', logged
         ? ('已登录：' + (d.uname || '') + (d.vip ? '（大会员）' : ''))
         : '扫码登录 B 站，解锁更高清晰度');
-      el.btnLogout.hidden = !d.logged;
-    }).catch(function () { /* 服务未启动时忽略 */ });
+      el.btnLogout.hidden = !logged;
+
+      /* 页面顶栏（v1.9.16）：录播姬 / DD 这类把播放器缩到 1px 的板块里，
+         播放器内那颗按钮点不到 —— 顶栏这个才是「任何页面都能登录」的入口。 */
+      if (el.tbLogin) {
+        el.tbLogin.classList.toggle('on', logged);
+        el.tbLogin.title = logged
+          ? ('已登录：' + (d.uname || '') + '（UID ' + (d.mid || '—') + '）'
+             + (d.vip ? ' · 大会员' : '') + ' · 点击查看账号')
+          : '登录 B 站（扫码）';
+        if (el.tbLoginName) {
+          el.tbLoginName.textContent = logged ? (d.uname || ('UID ' + (d.mid || ''))) : '登录';
+        }
+        if (el.tbLoginFace) {
+          el.tbLoginFace.innerHTML = logged
+            ? faceHtml(d.face, 'tb-face', d.uname || 'B')
+            : (TB_LOGIN_ICON || el.tbLoginFace.innerHTML);
+        }
+      }
+
+      // 设置页「B 站账号」卡
+      if (el.setAccState) {
+        el.setAccState.textContent = logged
+          ? ('已登录：' + (d.uname || '已登录') + '（UID ' + (d.mid || '—') + '）'
+             + (d.vip ? ' · 大会员' : ''))
+          : '未登录。点下面的按钮扫码，登录后回放最高 1080P、可发弹幕、录制画质更高。';
+      }
+      if (el.btnAccLogin) el.btnAccLogin.hidden = logged;
+      if (el.btnAccLogout) el.btnAccLogout.hidden = !logged;
+
+      // 弹窗正开着就同步切换（已登录 → 账号卡片；未登录 → 二维码）
+      if (el.loginPanel && !el.loginPanel.hidden) syncLoginView(d);
+    })();
+  }
+
+  /* 把「登录者是谁」画进弹窗：未登录只露出二维码区，已登录换成头像 + 昵称 + UID。 */
+  function syncLoginView(d) {
+    var logged = !!(d && d.logged);
+    if (el.lpAnon) el.lpAnon.hidden = logged;
+    if (el.lpMe) el.lpMe.hidden = !logged;
+    if (el.lpTitle) el.lpTitle.textContent = logged ? 'B 站账号' : '登录 B 站';
+    if (!logged) return;
+    if (el.lpFace) el.lpFace.innerHTML = faceHtml(d.face, 'lp-face-img', d.uname || 'B');
+    if (el.lpName) el.lpName.textContent = d.uname || '已登录';
+    if (el.lpUid) el.lpUid.textContent = 'UID ' + (d.mid || '—');
+    if (el.lpVip) el.lpVip.hidden = !d.vip;
   }
 
   // 全程在本页完成，不跳转外部页面
   function openLogin() {
     el.loginPanel.hidden = false;
+    /* 已登录时打开的是「账号状态窗口」，不是二维码 —— 否则每次想看自己是谁都要先等二维码。
+       先用 lastStatus 立刻渲染，再拿一次新鲜状态校准：
+         · 只等接口的话，弹窗会先按 HTML 默认（二维码位）显示，拿到结果再切换，
+           这一下布局跳动会让「关闭」按钮移位（实测真实点击落空）；
+         · 服务端缓存 30 秒，所以校准仍然要带 refresh=1。 */
+    if (lastStatus) {
+      applyLoginUI(lastStatus);
+    } else {
+      if (el.lpAnon) el.lpAnon.hidden = true;
+      if (el.lpMe) el.lpMe.hidden = true;
+    }
+    fetch('/api/status?refresh=1').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d) return;
+      applyLoginUI(d);
+      if (!d.logged) loginStartQr();      // 确认未登录才去取二维码
+    }).catch(function () {
+      if (!lastStatus) loginStartQr();    // 连上次状态都没有才退回二维码
+    });
+  }
+
+  function loginStartQr() {
+    syncLoginView(null);                 // 未登录视图
     el.loginQr.innerHTML = '';
     el.loginStatus.textContent = '正在获取二维码…';
     el.btnLogout.hidden = true;
@@ -5713,10 +5798,58 @@
         把用户正在输入的「添加房间」清空、把焦点弄丢（实测过）。
      房间集合变化时才重建卡片结构，其余只改文本。 */
 
-  var rcState = { data: null, files: null, timer: 0 };
+  var rcState = { data: null, files: null, timer: 0, tab: 'rooms' };
 
   var RC_LABEL = { idle: '未监控', waiting: '等待开播', recording: '录制中', error: '出错' };
   var RC_CLASS = { idle: '', waiting: 'wait', recording: 'rec', error: 'err' };
+
+  var RC_TABS = ['rooms', 'files', 'log', 'settings'];
+
+  function rcSetTab(tab) {
+    rcState.tab = RC_TABS.indexOf(tab) >= 0 ? tab : 'rooms';
+    RC_TABS.forEach(function (k) {
+      var p = document.getElementById('rc-pane-' + k);
+      if (p) p.hidden = (k !== rcState.tab);
+    });
+    if (el.rcNav) {
+      Array.prototype.forEach.call(el.rcNav.children, function (b) {
+        b.classList.toggle('on', b.getAttribute('data-tab') === rcState.tab);
+      });
+    }
+    if (rcState.tab === 'log' && el.rcLog) el.rcLog.scrollTop = el.rcLog.scrollHeight;
+  }
+
+  /* 左栏：功能计数 + 房间快捷列表 + 自动录制开关。
+     ⚠️ 与房间卡片同理，结构只在房间集合变化时重建 —— 房间列表也带 data-sig。 */
+  function rcPaintNav(d) {
+    var rooms = d.rooms || [];
+    if (el.rcNavRooms) el.rcNavRooms.textContent = String(rooms.length);
+    if (el.rcNavFiles) {
+      el.rcNavFiles.textContent = String((rcState.files && rcState.files.total) || 0);
+    }
+    if (el.rcNavRoomsList) {
+      var sig = rooms.map(function (r) { return r.room; }).join(',');
+      if (el.rcNavRoomsList.getAttribute('data-sig') !== sig) {
+        el.rcNavRoomsList.setAttribute('data-sig', sig);
+        el.rcNavRoomsList.innerHTML = rooms.length ? rooms.map(function (r) {
+          return '<button type="button" data-goto="' + esc(r.room) + '">'
+            + '<i class="dot" data-role="dot"></i>'
+            + '<span class="nm" title="' + esc(r.name) + '">' + esc(r.name) + '</span></button>';
+        }).join('') : '<button type="button" disabled>还没有房间</button>';
+      }
+      rooms.forEach(function (r) {
+        var b = el.rcNavRoomsList.querySelector('[data-goto="' + r.room + '"]');
+        if (!b) return;
+        var dot = b.querySelector('[data-role="dot"]');
+        if (dot) dot.className = 'dot ' + (RC_CLASS[r.state] || '');
+        b.title = r.name + ' · ' + (RC_LABEL[r.state] || r.state);
+      });
+    }
+    var auto = !!(d.settings && d.settings.auto);
+    [el.rcAuto, el.rcAuto2].forEach(function (cb) {
+      if (cb && cb.checked !== auto) cb.checked = auto;
+    });
+  }
 
   function rcSize(n) {
     n = +n || 0;
@@ -5852,6 +5985,7 @@
     var d = rcState.data;
     if (!d) return;
     rcPaintRooms(d);
+    rcPaintNav(d);
     rcPaintMeta(d);
     rcPaintFiles(d, rcState.files);
     rcPaintLog(d);
@@ -5911,6 +6045,7 @@
   }
 
   function rcEnter() {
+    rcSetTab(rcState.tab);
     rcLoad();
     if (rcState.timer) clearInterval(rcState.timer);
     rcState.timer = setInterval(rcLoad, 2500);
@@ -5947,6 +6082,27 @@
         }
       });
     }
+    if (el.rcNav) el.rcNav.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('button[data-tab]') : null;
+      if (b) rcSetTab(b.getAttribute('data-tab'));
+    });
+    if (el.rcNavRoomsList) el.rcNavRoomsList.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('button[data-goto]') : null;
+      if (!b) return;
+      rcSetTab('rooms');
+      var card = el.rcGrid && el.rcGrid.querySelector(
+        '.rc-room[data-room="' + b.getAttribute('data-goto') + '"]');
+      if (!card) return;
+      card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      card.classList.add('flash');
+      setTimeout(function () { card.classList.remove('flash'); }, 1200);
+    });
+    [el.rcAuto, el.rcAuto2].forEach(function (cb) {
+      if (!cb) return;
+      cb.addEventListener('change', function () {
+        rcPost('/api/recorder/settings', { auto: cb.checked });
+      });
+    });
     if (el.rcRefresh) el.rcRefresh.addEventListener('click', rcLoad);
     if (el.rcOpenDir) el.rcOpenDir.addEventListener('click', function () {
       rcPost('/api/recorder/open', {});
@@ -6793,13 +6949,28 @@
 
     el.btnLogin.addEventListener('click', openLogin);
     el.btnLogin2.addEventListener('click', function () { toggleQuality(false); openLogin(); });
+    // 顶栏入口：未登录 = 登录；已登录 = 账号状态窗口（同一颗按钮，两种内容）
+    if (el.tbLogin) {
+      TB_LOGIN_ICON = el.tbLoginFace ? el.tbLoginFace.innerHTML : '';
+      el.tbLogin.addEventListener('click', openLogin);
+    }
+    if (el.btnAccLogin) el.btnAccLogin.addEventListener('click', openLogin);
     el.btnLoginClose.addEventListener('click', loginClose);
-    el.btnLogout.addEventListener('click', function () {
+    var close2 = document.getElementById('btn-login-close-2');
+    if (close2) close2.addEventListener('click', loginClose);
+    // 点遮罩空白处关闭（只在点到的确实是遮罩本身时）
+    el.loginPanel.addEventListener('click', function (e) {
+      if (e.target === el.loginPanel) loginClose();
+    });
+    var doLogout = function () {
       fetch('/api/logout').then(function () { return refreshStatus(true); }).then(function () {
+        loginClose();                 // 登出后关掉弹窗，下次点开就是二维码
         state.mediaBase = null;
         applyPlayer(true);
       });
-    });
+    };
+    el.btnLogout.addEventListener('click', doLogout);
+    if (el.btnAccLogout) el.btnAccLogout.addEventListener('click', doLogout);
 
     /* 「分段」「标注」的入口从顶栏搬到了「设置 → 分段与标注」。
        两个面板长在播放器上，所以在设置页点要先切回录播页；面板本身与视图无关，
@@ -7656,6 +7827,12 @@
       scBar: document.getElementById('songcut-bar'),
       scList: document.getElementById('songcut-list'),
       rcGrid: document.getElementById('rc-grid'),
+      rcNav: document.getElementById('rc-nav'),
+      rcNavRooms: document.getElementById('rc-nav-rooms'),
+      rcNavFiles: document.getElementById('rc-nav-files'),
+      rcNavRoomsList: document.getElementById('rc-nav-rooms-list'),
+      rcAuto: document.getElementById('rc-auto'),
+      rcAuto2: document.getElementById('rc-auto2'),
       rcMeta: document.getElementById('rc-meta'),
       rcFiles: document.getElementById('rc-files'),
       rcFilesStat: document.getElementById('rc-files-stat'),
@@ -7672,6 +7849,19 @@
       qualityPanel: document.getElementById('quality-panel'),
       btnQpClose: document.getElementById('btn-qp-close'),
       btnLogin: document.getElementById('btn-login'),
+      tbLogin: document.getElementById('tb-login'),
+      tbLoginFace: document.getElementById('tb-login-face'),
+      tbLoginName: document.getElementById('tb-login-name'),
+      lpAnon: document.getElementById('lp-anon'),
+      lpMe: document.getElementById('lp-me'),
+      lpTitle: document.getElementById('lp-title'),
+      lpFace: document.getElementById('lp-face'),
+      lpName: document.getElementById('lp-name'),
+      lpUid: document.getElementById('lp-uid'),
+      lpVip: document.getElementById('lp-vip'),
+      setAccState: document.getElementById('set-acc-state'),
+      btnAccLogin: document.getElementById('btn-acc-login'),
+      btnAccLogout: document.getElementById('btn-acc-logout'),
       playerBox: document.getElementById('player-box'),
       pvTitle: document.getElementById('pv-title'),
       ctrlBuffer: document.getElementById('ctrl-buffer'),
