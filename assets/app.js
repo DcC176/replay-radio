@@ -1680,6 +1680,9 @@
     clipMode: false,                        // 分段列表进入「多选保存」模式
     clipSel: {},                            // 选中项：cid@start -> 1（跨重渲染保留）
     clipMeta: {},                           // 选中项对应的 bvid/cid/起止/标题
+    clipNames: {},                          // cid@start -> 用户给这一段起的名字（空 = 自动）
+    clipCovers: [],                         // 最近一批保存结果里的封面候选
+    clipCoverOrient: {},                    // 切片名 -> '16x9' | '3x4'（预览按哪种方向看）
     clipBusy: false,                        // 正在保存，防重复提交
     qn: store.get('xl_qn', 80),             // 请求的清晰度；B 站会按登录态降级到最高可用
     qnDegraded: false,                      // 本次档位是不是「降级来的」（是的话不写进 xl_qn）
@@ -6501,6 +6504,111 @@
     return n;
   }
 
+  /* 选中的分段按时间排序 —— 命名列表、保存顺序、封面卡片都用同一份。 */
+  function clipSelectedItems() {
+    var items = [];
+    Object.keys(state.clipSel).forEach(function (k) {
+      var m = state.clipMeta[k];
+      if (!m || !state.clipSel[k]) return;
+      items.push({ key: k, bvid: m.bvid, cid: m.cid, start: m.start, end: m.end,
+                   title: m.title, n: m.n });
+    });
+    items.sort(function (a, b) {
+      return (a.start - b.start) || (String(a.cid) < String(b.cid) ? -1 : 1);
+    });
+    return items;
+  }
+
+  function clipFmt(sec) {
+    sec = Math.max(0, Math.floor(+sec || 0));
+    function p2(v) { return (v < 10 ? '0' : '') + v; }
+    return p2(Math.floor(sec / 3600)) + '-' + p2(Math.floor(sec % 3600 / 60))
+      + '-' + p2(sec % 60);
+  }
+
+  /* 与后端 _clip_name 同形（不含扩展名），只用来做输入框占位提示 */
+  function clipAutoName(m) {
+    var t = String(m.title || '片段').replace(/[\\/:*?"<>|\s]+/g, '_')
+      .replace(/^[._ ]+|[._ ]+$/g, '').slice(0, 48);
+    if (!t) t = '片段';
+    var n = (+m.n || 1);
+    return t + '_第' + (n < 10 ? '0' + n : n) + '段_'
+      + clipFmt(m.start) + '~' + clipFmt(m.end);
+  }
+
+  /* 逐段命名：选中项变了才重建结构，否则只回填值（不打断正在输入的人）。 */
+  function renderClipNames() {
+    var box = document.getElementById('clip-names');
+    if (!box) return;
+    var items = clipSelectedItems();
+    if (!state.clipMode || !items.length) {
+      box.hidden = true;
+      box.innerHTML = '';
+      box.removeAttribute('data-sig');
+      return;
+    }
+    box.hidden = false;
+    var sig = items.map(function (x) { return x.key; }).join(',');
+    if (box.getAttribute('data-sig') !== sig) {
+      box.setAttribute('data-sig', sig);
+      box.innerHTML = '<div class="cn-head">逐段命名'
+        + '<em>留空自动命名；名称同时用于 MP4 与横竖屏封面</em></div>'
+        + items.map(function (it) {
+          return '<div class="cn-row"><span class="cn-no">第 ' + it.n + ' 段</span>'
+            + '<span class="cn-time">' + fmtClock(it.start) + '–' + fmtClock(it.end) + '</span>'
+            + '<input class="cn-inp" type="text" maxlength="80" spellcheck="false"'
+            + ' data-key="' + esc(it.key) + '" placeholder="自动：' + esc(clipAutoName(it))
+            + '" aria-label="第 ' + it.n + ' 段的名称"></div>';
+        }).join('');
+    }
+    Array.prototype.forEach.call(box.querySelectorAll('.cn-inp'), function (inp) {
+      var k = inp.getAttribute('data-key');
+      var v = state.clipNames[k] || '';
+      if (document.activeElement !== inp && inp.value !== v) inp.value = v;
+    });
+  }
+
+  /* 保存结果里的封面候选：每段一张卡，可切「横屏 16:9 / 竖屏 3:4」预览。 */
+  function renderClipCovers() {
+    var box = document.getElementById('clip-covers');
+    if (!box) return;
+    var rows = state.clipCovers || [];
+    if (!rows.length) {
+      box.hidden = true;
+      box.innerHTML = '';
+      return;
+    }
+    box.hidden = false;
+    box.innerHTML = '<div class="cc-title">封面候选<em>每段已生成横屏 16:9 与竖屏 3:4 两种 PNG；'
+      + '随机选中的一版另存为 default 文件，选择结果写在 .covers.json</em></div>'
+      + rows.map(function (x) {
+        var c = x.covers || {};
+        var cands = c.candidates || [];
+        var base = x.name || '';
+        var orient = state.clipCoverOrient[base] || '16x9';
+        var defIdx = +c.defaultIndex || 0;
+        return '<div class="cc-card" data-base="' + esc(base) + '">'
+          + '<div class="cc-head"><b title="' + esc(base) + '">' + esc(base) + '</b>'
+          + '<span>' + cands.length + ' 版候选 · 默认第 ' + defIdx + ' 版</span>'
+          + '<div class="cc-tabs"><button type="button" data-cc-orient="16x9"'
+          + (orient === '16x9' ? ' class="on"' : '') + '>横屏 16:9</button>'
+          + '<button type="button" data-cc-orient="3x4"'
+          + (orient === '3x4' ? ' class="on"' : '') + '>竖屏 3:4</button></div></div>'
+          + '<div class="cc-row' + (orient === '3x4' ? ' portrait' : '') + '">'
+          + cands.map(function (cand) {
+            var src = orient === '3x4' ? cand.portrait : cand.landscape;
+            return '<button type="button" class="cc-item' + (cand.index === defIdx ? ' is-default' : '')
+              + '" data-src="' + esc(src) + '" title="第 ' + cand.index + ' 版 · '
+              + cand.at + ' 秒 · 点击看大图">'
+              + '<img loading="lazy" alt="第 ' + cand.index + ' 版封面" src="/api/clip/cover?path='
+              + encodeURIComponent(src) + '">'
+              + '<span class="cc-no">' + cand.index + '</span>'
+              + (cand.index === defIdx ? '<span class="cc-badge">默认</span>' : '')
+              + '</button>';
+          }).join('') + '</div></div>';
+      }).join('');
+  }
+
   function updateClipBar() {
     var panel = document.getElementById('chapters-panel');
     if (panel) panel.classList.toggle('clip-mode', state.clipMode);
@@ -6519,6 +6627,7 @@
       b.classList.toggle('picked', on);
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
+    renderClipNames();
   }
 
   function setClipMode(on) {
@@ -6566,18 +6675,17 @@
 
   function saveClips() {
     if (state.clipBusy) return;
-    var items = [];
-    Object.keys(state.clipSel).forEach(function (k) {
-      var m = state.clipMeta[k];
-      if (m && state.clipSel[k]) items.push(m);
-    });
-    items.sort(function (a, b) {
-      return (a.start - b.start) || (String(a.cid) < String(b.cid) ? -1 : 1);
-    });
+    var items = clipSelectedItems();
     if (!items.length) return;
+    items.forEach(function (it) {
+      var custom = (state.clipNames[it.key] || '').trim();
+      it.name = custom;                       // 留空 → 后端自动命名
+    });
     var inp = document.getElementById('clip-dir');
     var dir = inp ? inp.value.trim() : '';
     state.clipBusy = true;
+    state.clipCovers = [];
+    renderClipCovers();
     updateClipBar();
     clipNote('正在准备保存 ' + items.length + ' 段…');
     postJSON('/api/clip/start', { items: items, dir: dir }).then(function (d) {
@@ -6612,7 +6720,16 @@
       var bad = (d.done || []).filter(function (x) { return !x.ok; });
       var msg = '已保存 ' + ok.length + ' 段到 ' + (d.dir || '');
       if (bad.length) msg += '；失败 ' + bad.length + ' 段：' + (bad[0].error || '');
+      var noCover = ok.filter(function (x) {
+        return !(x.covers && x.covers.candidates && x.covers.candidates.length);
+      });
+      if (noCover.length) msg += '；' + noCover.length + ' 段封面生成失败：'
+        + ((noCover[0].covers && noCover[0].covers.error) || '未知原因');
       clipNote(msg);
+      state.clipCovers = ok.filter(function (x) {
+        return x.covers && x.covers.candidates && x.covers.candidates.length;
+      });
+      renderClipCovers();
     }).catch(function () {
       state.clipBusy = false;
       updateClipBar();
@@ -7372,6 +7489,31 @@
     if (clipPickBtn) clipPickBtn.addEventListener('click', pickClipDir);
     var clipSaveBtn = document.getElementById('clip-save');
     if (clipSaveBtn) clipSaveBtn.addEventListener('click', saveClips);
+    var clipNamesBox = document.getElementById('clip-names');
+    if (clipNamesBox) {
+      clipNamesBox.addEventListener('input', function (e) {
+        var inp = e.target.closest ? e.target.closest('.cn-inp') : null;
+        if (!inp) return;
+        state.clipNames[inp.getAttribute('data-key')] = inp.value;
+      });
+    }
+    var clipCoversBox = document.getElementById('clip-covers');
+    if (clipCoversBox) {
+      clipCoversBox.addEventListener('click', function (e) {
+        var tab = e.target.closest ? e.target.closest('[data-cc-orient]') : null;
+        if (tab) {
+          var card = tab.closest('.cc-card');
+          var base = card ? card.getAttribute('data-base') : '';
+          if (base) {
+            state.clipCoverOrient[base] = tab.getAttribute('data-cc-orient');
+            renderClipCovers();
+          }
+          return;
+        }
+        var item = e.target.closest ? e.target.closest('.cc-item') : null;
+        if (item) window.open(item.getAttribute('data-src'), '_blank', 'noopener');
+      });
+    }
     var clipOpenBtn = document.getElementById('btn-clip');
     if (clipOpenBtn) clipOpenBtn.addEventListener('click', function () {
       // 影院模式下面板被 CSS 藏起来（body.theater .chapters-panel{display:none}），
