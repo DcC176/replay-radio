@@ -1609,7 +1609,7 @@
     };
   })();
 
-  var VIEWS = ['live', 'multi', 'broadcast', 'schedule', 'playlist',
+  var VIEWS = ['live', 'multi', 'recorder', 'broadcast', 'schedule', 'playlist',
                'dynamic', 'weibo', 'dd', 'about', 'settings'];
   var KEY_MUTED = 'xl_muted';
   var KEY_LOOP = 'xl_loop';         // 循环播放：off / one / list / random（见 state.loop）
@@ -4347,6 +4347,7 @@
     /* DD 板块自己也要一个 class：它整块全宽、播放器缩到后台。
        ⚠️ body 上只有这种**特例 class**，没有通用的 view-<name>（踩过一次）。 */
     document.body.classList.toggle('view-dd', name === 'dd');
+    document.body.classList.toggle('view-recorder', name === 'recorder');
     document.querySelectorAll('.tab').forEach(function (t) {
       t.classList.toggle('active', t.getAttribute('data-view') === name);
     });
@@ -4388,6 +4389,10 @@
       var feed = document.getElementById('ddp-feed-list');
       if (feed && /dl-empty/.test(feed.innerHTML)) ddpQuery(1);
     }
+    /* 录播姬：进来才开始轮询。录制在后端跑，前端只是在看状态 —— 离开就停，
+       省得在别的板块每秒发两个请求。 */
+    if (name === 'recorder') rcEnter();
+    if (prev === 'recorder' && name !== 'recorder') rcLeave();
     /* DD 板块的子页面：进入时按当前子标签拉数据（播放器缩在后台，播放不中断） */
     if (name === 'dd') ddSubLoad();
 
@@ -5701,6 +5706,278 @@
     scStop();
   }
 
+  /* ---------------------------------------------------------- 录播姬（v1.9.15）
+     真正的录制在后端：一个调度线程按房间起 ffmpeg 直存 FLV（-c copy，不转码）。
+     前端只做四件事 —— 列房间、开关监控、看状态、改输出目录。
+     ⚠️ 状态每 2.5 秒刷一次，所以**房间卡片是增量更新**：整块 innerHTML 重建会
+        把用户正在输入的「添加房间」清空、把焦点弄丢（实测过）。
+     房间集合变化时才重建卡片结构，其余只改文本。 */
+
+  var rcState = { data: null, files: null, timer: 0 };
+
+  var RC_LABEL = { idle: '未监控', waiting: '等待开播', recording: '录制中', error: '出错' };
+  var RC_CLASS = { idle: '', waiting: 'wait', recording: 'rec', error: 'err' };
+
+  function rcSize(n) {
+    n = +n || 0;
+    if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return Math.round(n / 1024) + ' KB';
+  }
+
+  function rcStamp(ts) {
+    var d = new Date((+ts || 0) * 1000);
+    if (!+ts) return '';
+    function p2(v) { return (v < 10 ? '0' : '') + v; }
+    return (d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+  }
+
+  function rcRoomHtml(r) {
+    return '<div class="rc-room" data-room="' + esc(r.room) + '">'
+      + '<div class="rc-room-h"><b title="' + esc(r.name) + '">' + esc(r.name) + '</b>'
+      + '<span class="rc-st" data-role="st"><i></i><span data-role="sttxt">未监控</span></span></div>'
+      + '<p class="rc-title" data-role="title"></p>'
+      + '<div class="rc-ids"><span>房间 ' + esc(r.room) + '</span>'
+      + (r.uid ? '<span>UID ' + esc(r.uid) + '</span>' : '') + '</div>'
+      + '<p class="rc-err" data-role="err" hidden></p>'
+      + '<div class="rc-btns">'
+      + '<button class="btn small primary" data-act="toggle" type="button">开始监控</button>'
+      + '<button class="btn small ghost" data-act="dir" type="button">打开目录</button>'
+      + '<button class="btn small ghost" data-act="del" type="button">删除</button>'
+      + '</div></div>';
+  }
+
+  function rcAddHtml() {
+    return '<div class="rc-add">'
+      + '<b>＋ 添加房间</b>'
+      + '<div class="rc-add-row">'
+      + '<input class="rc-input" id="rc-new" type="text" spellcheck="false"'
+      + ' placeholder="房间号或房间链接" aria-label="房间号或直播间链接" autocomplete="off">'
+      + '<button class="btn small primary" id="rc-new-ok" type="button">确定</button>'
+      + '</div>'
+      + '<span class="rc-ids">也可以直接填主播 UID</span></div>';
+  }
+
+  function rcPaintRooms(d) {
+    var box = el.rcGrid;
+    if (!box) return;
+    var rooms = d.rooms || [];
+    var sig = rooms.map(function (r) { return r.room; }).join(',');
+    if (box.getAttribute('data-sig') !== sig) {
+      box.setAttribute('data-sig', sig);
+      box.innerHTML = rooms.map(rcRoomHtml).join('') + rcAddHtml();
+    }
+    rooms.forEach(function (r) {
+      var card = box.querySelector('.rc-room[data-room="' + r.room + '"]');
+      if (!card) return;
+      var st = r.state || 'idle';
+      var sb = card.querySelector('[data-role="st"]');
+      var txt = RC_LABEL[st] || st;
+      if (st === 'recording' && r.since) txt = '录制中 ' + fmtClock((d.now || 0) - r.since);
+      if (sb) {
+        sb.className = 'rc-st ' + (RC_CLASS[st] || '');
+        var tt = sb.querySelector('[data-role="sttxt"]');
+        if (tt) tt.textContent = txt;
+        sb.title = r.error || txt;
+      }
+      var tl = card.querySelector('[data-role="title"]');
+      if (tl) {
+        tl.textContent = r.title || (r.enabled ? '等待开播…' : '还没开始监控');
+        tl.title = r.title || '';
+      }
+      var er = card.querySelector('[data-role="err"]');
+      if (er) {
+        er.hidden = !r.error;
+        er.textContent = r.error || '';
+      }
+      var btn = card.querySelector('[data-act="toggle"]');
+      if (btn) {
+        btn.textContent = r.enabled ? '停止监控' : '开始监控';
+        btn.className = 'btn small ' + (r.enabled ? 'ghost' : 'primary');
+      }
+    });
+  }
+
+  function rcPaintMeta(d) {
+    if (!el.rcMeta) return;
+    var live = (d.rooms || []).filter(function (r) {
+      return (r.state === 'recording');
+    }).length;
+    var free = (d.disk && d.disk.free) || 0;
+    el.rcMeta.innerHTML = '<span>ffmpeg '
+      + (d.ffmpeg ? '<b>已就绪</b>' : '<b class="warn">未找到</b>')
+      + '</span><span>剩余 <b>' + rcSize(free) + '</b></span>'
+      + '<span><b>' + live + '</b> / ' + d.maxLive + ' 路录制中</span>'
+      + '<span>' + (d.rooms || []).length + ' 个房间</span>';
+  }
+
+  function rcPaintFiles(d, f) {
+    if (!el.rcFiles) return;
+    var list = (f && f.files) || [];
+    if (el.rcFilesStat) {
+      var total = 0;
+      list.forEach(function (x) { total += (+x.size || 0); });
+      el.rcFilesStat.textContent = list.length
+        ? ('共 ' + list.length + ' 个 · ' + rcSize(total)) : '';
+    }
+    if (!list.length) {
+      el.rcFiles.innerHTML = '<p class="live-note" style="margin:0">还没有录制文件。'
+        + '点房间卡片上的「开始监控」，开播后会自动录到输出目录。</p>';
+      return;
+    }
+    el.rcFiles.innerHTML = list.slice(0, 120).map(function (x) {
+      return '<div class="rc-file"><span class="nm" title="' + esc(x.file) + '">'
+        + esc(x.file) + '</span><span class="sz">' + rcSize(x.size) + '</span>'
+        + '<span class="tm">' + esc(rcStamp(x.mtime)) + '</span></div>';
+    }).join('');
+  }
+
+  function rcPaintLog(d) {
+    if (!el.rcLog) return;
+    var rows = (d.log || []).slice(-120);
+    if (!rows.length) {
+      el.rcLog.innerHTML = '<div><span class="t">—</span><span class="msg">还没有日志</span></div>';
+      return;
+    }
+    el.rcLog.innerHTML = rows.map(function (x) {
+      var lv = x.lv === 'err' ? 'err' : (x.lv === 'warn' ? 'warn' : (x.lv === 'ok' ? 'ok' : ''));
+      return '<div><span class="t">' + esc(x.t) + '</span>'
+        + '<span class="lv lv-' + lv + '">' + esc(lv || 'info') + '</span>'
+        + '<span class="msg">' + (x.name ? '[' + esc(x.name) + '] ' : '') + esc(x.msg) + '</span></div>';
+    }).join('');
+    el.rcLog.scrollTop = el.rcLog.scrollHeight;      // 跟到最新一条
+  }
+
+  function rcPaint() {
+    var d = rcState.data;
+    if (!d) return;
+    rcPaintRooms(d);
+    rcPaintMeta(d);
+    rcPaintFiles(d, rcState.files);
+    rcPaintLog(d);
+    // 目录与画质：用户正在输入时不要抢他的内容
+    if (el.rcDir && document.activeElement !== el.rcDir) {
+      el.rcDir.value = (d.settings && d.settings.dir) || '';
+    }
+    if (el.rcQn && document.activeElement !== el.rcQn) {
+      el.rcQn.value = String((d.settings && d.settings.qn) || 10000);
+    }
+  }
+
+  function rcLoad() {
+    if (state.view !== 'recorder') return;
+    fetch('/api/recorder/state').then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || d.error) return;
+        rcState.data = d;
+        return fetch('/api/recorder/files').then(function (r) { return r.json(); })
+          .then(function (f) { rcState.files = f || null; });
+      })
+      .then(function () { rcPaint(); })
+      .catch(function () { /* 下一轮会重试 */ });
+  }
+
+  function rcPost(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {})
+    }).then(function (r) {
+      return r.json().then(function (d) { return { ok: r.ok, d: d }; });
+    }).then(function (x) {
+      if (!x.ok) {
+        pvToast('录播姬：' + ((x.d && x.d.error) || '操作失败'));
+        return false;
+      }
+      rcLoad();
+      return true;
+    }).catch(function (e) {
+      pvToast('录播姬：' + e);
+      return false;
+    });
+  }
+
+  function rcAdd() {
+    var inp = document.getElementById('rc-new');
+    var v = inp ? inp.value.trim() : '';
+    if (!v) { if (inp) inp.focus(); return; }
+    rcPost('/api/recorder/add', { input: v }).then(function (ok) {
+      if (ok && inp) inp.value = '';
+    });
+  }
+
+  function rcToggle(room, enabled) {
+    return rcPost(enabled ? '/api/recorder/stop' : '/api/recorder/start', { room: room });
+  }
+
+  function rcEnter() {
+    rcLoad();
+    if (rcState.timer) clearInterval(rcState.timer);
+    rcState.timer = setInterval(rcLoad, 2500);
+  }
+
+  function rcLeave() {
+    if (rcState.timer) { clearInterval(rcState.timer); rcState.timer = 0; }
+  }
+
+  function bindRecorder() {
+    if (el.rcGrid) {
+      el.rcGrid.addEventListener('click', function (e) {
+        var b = e.target.closest ? e.target.closest('button') : null;
+        if (!b) return;
+        if (b.id === 'rc-new-ok') { rcAdd(); return; }
+        var card = b.closest('.rc-room');
+        if (!card) return;
+        var room = card.getAttribute('data-room');
+        var act = b.getAttribute('data-act');
+        if (act === 'toggle') {
+          rcToggle(room, !!(b.textContent.indexOf('停止') >= 0));
+        } else if (act === 'dir') {
+          rcPost('/api/recorder/open', { room: room });
+        } else if (act === 'del') {
+          if (window.confirm('删除这个房间？已经录好的文件不会被删除。')) {
+            rcPost('/api/recorder/remove', { room: room });
+          }
+        }
+      });
+      el.rcGrid.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && e.target && e.target.id === 'rc-new') {
+          e.preventDefault();
+          rcAdd();
+        }
+      });
+    }
+    if (el.rcRefresh) el.rcRefresh.addEventListener('click', rcLoad);
+    if (el.rcOpenDir) el.rcOpenDir.addEventListener('click', function () {
+      rcPost('/api/recorder/open', {});
+    });
+    if (el.rcAllStart) el.rcAllStart.addEventListener('click', function () {
+      var rooms = (rcState.data && rcState.data.rooms) || [];
+      rooms.forEach(function (r) { if (!r.enabled) rcPost('/api/recorder/start', { room: r.room }); });
+    });
+    if (el.rcAllStop) el.rcAllStop.addEventListener('click', function () {
+      var rooms = (rcState.data && rcState.data.rooms) || [];
+      rooms.forEach(function (r) { if (r.enabled) rcPost('/api/recorder/stop', { room: r.room }); });
+    });
+    if (el.rcPick) el.rcPick.addEventListener('click', function () {
+      fetch('/api/recorder/pick', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                    body: '{}' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d && d.dir) {
+            if (el.rcDir) el.rcDir.value = d.dir;
+            rcPost('/api/recorder/settings', { dir: d.dir });
+          }
+        }).catch(function (e) { pvToast('选目录失败：' + e); });
+    });
+    if (el.rcSave) el.rcSave.addEventListener('click', function () {
+      rcPost('/api/recorder/settings', {
+        dir: el.rcDir ? el.rcDir.value.trim() : '',
+        qn: el.rcQn ? parseFloat(el.rcQn.value) : 10000
+      }).then(function (ok) { if (ok) pvToast('录播姬设置已保存'); });
+    });
+  }
+
   /* ---------------------------------------------------------- 片段保存
      在分段面板里多选，逐段剪成 mp4 存到本机。选中态按 cid@start 记，
      重画/切段都不会掉；真正保存的条目以本轮渲染出来的 clipMeta 为准。 */
@@ -6538,6 +6815,7 @@
 
     /* 自动歌切：入口在设置页，面板在播放器下方。识别全部走后端。 */
     if (el.btnOpenSongcut) el.btnOpenSongcut.addEventListener('click', openSongcut);
+    bindRecorder();
     if (el.scRun) el.scRun.addEventListener('click', scStart);
     if (el.scApply) el.scApply.addEventListener('click', scApply);
     if (el.scClose) el.scClose.addEventListener('click', closeSongcut);
@@ -7377,6 +7655,19 @@
       scProgress: document.getElementById('songcut-progress'),
       scBar: document.getElementById('songcut-bar'),
       scList: document.getElementById('songcut-list'),
+      rcGrid: document.getElementById('rc-grid'),
+      rcMeta: document.getElementById('rc-meta'),
+      rcFiles: document.getElementById('rc-files'),
+      rcFilesStat: document.getElementById('rc-files-stat'),
+      rcLog: document.getElementById('rc-log'),
+      rcDir: document.getElementById('rc-dir'),
+      rcQn: document.getElementById('rc-qn'),
+      rcPick: document.getElementById('rc-pick'),
+      rcSave: document.getElementById('rc-save'),
+      rcRefresh: document.getElementById('rc-refresh'),
+      rcOpenDir: document.getElementById('rc-open-dir'),
+      rcAllStart: document.getElementById('rc-all-start'),
+      rcAllStop: document.getElementById('rc-all-stop'),
       scClose: document.getElementById('songcut-close'),
       qualityPanel: document.getElementById('quality-panel'),
       btnQpClose: document.getElementById('btn-qp-close'),

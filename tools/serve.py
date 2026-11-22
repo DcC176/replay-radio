@@ -1074,6 +1074,10 @@ STATIONLESS_OK = (
     "/api/playlist/tag",
     "/api/playlist/create", "/api/playlist/move",
     "/api/playlist/like", "/api/lyrics", "/api/stations/weibo", "/api/dd/actions", "/api/dd/wordcloud", "/api/dd/lives", "/api/dd/fans", "/api/dd/profile",
+    # 录播姬：录的是任意直播间，与「有没有注册主播」无关
+    "/api/recorder/state", "/api/recorder/files", "/api/recorder/add",
+    "/api/recorder/remove", "/api/recorder/start", "/api/recorder/stop",
+    "/api/recorder/settings", "/api/recorder/pick", "/api/recorder/open",
 )
 
 
@@ -1772,6 +1776,550 @@ def api_songcut_apply(obj):
     except Exception as e:
         return 400, {"error": str(e)}
     return 200, {"ok": True, "count": n, "file": name}
+
+
+# ---------------------------------------------------------------- 录播姬（v1.9.15）
+#
+# 参考 BililiveRecorder 的组织方式：房间卡片 + 录制开关 + 文件/日志。
+# 与 stations.json **无关** —— 它录的是「任意一个直播间」，不影响现有的主播/回放体系。
+#
+# 采集用 ffmpeg 直录 FLV、-c copy 不转码（CPU≈0）：
+#   · FLV 是流式的，断流 / 强杀都不毁整个文件（mp4 的 moov 在尾部，中断就废）；
+#   · 代价是浏览器 <video> 播不了 —— 所以这里只列文件 + 打开所在目录，不做内嵌播放。
+#
+# 调度是**一个线程扫所有房间**，不是每房间一个线程：房间数是个位数，串行查开播够用；
+# 「停止」由接口直接 terminate 进程，不等调度轮次，所以响应是即时的。
+
+REC_FILE = os.path.join(ROOT, "data", "recorder.json")
+RC_QN = 10000                  # 原画；B 站会按登录态自动降级
+RC_MAX_LIVE = 4                # 同时录制上限
+RC_MIN_FREE = 2 * 1024 ** 3    # 剩余磁盘低于 2GB 不再开新录制
+RC_POLL = 45.0                 # 未开播时的复查间隔（秒）
+RC_TICK = 4.0                  # 调度线程扫描间隔
+RC_MAX_ROOMS = 20
+RC_LOG_MAX = 400
+
+REC_LOCK = threading.Lock()
+RC_RT = {}       # room -> 运行态（内存，不落盘）
+RC_PROC = {}     # room -> Popen
+RC_LOG = []      # [{t, room, name, msg, lv}]
+RC_LOOP = {"thread": None}
+
+
+def _rc_default_dir():
+    return os.path.join(os.path.expanduser("~"), "Videos", "噼里啪啦", "录播")
+
+
+def _rc_doc():
+    d = _read_json_file(REC_FILE)
+    d = d if isinstance(d, dict) else {}
+    st = d.get("settings") if isinstance(d.get("settings"), dict) else {}
+    rooms = []
+    for r in (d.get("rooms") or []):
+        if not isinstance(r, dict):
+            continue
+        room = str(r.get("room") or "").strip()
+        if not room.isdigit():
+            continue
+        rooms.append({"room": room, "uid": str(r.get("uid") or ""),
+                      "name": str(r.get("name") or room),
+                      "face": str(r.get("face") or ""),
+                      "enabled": bool(r.get("enabled")),
+                      "dir": str(r.get("dir") or "")})
+    return {"version": 1,
+            "settings": {"dir": st.get("dir") or _rc_default_dir(),
+                         "qn": int(st.get("qn") or RC_QN)},
+            "rooms": rooms}
+
+
+def _rc_save(doc):
+    _write_json_file(REC_FILE, doc)
+
+
+def _rc_log(msg, room="", name="", lv="info"):
+    with REC_LOCK:
+        RC_LOG.append({"t": time.strftime("%H:%M:%S"), "room": str(room or ""),
+                       "name": name or "", "msg": str(msg)[:300], "lv": lv})
+        del RC_LOG[:-RC_LOG_MAX]
+    print("[recorder] %s%s %s" % (name or "-", ("(%s)" % room) if room else "", msg))
+
+
+def _rc_rt(room):
+    """该房间的运行态（没有就建一个）。⚠️ 内部会拿 REC_LOCK，别在锁里再调它。"""
+    with REC_LOCK:
+        return RC_RT.setdefault(str(room), {
+            "state": "idle", "since": 0, "file": "", "bytes": 0, "error": "",
+            "pid": 0, "title": "", "living": False, "next": 0})
+
+
+def _rc_disk(path):
+    """剩余空间。目录还不存在时用最近的已存在祖先 ——
+    否则一律返回 0，界面显示「剩余 0 GB」，看着像磁盘满了。"""
+    p = os.path.abspath(path or ".")
+    for _ in range(6):
+        try:
+            u = shutil.disk_usage(p)
+            return {"free": u.free, "total": u.total}
+        except OSError:
+            parent = os.path.dirname(p)
+            if parent == p:
+                break
+            p = parent
+    return {"free": 0, "total": 0}
+
+
+def _rc_room_info(room):
+    """按房间号取 uid / 标题 / 开播状态。room/v1/Room/get_info 不需要签名。"""
+    d = bili_get("https://api.live.bilibili.com/room/v1/Room/get_info?room_id=%s" % room,
+                 "https://live.bilibili.com/%s" % room, fallback_anon=True)
+    if d.get("code") != 0:
+        raise RuntimeError(d.get("message") or ("code=%s" % d.get("code")))
+    x = d.get("data") or {}
+    if not str(x.get("room_id") or "").isdigit():
+        raise RuntimeError("房间不存在")
+    return {"uid": str(x.get("uid") or ""), "title": x.get("title") or "",
+            "living": int(x.get("live_status") or 0) == 1}
+
+
+def _rc_master(uid):
+    """uid → 主播名 / 头像。走直播域（比主站 acc/info 少一点风控）。"""
+    if not str(uid or "").isdigit():
+        return "", ""
+    try:
+        d = bili_get("https://api.live.bilibili.com/live_user/v1/Master/info?uid=%s" % uid,
+                     "https://live.bilibili.com/", fallback_anon=True)
+        if d.get("code") != 0:
+            return "", ""
+        info = (d.get("data") or {}).get("info") or {}
+        return info.get("uname") or "", info.get("face") or ""
+    except Exception:
+        return "", ""
+
+
+def _rc_uid_room(uid):
+    """按 UID 反查房间号（用户常直接粘主播 ID）。这个接口只收 POST JSON。"""
+    h = {"User-Agent": UA, "Referer": "https://live.bilibili.com/",
+         "Content-Type": "application/json"}
+    s = sessdata()
+    if s:
+        h["Cookie"] = "SESSDATA=" + s
+    try:
+        req = urllib.request.Request(
+            "https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids",
+            data=json.dumps({"uids": [int(uid)]}).encode("utf-8"), headers=h)
+        with DIRECT_OPENER.open(req, timeout=20) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+        if d.get("code") == 0:
+            x = (d.get("data") or {}).get(str(uid)) or {}
+            return str(x.get("room_id") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _rc_parse(text):
+    """房间号 / 直播间链接 / 主播 UID → (room, uid, name, face)。取不到就抛错。
+
+    先当房间号查，查不到再当 UID 反查 —— 后者是为了「直接粘主播 ID」也能用。
+    ⚠️ 两个号段理论上可能撞车（数字位数区分不了），所以卡片上同时显示房间号与 UID，
+       加错了用户一眼能看出来。
+    """
+    raw = str(text or "").strip()
+    m = re.search(r"live\.bilibili\.com/(?:h5/)?(\d+)", raw)
+    num = m.group(1) if m else (raw if raw.isdigit() else "")
+    if not num:
+        raise RuntimeError("请填房间号或直播间链接，例如 1727071052 "
+                           "或 https://live.bilibili.com/1727071052")
+    err = None
+    try:
+        info = _rc_room_info(num)
+        name, face = _rc_master(info["uid"])
+        return num, info["uid"], name or num, face
+    except Exception as e:
+        err = e
+    room = _rc_uid_room(num)
+    if room:
+        name, face = _rc_master(num)
+        return room, num, name or room, face
+    raise RuntimeError("这个号既不是房间号也不是 UID：%s" % str(err)[:80])
+
+
+def _rc_filename(name, room, when=None):
+    t = time.strftime("%Y%m%d_%H%M%S", time.localtime(when or time.time()))
+    safe = re.sub(r'[\\/:*?"<>|\s]+', "_", str(name or room)).strip("_")[:40] or str(room)
+    return "%s_%s_%s.flv" % (safe, room, t)
+
+
+def _rc_kill(room, why=""):
+    """停掉这一路的 ffmpeg。
+
+    先给它 stdin 写一个 `q`（ffmpeg 的交互退出键）：它会把当前包写完、把文件尾部
+    收干净再退。直接 terminate 会截在任意位置 —— FLV 还能播，但最后几秒容易丢。
+    卡住不响应时才退回强杀。
+    """
+    room = str(room)
+    p = RC_PROC.pop(room, None)
+    rt = _rc_rt(room)
+    if p is not None:
+        clean = False
+        try:
+            if p.stdin:
+                p.stdin.write(b"q")
+                p.stdin.flush()
+                p.stdin.close()
+            p.wait(timeout=6)
+            clean = True
+        except Exception:
+            pass
+        if not clean:
+            try:
+                p.terminate()
+            except OSError:
+                pass
+            try:
+                p.wait(timeout=3)
+            except Exception:
+                pass
+        _rc_log("结束录制（%s，%s）" % (why or "手动停止",
+                                       "正常收尾" if clean else "强制结束"), room)
+    rt.update(state="idle", since=0, pid=0)
+    return p is not None
+
+
+def _rc_launch(doc, r):
+    """起一路录制。失败抛异常，由调度器记进该房间的 error。"""
+    room = str(r["room"])
+    rt = _rc_rt(room)
+    outdir = _clip_check_dir(r.get("dir") or doc["settings"]["dir"]) or doc["settings"]["dir"]
+    os.makedirs(outdir, exist_ok=True)
+    ff = seg_ffmpeg()
+    if not ff:
+        raise RuntimeError("本机没找到 ffmpeg，无法录制")
+    # 录制要「现在就新鲜」的地址：播放器那个缓存 TTL 是给 <video> 用的，别复用
+    LIVE_URL_CACHE.pop(room, None)
+    info = live_play_url(room, doc["settings"]["qn"])
+    base = _rc_filename(r.get("name"), room)
+    out = os.path.join(outdir, base)
+    n = 2
+    while os.path.exists(out):          # 同一秒重复开录（极少）：加序号，不覆盖
+        out = os.path.join(outdir, base[:-4] + "_%d.flv" % n)
+        n += 1
+    hdr = "Referer: https://live.bilibili.com/\r\nUser-Agent: %s\r\n" % UA
+    cmd = [ff, "-hide_banner", "-loglevel", "error",
+           # 断线自动重连：B 站 FLV 拉流偶尔会断，ffmpeg 自己接得上就不用重启进程
+           "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+           "-headers", hdr,
+           "-i", info["url"], "-c", "copy", "-f", "flv", "-y", out]
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with REC_LOCK:
+        RC_PROC[room] = p
+    rt.update(state="recording", since=time.time(), file=out, bytes=0,
+              error="", pid=p.pid, next=0, living=True)
+    _rc_log("开始录制 → %s" % os.path.basename(out), room, r.get("name"), "ok")
+
+
+def _rc_tick():
+    doc = _rc_doc()
+    now = time.time()
+    live_n = 0
+    for p in list(RC_PROC.values()):
+        try:
+            if p.poll() is None:
+                live_n += 1
+        except Exception:
+            pass
+    for r in doc["rooms"]:
+        room = str(r["room"])
+        rt = _rc_rt(room)
+        p = RC_PROC.get(room)
+        if p is not None:
+            if p.poll() is None:
+                try:
+                    rt["bytes"] = os.path.getsize(rt["file"]) if rt["file"] else 0
+                except OSError:
+                    pass
+                continue
+            RC_PROC.pop(room, None)
+            live_n = max(0, live_n - 1)
+            rc = p.returncode
+            # 流不稳的直播间会「连上—断—再连」，每次只落几百 KB。若不退避，
+            # 一小时能攒出几百个碎文件（实测某房间 7 秒就 EOF）。
+            # 判据用**刚结束那个文件的大小**：像样的录制至少几 MB。
+            try:
+                got = os.path.getsize(rt["file"]) if rt["file"] else 0
+            except OSError:
+                got = 0
+            if got < 1024 * 1024:
+                rt["tinyN"] = int(rt.get("tinyN") or 0) + 1
+            else:
+                rt["tinyN"] = 0
+            back = min(90, 6 * max(1, int(rt.get("tinyN") or 0)))
+            rt.update(state="waiting" if r["enabled"] else "idle", pid=0, since=0)
+            rt["next"] = now + back
+            _rc_log("录制进程结束（退出码 %s，%.0f KB）%s" % (
+                rc, got / 1024.0, "，%d 秒后重试" % back if r["enabled"] else ""),
+                room, r.get("name"), "warn" if rc or got < 1024 * 1024 else "info")
+            if int(rt.get("tinyN") or 0) == 3:
+                _rc_log("这个直播间连续 3 次只录到不到 1MB，像是在测试或推流不稳；"
+                        "已放慢重试，不再频繁新开文件", room, r.get("name"), "err")
+            continue
+        if not r["enabled"]:
+            if rt["state"] != "idle":
+                rt.update(state="idle", since=0, pid=0, error="")
+            continue
+        if now < (rt.get("next") or 0):
+            continue
+        try:
+            info = _rc_room_info(room)
+        except Exception as e:
+            rt.update(state="error", error=str(e)[:140])
+            rt["next"] = now + RC_POLL
+            _rc_log("查询开播失败：%s" % str(e)[:120], room, r.get("name"), "err")
+            continue
+        rt["title"] = info["title"]
+        rt["living"] = info["living"]
+        if not info["living"]:
+            rt.update(state="waiting", error="")
+            rt["next"] = now + RC_POLL
+            continue
+        if live_n >= RC_MAX_LIVE:
+            rt.update(state="waiting", error="")
+            rt["next"] = now + 20
+            _rc_log("同时录制已达上限 %d 路，这一路稍后再试" % RC_MAX_LIVE,
+                    room, r.get("name"), "warn")
+            continue
+        outdir = _clip_check_dir(r.get("dir") or doc["settings"]["dir"]) or doc["settings"]["dir"]
+        free = _rc_disk(outdir)["free"]
+        if free and free < RC_MIN_FREE:
+            rt.update(state="error", error="磁盘剩余不足 2GB")
+            rt["next"] = now + 120
+            _rc_log("磁盘剩余 %.1f GB，低于 2GB 不开新录制" % (free / 1024.0 ** 3),
+                    room, r.get("name"), "err")
+            continue
+        try:
+            _rc_launch(doc, r)
+            live_n += 1
+        except Exception as e:
+            rt.update(state="error", error=str(e)[:140])
+            rt["next"] = now + 30
+            _rc_log("开录失败：%s" % str(e)[:120], room, r.get("name"), "err")
+
+
+def _rc_loop():
+    while True:
+        try:
+            _rc_tick()
+        except Exception as e:
+            _rc_log("调度异常：%s" % str(e)[:160], lv="err")
+        time.sleep(RC_TICK)
+
+
+def _rc_ensure_loop():
+    """懒启动调度线程 —— 不在 import 时起，避免打包/导入产生副作用。"""
+    with REC_LOCK:
+        t = RC_LOOP.get("thread")
+        if t is not None and t.is_alive():
+            return
+        t = threading.Thread(target=_rc_loop, name="recorder", daemon=True)
+        RC_LOOP["thread"] = t
+    t.start()
+
+
+def _rc_room_payload(doc, r):
+    """配置 + 运行态合成一条（配置落盘、状态只在内存）。"""
+    with REC_LOCK:
+        rt = dict(RC_RT.get(str(r["room"])) or {})
+    out = dict(r)
+    out.update(state=rt.get("state") or "idle",
+               since=int(rt.get("since") or 0),
+               file=os.path.basename(rt.get("file") or ""),
+               bytes=int(rt.get("bytes") or 0),
+               error=rt.get("error") or "",
+               pid=int(rt.get("pid") or 0),
+               title=rt.get("title") or "",
+               living=bool(rt.get("living")))
+    return out
+
+
+def api_rc_state(query):
+    """GET /api/recorder/state —— 房间 + 运行态 + 设置 + 磁盘 + 日志尾部。"""
+    _rc_ensure_loop()
+    doc = _rc_doc()
+    disk = _rc_disk(_clip_check_dir(doc["settings"]["dir"]) or doc["settings"]["dir"])
+    with REC_LOCK:
+        log = list(RC_LOG[-120:])
+    return 200, {"settings": doc["settings"], "defaultDir": _rc_default_dir(),
+                 "ffmpeg": seg_ffmpeg(), "maxLive": RC_MAX_LIVE,
+                 "minFree": RC_MIN_FREE, "maxRooms": RC_MAX_ROOMS,
+                 "disk": disk, "now": time.time(), "log": log,
+                 "rooms": [_rc_room_payload(doc, r) for r in doc["rooms"]]}
+
+
+def api_rc_files(query):
+    """GET /api/recorder/files?room= —— 已录文件（按修改时间倒序）。"""
+    room = (query.get("room", [""])[0] or "").strip()
+    doc = _rc_doc()
+    if room:
+        hit = next((r for r in doc["rooms"] if r["room"] == room), None)
+        if not hit:
+            return 404, {"error": "没有这个房间"}
+        targets = [(hit["room"], hit.get("name") or hit["room"],
+                    hit.get("dir") or doc["settings"]["dir"])]
+    else:
+        targets = [(r["room"], r.get("name") or r["room"],
+                    r.get("dir") or doc["settings"]["dir"]) for r in doc["rooms"]]
+    out = []
+    seen = set()
+    for rm, nm, d in targets:
+        d2 = _clip_check_dir(d)
+        if not d2 or not os.path.isdir(d2):
+            continue
+        try:
+            names = os.listdir(d2)
+        except OSError:
+            continue
+        for f in names:
+            if not f.lower().endswith(".flv"):
+                continue
+            fp = os.path.join(d2, f)
+            # 多个房间用同一个输出目录时（默认就是），同一文件只会被扫一次
+            if fp in seen:
+                continue
+            try:
+                stt = os.stat(fp)
+            except OSError:
+                continue
+            seen.add(fp)
+            out.append({"room": rm, "name": nm, "file": f, "size": stt.st_size,
+                        "mtime": int(stt.st_mtime), "dir": d2})
+    out.sort(key=lambda x: -x["mtime"])
+    return 200, {"files": out[:300], "total": len(out),
+                 "dir": doc["settings"]["dir"]}
+
+
+def api_rc_add(obj):
+    """POST /api/recorder/add {input} —— 房间号 / 直播间链接 / 主播 UID。"""
+    _rc_ensure_loop()
+    doc = _rc_doc()
+    if len(doc["rooms"]) >= RC_MAX_ROOMS:
+        return 400, {"error": "最多 %d 个房间，先删掉不用的" % RC_MAX_ROOMS}
+    try:
+        room, uid, name, face = _rc_parse(obj.get("input"))
+    except Exception as e:
+        return 400, {"error": str(e)[:160]}
+    if any(r["room"] == room for r in doc["rooms"]):
+        return 400, {"error": "这个直播间已经加过了（房间 %s）" % room}
+    doc["rooms"].append({"room": room, "uid": uid, "name": name, "face": face,
+                         "enabled": False, "dir": ""})
+    _rc_save(doc)
+    _rc_log("添加房间 %s" % room, room, name, "ok")
+    return 200, {"ok": True, "room": room, "name": name, "uid": uid}
+
+
+def api_rc_remove(obj):
+    room = str(obj.get("room") or "")
+    doc = _rc_doc()
+    hit = next((r for r in doc["rooms"] if r["room"] == room), None)
+    if not hit:
+        return 404, {"error": "没有这个房间"}
+    _rc_kill(room, "房间已删除")
+    doc["rooms"] = [r for r in doc["rooms"] if r["room"] != room]
+    _rc_save(doc)
+    with REC_LOCK:
+        RC_RT.pop(room, None)
+    _rc_log("删除房间 %s" % room, room, hit.get("name"), "warn")
+    return 200, {"ok": True}
+
+
+def api_rc_start(obj):
+    """POST /api/recorder/start {room} —— 开始监控（未开播就等）。"""
+    _rc_ensure_loop()
+    room = str(obj.get("room") or "")
+    doc = _rc_doc()
+    hit = next((r for r in doc["rooms"] if r["room"] == room), None)
+    if not hit:
+        return 404, {"error": "没有这个房间"}
+    if not hit["enabled"]:
+        hit["enabled"] = True
+        _rc_save(doc)
+    rt = _rc_rt(room)
+    rt["next"] = 0                     # 立刻查一次，不用等下一轮
+    if rt["state"] in ("idle", "error"):
+        rt.update(state="waiting", error="")
+    _rc_log("开始监控", room, hit.get("name"), "ok")
+    return 200, {"ok": True}
+
+
+def api_rc_stop(obj):
+    """POST /api/recorder/stop {room} —— 停止监控并结束该路录制。"""
+    room = str(obj.get("room") or "")
+    doc = _rc_doc()
+    hit = next((r for r in doc["rooms"] if r["room"] == room), None)
+    if not hit:
+        return 404, {"error": "没有这个房间"}
+    if hit["enabled"]:
+        hit["enabled"] = False
+        _rc_save(doc)
+    killed = _rc_kill(room, "手动停止")
+    rt = _rc_rt(room)
+    rt.update(state="idle", error="")
+    _rc_log("停止监控%s" % ("（录制已结束）" if killed else ""), room, hit.get("name"), "warn")
+    return 200, {"ok": True, "wasRecording": killed}
+
+
+def api_rc_settings(obj):
+    """POST /api/recorder/settings {dir?, qn?}。"""
+    doc = _rc_doc()
+    if "dir" in obj:
+        d = _clip_check_dir(obj.get("dir"))
+        if not d:
+            return 400, {"error": "目录不合法：要绝对路径，且不能是系统目录"}
+        doc["settings"]["dir"] = d
+    if "qn" in obj:
+        try:
+            qn = int(obj.get("qn"))
+        except (TypeError, ValueError):
+            qn = RC_QN
+        doc["settings"]["qn"] = qn if qn in (10000, 400, 250, 150) else RC_QN
+    _rc_save(doc)
+    return 200, {"ok": True, "settings": doc["settings"]}
+
+
+def api_rc_pick(obj):
+    doc = _rc_doc()
+    cur = _clip_check_dir(doc["settings"]["dir"]) or _rc_default_dir()
+    p = _pick_dir_win32(cur)
+    if p is None:
+        return 501, {"error": "这个系统不支持原生文件夹选择，请直接输入路径"}
+    if p == "":
+        return 200, {"ok": False, "cancelled": True}
+    return 200, {"ok": True, "dir": p}
+
+
+def api_rc_open(obj):
+    """POST /api/recorder/open {room?} —— 在资源管理器里打开输出目录。"""
+    room = str(obj.get("room") or "")
+    doc = _rc_doc()
+    d = doc["settings"]["dir"]
+    if room:
+        hit = next((r for r in doc["rooms"] if r["room"] == room), None)
+        if not hit:
+            return 404, {"error": "没有这个房间"}
+        d = hit.get("dir") or d
+    d = _clip_check_dir(d) or doc["settings"]["dir"]
+    if not os.path.isdir(d):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError as e:
+            return 400, {"error": "目录不存在且创建失败：%s" % e}
+    if os.name != "nt":
+        return 501, {"error": "只支持 Windows"}
+    try:
+        os.startfile(d)                 # noqa: 仅 Windows 有
+    except OSError as e:
+        return 400, {"error": str(e)}
+    return 200, {"ok": True, "dir": d}
 
 
 def api_status(force=False):
@@ -6467,6 +7015,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_clip_status())
         if parsed.path == "/api/songcut/status":
             return self._json(*api_songcut_status(q))
+        if parsed.path == "/api/recorder/state":
+            return self._json(*api_rc_state(q))
+        if parsed.path == "/api/recorder/files":
+            return self._json(*api_rc_files(q))
         if parsed.path == "/api/dd/actions":
             return self._json(*api_dd_actions(q))
         if parsed.path == "/api/dd/profile":
@@ -6661,6 +7213,20 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_songcut_start(obj))
         if parsed.path == "/api/songcut/apply":
             return self._json(*api_songcut_apply(obj))
+        if parsed.path == "/api/recorder/add":
+            return self._json(*api_rc_add(obj))
+        if parsed.path == "/api/recorder/remove":
+            return self._json(*api_rc_remove(obj))
+        if parsed.path == "/api/recorder/start":
+            return self._json(*api_rc_start(obj))
+        if parsed.path == "/api/recorder/stop":
+            return self._json(*api_rc_stop(obj))
+        if parsed.path == "/api/recorder/settings":
+            return self._json(*api_rc_settings(obj))
+        if parsed.path == "/api/recorder/pick":
+            return self._json(*api_rc_pick(obj))
+        if parsed.path == "/api/recorder/open":
+            return self._json(*api_rc_open(obj))
         if parsed.path == "/api/clip/pick":
             return self._json(*api_clip_pick(obj))
         if parsed.path == "/api/series/refresh":

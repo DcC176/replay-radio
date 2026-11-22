@@ -4986,6 +4986,22 @@ body.view-dd .col-right {
   pointer-events: none;
 }
 
+/* 录播姬：整页全宽。房间卡片 + 文件 + 日志的信息量比播放器重要，
+   沿用「右栏 60% 播放器」会把正文压到 400px（房间卡只能排一列）。
+   播放器**不卸载**，只缩成 1px —— 与 DD 板块同一套做法，回放不会中断。 */
+body.view-recorder .wrap {
+  grid-template-columns: minmax(0, 1fr);
+}
+body.view-recorder .col-right {
+  position: absolute;
+  top: 0; left: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* DD 内部子标签（圆角胶囊，选中实心） */
 .dd-subtabs { display: flex; gap: 8px; margin: 14px 0 0; flex-wrap: wrap; }
 .dd-sub {
@@ -5410,4 +5426,186 @@ body.view-dd .views { grid-column: 1 / -1; }
   .ddp-grid { grid-template-columns: minmax(0, 1fr); }
   .ddp-board { max-height: 260px; }
   .ddp-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ---------------------------------------------------------------- 录播姬（v1.9.15）
+   房间卡片沿用 .live-card 的观感（panel 底 + 1px 线 + 12px 圆角），只是把
+   「名字 / 状态 / 标题 / 两个 ID / 按钮」压进一张 132px 高的卡里，
+   所以内边距比 .live-card 略小。前缀统一 rc-，与其他板块零重叠。 */
+
+.rc-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 13px 0 15px;
+}
+.rc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.rc-meta b { color: var(--text); font-weight: 500; }
+.rc-meta .warn { color: #c8862a; }
+.rc-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+
+.rc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.rc-room {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-height: 132px;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.rc-room-h { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.rc-room-h b {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rc-st {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.rc-st i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.rc-st.rec { color: var(--red); }
+.rc-st.rec i { animation: rcPulse 1.5s ease-in-out infinite; }
+.rc-st.wait { color: #c8862a; }
+@keyframes rcPulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+.rc-title {
+  margin: 0;
+  min-height: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+  /* 标题可能很长（B 站标题常带一堆 emoji），两行截断，完整内容放 title */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.rc-ids { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11.5px; color: var(--muted); }
+.rc-err {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--red);
+  /* 类里没写 display，但 .rc-btns 的兄弟节点会继承 flex 行的对齐，这里显式收回 */
+  word-break: break-all;
+}
+.rc-err[hidden] { display: none; }
+
+.rc-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
+.rc-btns .btn { padding: 5px 11px; font-size: 12px; }
+
+.rc-add {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  min-height: 132px;
+  padding: 13px 14px;
+  border: 1px dashed var(--line-2);
+  border-radius: 12px;
+}
+.rc-add b { font-size: 13px; font-weight: 500; color: var(--text-2); text-align: center; }
+.rc-add-row { display: flex; gap: 6px; }
+.rc-add-row .btn { padding: 5px 12px; font-size: 12px; }
+
+.rc-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+.rc-input:focus { outline: none; border-color: var(--red); }
+.rc-sel {
+  padding: 6px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  color-scheme: light dark;
+}
+
+.rc-card { margin-bottom: 14px; }
+.rc-hsub {
+  margin-left: 8px;
+  font-style: normal;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted);
+}
+.rc-dirrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.rc-dirrow .rc-input { flex: 1 1 240px; }
+
+.rc-files { display: flex; flex-direction: column; max-height: 280px; overflow-y: auto; }
+.rc-file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 78px 116px;
+  gap: 10px;
+  align-items: center;
+  padding: 5px 2px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.rc-file:last-child { border-bottom: 0; }
+.rc-file .nm { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-file .sz,
+.rc-file .tm {
+  text-align: right;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rc-log {
+  max-height: 216px;
+  overflow-y: auto;
+  font-family: ui-monospace, Consolas, "Cascadia Mono", monospace;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+.rc-log div { display: flex; gap: 8px; }
+.rc-log .t { flex: 0 0 auto; color: var(--muted); }
+.rc-log .lv { flex: 0 0 32px; }
+.rc-log .lv-ok { color: #2f7d4a; }
+.rc-log .lv-warn { color: #b8791f; }
+.rc-log .lv-err { color: var(--red); }
+.rc-log .msg { min-width: 0; word-break: break-all; }
+
+@media (max-width: 640px) {
+  /* 窄屏只留文件名与大小；时间放不下时先砍 —— 文件名里本来就带开录时间 */
+  .rc-file { grid-template-columns: minmax(0, 1fr) 70px; }
+  .rc-file .tm { display: none; }
 }
