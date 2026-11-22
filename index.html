@@ -1123,7 +1123,8 @@ window.__BOOT_T0 = Date.now();
       <div class="live-card" style="margin-top:18px">
         <div class="live-card-h">分段与标注</div>
         <label class="seg-auto">本场分段
-          <button class="btn small ghost" id="btn-open-chapters" type="button">打开分段面板</button>
+          <button class="btn small ghost" id="btn-open-chapters" type="button"
+                  aria-expanded="false">打开分段面板</button>
         </label>
         <p class="live-note">列出当前这一场的分段，可跳转、可多选保存成 MP4。</p>
         <label class="seg-auto" style="margin-top:10px">片段标注
@@ -1494,7 +1495,9 @@ window.__BOOT_T0 = Date.now();
     </div>
 
     <div class="mark-panel" id="mark-panel" hidden>
-      <div class="qp-h">标注片段</div>
+      <div class="qp-h">标注片段
+        <button class="panel-x" id="mark-close" type="button" aria-label="关闭标注片段" title="关闭">✕</button>
+      </div>
       <p>分段由 <code>tools/auto_segments.py</code> 自动检测。这里<b>直接改</b>不准的地方：
         列表就是当前分P 的每一段 —— <b>起 / 止</b> 把边界设成当前播放位置，
         <b>拆</b> 在当前位置切成两段，<b>并</b> 与下一段合并，<b>删</b> 去掉多余段。
@@ -1512,7 +1515,9 @@ window.__BOOT_T0 = Date.now();
     </div>
 
     <div class="chapters-panel" id="chapters-panel" hidden>
-      <div class="qp-h">本场分段<span id="chapters-sub"></span></div>
+      <div class="qp-h">本场分段<span id="chapters-sub"></span>
+        <button class="panel-x" id="chapters-close" type="button" aria-label="关闭本场分段" title="关闭">✕</button>
+      </div>
       <div class="chap-legend">第 N 次 = 画面「已唱」第 N 次登记（不等于全场歌曲总数，
         漏读时会偏小）；约 N 首 = 按段长估算；悬停可看起止时间与来源。</div>
       <div class="chap-note" id="chap-note"></div>

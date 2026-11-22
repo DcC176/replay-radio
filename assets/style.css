@@ -1657,6 +1657,23 @@ body.view-multi .pv-ratewrap { display: none; }
    与分段面板同一套外观：它也是「本场的工具」，放在播放器下方同一列。
    行内要能改起止时间与歌名，所以输入框要小、要能缩（288px 侧栏下也放得下）。 */
 .sc-close { float: right; margin-top: -2px; }
+/* 各功能面板统一的 ✕ 关闭按钮（本场分段 / 标注片段） */
+.panel-x {
+  float: right;
+  margin: -2px -4px 0 0;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  line-height: 24px;
+  text-align: center;
+  cursor: pointer;
+}
+.panel-x:hover { background: rgba(var(--ink), .08); color: var(--text); }
 .sc-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 4px; }
 .sc-progress {
   height: 4px;
@@ -2063,10 +2080,25 @@ body.theater .strip-fold { display: flex; }
 }
 .cc-item img { display: block; width: 132px; height: 74px; object-fit: cover; }
 .cc-row.portrait .cc-item img { width: 78px; height: 104px; }
-.cc-item.is-default {
+.cc-item.is-picked {
+  border-color: color-mix(in srgb, var(--text) 55%, transparent);
+  box-shadow: 0 0 0 2px rgba(var(--ink), .12);
+}
+.cc-item.is-chosen {
   border-color: color-mix(in srgb, var(--red) 62%, transparent);
   box-shadow: 0 0 0 2px var(--red-soft);
 }
+.cc-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 7px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.cc-foot.muted { color: var(--muted); }
+.cc-foot .btn { padding: 4px 10px; font-size: 11.5px; }
 .cc-no {
   position: absolute;
   left: 4px;
@@ -2092,6 +2124,7 @@ body.theater .strip-fold { display: flex; }
   font-size: 10px;
   line-height: 16px;
 }
+.cc-badge.pick { background: rgba(0, 0, 0, .62); color: #fff; }
 .cpick {
   display: none; flex: none; position: relative;
   width: 14px; height: 14px; border-radius: 4px;

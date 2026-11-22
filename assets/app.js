@@ -1683,6 +1683,7 @@
     clipNames: {},                          // cid@start -> 用户给这一段起的名字（空 = 自动）
     clipCovers: [],                         // 最近一批保存结果里的封面候选
     clipCoverOrient: {},                    // 切片名 -> '16x9' | '3x4'（预览按哪种方向看）
+    clipCoverPick: {},                      // 切片名 -> 用户点选、尚未确认的候选序号
     clipBusy: false,                        // 正在保存，防重复提交
     qn: store.get('xl_qn', 80),             // 请求的清晰度；B 站会按登录态降级到最高可用
     qnDegraded: false,                      // 本次档位是不是「降级来的」（是的话不写进 xl_qn）
@@ -5604,7 +5605,7 @@
   function toggleChapters(on) {
     var next = typeof on === 'boolean' ? on : el.chaptersPanel.hidden;
     el.chaptersPanel.hidden = !next;
-    if (el.btnChapters) el.btnChapters.setAttribute('aria-expanded', String(next));
+    if (el.btnOpenChapters) el.btnOpenChapters.setAttribute('aria-expanded', String(next));
     if (next) {
       if (el.songcutPanel) el.songcutPanel.hidden = true;   // 两块面板占同一位置
       renderChapters();
@@ -6568,7 +6569,9 @@
     });
   }
 
-  /* 保存结果里的封面候选：每段一张卡，可切「横屏 16:9 / 竖屏 3:4」预览。 */
+  /* 保存结果里的封面候选：每段一张卡，可切「横屏 16:9 / 竖屏 3:4」预览。
+     ⚠️ 保存切片时后端**不写任何封面文件**（只记候选时间点），必须由用户点一张
+        再按「确认使用这一版」才落盘；这里不做任何自动预选。 */
   function renderClipCovers() {
     var box = document.getElementById('clip-covers');
     if (!box) return;
@@ -6579,34 +6582,82 @@
       return;
     }
     box.hidden = false;
-    box.innerHTML = '<div class="cc-title">封面候选<em>每段已生成横屏 16:9 与竖屏 3:4 两种 PNG；'
-      + '随机选中的一版另存为 default 文件，选择结果写在 .covers.json</em></div>'
+    box.innerHTML = '<div class="cc-title">封面候选<em>保存时只记录候选时间点；'
+      + '点一张缩略图选中，再点「确认使用这一版」，才会生成并保存横屏 16:9 / 竖屏 3:4 两张 PNG。</em></div>'
       + rows.map(function (x) {
         var c = x.covers || {};
         var cands = c.candidates || [];
+        var chosen = c.chosen || null;
         var base = x.name || '';
         var orient = state.clipCoverOrient[base] || '16x9';
-        var defIdx = +c.defaultIndex || 0;
-        return '<div class="cc-card" data-base="' + esc(base) + '">'
+        var pick = +state.clipCoverPick[base] || 0;
+        var mp4 = x.path || '';
+        var dirty = pick > 0 && (!chosen || pick !== chosen.index);
+        var head = dirty ? ('已选第 ' + pick + ' 版 · 待确认')
+          : (chosen ? ('已确认第 ' + chosen.index + ' 版') : '未选择');
+        var foot;
+        if (dirty) {
+          foot = '<div class="cc-foot"><span>已选第 ' + pick + ' 版</span>'
+            + '<button type="button" class="btn small primary" data-cc-confirm="' + pick
+            + '" data-base="' + esc(base) + '">确认使用这一版</button>'
+            + '<button type="button" class="btn small ghost" data-cc-cancel="1" data-base="'
+            + esc(base) + '">取消选择</button></div>';
+        } else if (chosen) {
+          foot = '<div class="cc-foot muted">已保存：'
+            + esc(base.replace(/\.[^.]+$/, ''))
+            + '_cover_16x9.png / _cover_3x4.png</div>';
+        } else {
+          foot = '<div class="cc-foot muted">点一张缩略图选定封面（不会自动选）</div>';
+        }
+        return '<div class="cc-card" data-base="' + esc(base) + '" data-path="' + esc(mp4) + '">'
           + '<div class="cc-head"><b title="' + esc(base) + '">' + esc(base) + '</b>'
-          + '<span>' + cands.length + ' 版候选 · 默认第 ' + defIdx + ' 版</span>'
+          + '<span>' + cands.length + ' 版候选 · ' + head + '</span>'
           + '<div class="cc-tabs"><button type="button" data-cc-orient="16x9"'
           + (orient === '16x9' ? ' class="on"' : '') + '>横屏 16:9</button>'
           + '<button type="button" data-cc-orient="3x4"'
           + (orient === '3x4' ? ' class="on"' : '') + '>竖屏 3:4</button></div></div>'
           + '<div class="cc-row' + (orient === '3x4' ? ' portrait' : '') + '">'
           + cands.map(function (cand) {
-            var src = orient === '3x4' ? cand.portrait : cand.landscape;
-            return '<button type="button" class="cc-item' + (cand.index === defIdx ? ' is-default' : '')
-              + '" data-src="' + esc(src) + '" title="第 ' + cand.index + ' 版 · '
-              + cand.at + ' 秒 · 点击看大图">'
-              + '<img loading="lazy" alt="第 ' + cand.index + ' 版封面" src="/api/clip/cover?path='
-              + encodeURIComponent(src) + '">'
-              + '<span class="cc-no">' + cand.index + '</span>'
-              + (cand.index === defIdx ? '<span class="cc-badge">默认</span>' : '')
-              + '</button>';
-          }).join('') + '</div></div>';
+            var src = '/api/clip/cover/preview?path=' + encodeURIComponent(mp4)
+              + '&index=' + cand.index + '&orient=' + orient;
+            var isChosen = !!(chosen && chosen.index === cand.index);
+            var isPick = pick === cand.index && !(chosen && chosen.index === cand.index);
+            var cls = 'cc-item' + (isChosen ? ' is-chosen' : '') + (isPick ? ' is-picked' : '');
+            var badge = isChosen ? '<span class="cc-badge">已确认</span>'
+              : (isPick ? '<span class="cc-badge pick">已选</span>' : '');
+            return '<button type="button" class="' + cls + '" data-cc-pick="' + cand.index
+              + '" data-base="' + esc(base) + '" title="第 ' + cand.index + ' 版 · '
+              + cand.at + ' 秒">'
+              + '<img loading="lazy" alt="第 ' + cand.index + ' 版封面" src="' + src + '">'
+              + '<span class="cc-no">' + cand.index + '</span>' + badge + '</button>';
+          }).join('') + '</div>' + foot + '</div>';
       }).join('');
+  }
+
+  function confirmClipCover(base, mp4, index, btn) {
+    if (btn) btn.disabled = true;
+    fetch('/api/clip/cover/choose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: mp4, index: index })
+    }).then(function (r) {
+      return r.json().then(function (d) { return { ok: r.ok, d: d }; });
+    }).then(function (x) {
+      if (!x.ok) {
+        pvToast('保存封面失败：' + ((x.d && x.d.error) || '未知原因'));
+        if (btn) btn.disabled = false;
+        return;
+      }
+      (state.clipCovers || []).forEach(function (row) {
+        if (row.name === base && row.covers) row.covers.chosen = x.d.chosen;
+      });
+      delete state.clipCoverPick[base];
+      renderClipCovers();
+      pvToast('封面已保存');
+    }).catch(function (e) {
+      if (btn) btn.disabled = false;
+      pvToast('保存封面失败：' + e);
+    });
   }
 
   function updateClipBar() {
@@ -6685,6 +6736,7 @@
     var dir = inp ? inp.value.trim() : '';
     state.clipBusy = true;
     state.clipCovers = [];
+    state.clipCoverPick = {};
     renderClipCovers();
     updateClipBar();
     clipNote('正在准备保存 ' + items.length + ' 段…');
@@ -7414,6 +7466,10 @@
 
     el.ctrlVol.value = el.player.muted ? 0 : el.player.volume;
     el.btnQpClose.addEventListener('click', function () { toggleQuality(false); });
+    var chaptersClose = document.getElementById('chapters-close');
+    if (chaptersClose) chaptersClose.addEventListener('click', function () { toggleChapters(false); });
+    var markClose = document.getElementById('mark-close');
+    if (markClose) markClose.addEventListener('click', function () { toggleMarking(false); });
 
     el.btnLogin.addEventListener('click', openLogin);
     el.btnLogin2.addEventListener('click', function () { toggleQuality(false); openLogin(); });
@@ -7510,8 +7566,26 @@
           }
           return;
         }
-        var item = e.target.closest ? e.target.closest('.cc-item') : null;
-        if (item) window.open(item.getAttribute('data-src'), '_blank', 'noopener');
+        var pickBtn = e.target.closest ? e.target.closest('[data-cc-pick]') : null;
+        if (pickBtn) {
+          var b1 = pickBtn.getAttribute('data-base');
+          state.clipCoverPick[b1] = +pickBtn.getAttribute('data-cc-pick');
+          renderClipCovers();
+          return;
+        }
+        var okBtn = e.target.closest ? e.target.closest('[data-cc-confirm]') : null;
+        if (okBtn) {
+          var card = okBtn.closest('.cc-card');
+          confirmClipCover(okBtn.getAttribute('data-base'),
+            card ? card.getAttribute('data-path') : '',
+            +okBtn.getAttribute('data-cc-confirm'), okBtn);
+          return;
+        }
+        var cancel = e.target.closest ? e.target.closest('[data-cc-cancel]') : null;
+        if (cancel) {
+          delete state.clipCoverPick[cancel.getAttribute('data-base')];
+          renderClipCovers();
+        }
       });
     }
     var clipOpenBtn = document.getElementById('btn-clip');

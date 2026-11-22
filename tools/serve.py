@@ -31,7 +31,6 @@ import html
 import json
 import os
 import queue
-import random
 import re
 import select
 import shutil
@@ -1065,7 +1064,8 @@ STATIONLESS_OK = (
     "/api/stations", "/api/stations/probe", "/api/stations/save", "/api/stations/delete",
     "/api/stations/main",
     "/api/ping", "/api/status", "/api/img", "/api/quit",
-    "/api/clip/cover",         # 本地封面 PNG 预览，与主播无关
+    "/api/clip/cover", "/api/clip/cover/preview",
+    "/api/clip/cover/choose",  # 本地封面预览/确认，与主播无关
     "/api/page/alive", "/api/page/bye",
     "/api/protocol/register", "/api/protocol/unregister",
     "/api/following/live",     # 只依赖登录态，与有没有注册主播无关
@@ -1388,18 +1388,20 @@ def _clip_unique(path):
     return path
 
 
-# ---- 封面：每个切片抽 5 帧，每帧出 16:9 与 3:4 两张 PNG --------------------
-# 文件名一律以「切片名」开头，后缀用 16x9 / 3x4 明确区分方向：
-#   <切片名>_cover_16x9_01.png … _cover_16x9_05.png
-#   <切片名>_cover_3x4_01.png  … _cover_3x4_05.png
-# 另存两张稳定名字的默认封面副本（随机挑一版）：
-#   <切片名>_default_16x9.png / <切片名>_default_3x4.png
-# 选择结果落在 <切片名>.covers.json（含候选、默认序号、时间点），可追踪。
+# ---- 封面：保存时只记候选时间点，用户确认后才落盘 ---------------------------
+# 保存切片时**不写任何封面文件**：只在 <切片名>.covers.json 里记 5 个候选时间点。
+# 页面按需调用 preview 抽缩略图；用户点「确认使用这一版」后，才把选中的那一帧
+# 按 1920x1080（16:9）与 1080x1440（3:4）落成两张 PNG：
+#   <切片名>_cover_16x9.png / <切片名>_cover_3x4.png
+# 其余候选只存在于视频里（随时可重新抽），不占磁盘，也不会被误认为「已用封面」。
 CLIP_COVER_N = 5
 CLIP_COVER_16X9 = (1920, 1080)
 CLIP_COVER_3X4 = (1080, 1440)
-CLIP_COVER_RE = re.compile(r"(_cover_(?:16x9|3x4)_\d{2}|_default_(?:16x9|3x4))\.png$",
-                           re.I)
+CLIP_COVER_PREVIEW = {"16x9": (480, 270), "3x4": (270, 360)}
+CLIP_COVER_RE = re.compile(
+    r"(_cover_(?:16x9|3x4)(?:_\d{2})?|_default_(?:16x9|3x4))\.png$", re.I)
+COVER_PREVIEW_CACHE = {}
+COVER_PREVIEW_CACHE_MAX = 160
 
 
 def _clip_base_name(raw, fallback):
@@ -1409,10 +1411,23 @@ def _clip_base_name(raw, fallback):
     return s or fallback
 
 
-def _clip_cover_filter():
-    lw, lh = CLIP_COVER_16X9
-    pw, ph = CLIP_COVER_3X4
-    # increase + crop：先铺满再居中裁切，保证严格比例、不拉变形
+def _clip_meta_path(mp4):
+    return os.path.splitext(mp4)[0] + ".covers.json"
+
+
+def _clip_cover_times(dur):
+    """候选时间点：避开头尾 5%，均匀铺满。"""
+    dur = float(dur or 0)
+    lo = max(0.2, dur * 0.05)
+    hi = max(lo, dur * 0.94)
+    step = (hi - lo) / max(1, CLIP_COVER_N - 1)
+    return [round(lo + step * i, 2) for i in range(CLIP_COVER_N)]
+
+
+def _clip_cover_filter(size):
+    """increase + crop：先铺满再居中裁切，严格比例、不拉变形。"""
+    lw, lh = size["16x9"]
+    pw, ph = size["3x4"]
     return ("[0:v]split=2[a][b];"
             "[a]scale=%d:%d:force_original_aspect_ratio=increase,"
             "crop=%d:%d,setsar=1[l];"
@@ -1421,66 +1436,96 @@ def _clip_cover_filter():
             % (lw, lh, lw, lh, pw, ph, pw, ph))
 
 
-def _clip_covers(out, dur):
-    """给已保存的 mp4 生成封面候选，返回候选/默认/侧车路径。"""
+def _clip_cover_meta(out, dur):
+    """保存时写侧车：只记候选时间点，chosen 为空，等用户确认。"""
+    times = _clip_cover_times(dur)
+    meta = {"video": os.path.basename(out),
+            "base": os.path.basename(os.path.splitext(out)[0]),
+            "count": len(times),
+            "candidates": [{"index": i + 1, "at": t} for i, t in enumerate(times)],
+            "chosen": None,
+            "createdAt": int(time.time())}
+    _write_json_file(_clip_meta_path(out), meta)
+    return meta
+
+
+def _clip_cover_candidate(mp4, index):
+    meta = _read_json_file(_clip_meta_path(mp4))
+    if not isinstance(meta, dict):
+        raise RuntimeError("这一段的封面信息不见了（.covers.json 缺失）")
+    for c in (meta.get("candidates") or []):
+        if int(c.get("index") or 0) == int(index):
+            return meta, c
+    raise RuntimeError("没有第 %s 版候选" % index)
+
+
+def _clip_cover_preview(mp4, index, orient):
+    """按需抽一张小图给页面预览（不落盘，内存缓存）。"""
+    orient = "3x4" if str(orient) == "3x4" else "16x9"
+    meta, cand = _clip_cover_candidate(mp4, index)
+    key = (os.path.abspath(mp4), int(index), orient, os.path.getmtime(mp4))
+    hit = COVER_PREVIEW_CACHE.get(key)
+    if hit:
+        return hit
     ff = seg_ffmpeg()
     if not ff:
-        raise RuntimeError("本机没找到 ffmpeg，无法生成封面")
-    base = os.path.splitext(out)[0]
-    base_name = os.path.basename(base)
+        raise RuntimeError("本机没找到 ffmpeg")
     try:
         from auto_segments import NO_WINDOW, HIDE_SI
     except Exception:
         NO_WINDOW, HIDE_SI = 0, None
-    dur = float(dur or 0)
-    lo = max(0.2, dur * 0.05)
-    hi = max(lo, dur * 0.94)
-    step = (hi - lo) / max(1, CLIP_COVER_N - 1)
-    cands = []
-    for i in range(CLIP_COVER_N):
-        at = lo + step * i
-        lp = "%s_cover_16x9_%02d.png" % (base, i + 1)
-        pp = "%s_cover_3x4_%02d.png" % (base, i + 1)
-        # 先写 .part.png 再改名：半途失败不会在最终文件名下留一张坏图，
-        # 也避免为了清理半成品去删文件（本机的删除会被移到回收站）。
-        lt = lp[:-4] + ".part.png"
-        pt = pp[:-4] + ".part.png"
-        cmd = [ff, "-hide_banner", "-loglevel", "error",
-               "-ss", "%.3f" % at, "-i", out,
-               "-filter_complex", _clip_cover_filter(),
-               "-map", "[l]", "-frames:v", "1", "-update", "1", "-y", lt,
-               "-map", "[p]", "-frames:v", "1", "-update", "1", "-y", pt]
-        r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                           text=True, encoding="utf-8", errors="ignore",
-                           timeout=90, creationflags=NO_WINDOW, startupinfo=HIDE_SI)
-        if r.returncode != 0 or not os.path.exists(lt) or not os.path.exists(pt):
-            continue
-        os.replace(lt, lp)
-        os.replace(pt, pp)
-        cands.append({"index": i + 1, "at": round(at, 2),
-                      "landscape": lp, "portrait": pp})
-    if not cands:
-        raise RuntimeError("抽帧失败（视频可能没有画面轨）")
-    pick = random.choice(cands)
-    dl = base + "_default_16x9.png"
-    dp = base + "_default_3x4.png"
-    shutil.copyfile(pick["landscape"], dl)
-    shutil.copyfile(pick["portrait"], dp)
-    meta = {"video": os.path.basename(out), "base": base_name,
-            "count": len(cands), "defaultIndex": pick["index"],
-            "default": {"landscape": os.path.basename(dl),
-                        "portrait": os.path.basename(dp)},
-            "candidates": [{"index": c["index"], "at": c["at"],
-                            "landscape": os.path.basename(c["landscape"]),
-                            "portrait": os.path.basename(c["portrait"])}
-                           for c in cands],
-            "createdAt": int(time.time())}
-    _write_json_file(base + ".covers.json", meta)
-    return {"dir": os.path.dirname(out), "count": len(cands),
-            "defaultIndex": pick["index"],
-            "default": {"landscape": dl, "portrait": dp},
-            "candidates": cands,
-            "meta": base + ".covers.json"}
+    w, h = CLIP_COVER_PREVIEW[orient]
+    vf = ("scale=%d:%d:force_original_aspect_ratio=increase,"
+          "crop=%d:%d,setsar=1" % (w, h, w, h))
+    cmd = [ff, "-hide_banner", "-loglevel", "error",
+           "-ss", "%.3f" % float(cand.get("at") or 0), "-i", mp4,
+           "-frames:v", "1", "-vf", vf, "-f", "image2pipe", "-vcodec", "png", "-"]
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       timeout=60, creationflags=NO_WINDOW, startupinfo=HIDE_SI)
+    if r.returncode != 0 or not r.stdout.startswith(b"\x89PNG"):
+        raise RuntimeError("抽帧失败：%s" % (r.stderr or b"")[:120])
+    if len(COVER_PREVIEW_CACHE) >= COVER_PREVIEW_CACHE_MAX:
+        COVER_PREVIEW_CACHE.clear()
+    COVER_PREVIEW_CACHE[key] = r.stdout
+    return r.stdout
+
+
+def _clip_cover_choose(mp4, index):
+    """用户确认的封面：把该版按两种比例落盘，并写进侧车。只动这一段的文件。"""
+    ff = seg_ffmpeg()
+    if not ff:
+        raise RuntimeError("本机没找到 ffmpeg")
+    meta, cand = _clip_cover_candidate(mp4, index)
+    try:
+        from auto_segments import NO_WINDOW, HIDE_SI
+    except Exception:
+        NO_WINDOW, HIDE_SI = 0, None
+    base = os.path.splitext(mp4)[0]
+    lp = base + "_cover_16x9.png"
+    pp = base + "_cover_3x4.png"
+    # 先写 .part.png 再改名，失败时不会在正式文件名下留坏图
+    lt = lp[:-4] + ".part.png"
+    pt = pp[:-4] + ".part.png"
+    cmd = [ff, "-hide_banner", "-loglevel", "error",
+           "-ss", "%.3f" % float(cand.get("at") or 0), "-i", mp4,
+           "-filter_complex", _clip_cover_filter({"16x9": CLIP_COVER_16X9,
+                                                  "3x4": CLIP_COVER_3X4}),
+           "-map", "[l]", "-frames:v", "1", "-update", "1", "-y", lt,
+           "-map", "[p]", "-frames:v", "1", "-update", "1", "-y", pt]
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                       text=True, encoding="utf-8", errors="ignore",
+                       timeout=90, creationflags=NO_WINDOW, startupinfo=HIDE_SI)
+    if r.returncode != 0 or not os.path.exists(lt) or not os.path.exists(pt):
+        raise RuntimeError("生成封面失败：%s" % (r.stderr or "")[:160])
+    os.replace(lt, lp)
+    os.replace(pt, pp)
+    meta["chosen"] = {"index": int(index), "at": cand.get("at"),
+                      "landscape": os.path.basename(lp),
+                      "portrait": os.path.basename(pp),
+                      "confirmedAt": int(time.time())}
+    _write_json_file(_clip_meta_path(mp4), meta)
+    return {"chosen": meta["chosen"], "landscape": lp, "portrait": pp}
+
 
 
 CLIP_W, CLIP_H = 1920, 1080          # 保存成品统一 1080p
@@ -1616,12 +1661,12 @@ def _clip_worker(items, outdir):
             proc.wait(timeout=1800)
             if proc.returncode != 0:
                 raise RuntimeError("".join(errbuf) or ("ffmpeg 退出码 %s" % proc.returncode))
-            # 封面失败不算整段失败：视频已经落盘，只是少一组预览
+            # 封面：只记候选时间点，等用户在页面里挑一版再落盘
             covers = {}
             try:
                 with CLIP_LOCK:
-                    CLIP_JOB["current"] = "%s（生成封面…）" % name
-                covers = _clip_covers(out, dur)
+                    CLIP_JOB["current"] = "%s（记录封面候选…）" % name
+                covers = _clip_cover_meta(out, dur)
             except Exception as ce:
                 covers = {"error": str(ce)[:200]}
             with CLIP_LOCK:
@@ -1691,42 +1736,77 @@ def api_clip_status():
     return 200, d
 
 
-def api_clip_cover(raw):
-    """GET /api/clip/cover?path= —— 把本机封面 PNG 发给页面预览。
+def _clip_allowed_path(raw, exts):
+    """只放行「本批输出目录 / 默认目录」下、扩展名匹配的本机文件。
 
-    只放行「本批输出目录 / 默认目录」下、文件名符合封面命名规则的文件：
     这是本机服务，但也不该变成任意路径读取器。
     """
     p = os.path.abspath(str(raw or "").strip())
-    if not p.lower().endswith(".png") or not os.path.isfile(p):
-        return 404, None, None
-    if not CLIP_COVER_RE.search(os.path.basename(p)):
-        return 403, None, None
+    if not p or not os.path.isfile(p):
+        return ""
+    if os.path.splitext(p)[1].lower() not in exts:
+        return ""
     allowed = [_clip_default_dir()]
     with CLIP_LOCK:
         allowed.append(CLIP_JOB.get("dir") or "")
         for d in (CLIP_JOB.get("done") or []):
             if d.get("path"):
                 allowed.append(os.path.dirname(d["path"]))
-    ok = False
     for d in allowed:
         d = _clip_check_dir(d or "") or ""
         if not d:
             continue
         try:
             if os.path.commonpath([p, os.path.abspath(d)]) == os.path.abspath(d):
-                ok = True
-                break
+                return p
         except ValueError:
             pass
-    if not ok:
+    return ""
+
+
+def api_clip_cover(raw):
+    """GET /api/clip/cover?path= —— 已确认的封面 PNG（或旧版候选图）。"""
+    p = _clip_allowed_path(raw, (".png",))
+    if not p:
+        return 404, None, None
+    if not CLIP_COVER_RE.search(os.path.basename(p)):
         return 403, None, None
     try:
         with open(p, "rb") as f:
-            body = f.read(12 * 1024 * 1024)
+            return 200, "image/png", f.read(12 * 1024 * 1024)
     except OSError:
         return 404, None, None
-    return 200, "image/png", body
+
+
+def api_clip_cover_preview(raw, index, orient):
+    """GET /api/clip/cover/preview?path=<mp4>&index=N&orient=16x9|3x4
+
+    现场抽一张小图（不落盘），供用户挑封面用。
+    """
+    p = _clip_allowed_path(raw, (".mp4",))
+    if not p:
+        return 404, None, None
+    try:
+        return 200, "image/png", _clip_cover_preview(p, index, orient)
+    except Exception:
+        return 404, None, None
+
+
+def api_clip_cover_choose(obj):
+    """POST /api/clip/cover/choose {path, index} —— 用户确认的封面才落盘。"""
+    p = _clip_allowed_path(obj.get("path"), (".mp4",))
+    if not p:
+        return 400, {"error": "找不到这一段视频（或不在保存目录里）"}
+    try:
+        index = int(obj.get("index"))
+    except (TypeError, ValueError):
+        return 400, {"error": "缺少要使用的候选序号"}
+    try:
+        r = _clip_cover_choose(p, index)
+    except Exception as e:
+        return 400, {"error": str(e)[:160]}
+    return 200, {"ok": True, "chosen": r["chosen"],
+                 "landscape": r["landscape"], "portrait": r["portrait"]}
 
 
 def _pick_dir_win32(initial=""):
@@ -8311,8 +8391,13 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(code, obj)
         if parsed.path == "/api/clip/status":
             return self._json(*api_clip_status())
-        if parsed.path == "/api/clip/cover":
-            code, ct, body = api_clip_cover(q.get("path", [""])[0])
+        if parsed.path in ("/api/clip/cover", "/api/clip/cover/preview"):
+            if parsed.path == "/api/clip/cover":
+                code, ct, body = api_clip_cover(q.get("path", [""])[0])
+            else:
+                code, ct, body = api_clip_cover_preview(
+                    q.get("path", [""])[0], q.get("index", [""])[0],
+                    q.get("orient", [""])[0])
             if code != 200 or body is None:
                 return self._json(code, {"error": "封面不可用"})
             self.send_response(200)
@@ -8543,6 +8628,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_rc_reveal(obj))
         if parsed.path == "/api/clip/pick":
             return self._json(*api_clip_pick(obj))
+        if parsed.path == "/api/clip/cover/choose":
+            return self._json(*api_clip_cover_choose(obj))
         if parsed.path == "/api/series/refresh":
             return self._json(*api_series_refresh(obj))
         if parsed.path == "/api/page/bye":
