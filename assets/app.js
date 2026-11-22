@@ -4393,6 +4393,8 @@
        省得在别的板块每秒发两个请求。 */
     if (name === 'recorder') rcEnter();
     if (prev === 'recorder' && name !== 'recorder') rcLeave();
+    /* 设置页的「后台应用图标」要显示真实状态：进设置时拉一次录播姬设置 */
+    if (name === 'settings') rcTrayLoad();
     /* DD 板块的子页面：进入时按当前子标签拉数据（播放器缩在后台，播放不中断） */
     if (name === 'dd') ddSubLoad();
 
@@ -5798,17 +5800,25 @@
         把用户正在输入的「添加房间」清空、把焦点弄丢（实测过）。
      房间集合变化时才重建卡片结构，其余只改文本。 */
 
-  var rcState = { data: null, files: null, timer: 0, tab: 'rooms' };
+  var rcState = {
+    data: null, files: null, timer: 0, tick: 0, tab: 'rooms', at: 0,
+    sort: localStorage.getItem('xl_rc_sort') || 'none',
+    showTitle: localStorage.getItem('xl_rc_title') !== '0',
+    showLog: localStorage.getItem('xl_rc_log') !== '0'
+  };
 
   var RC_LABEL = { idle: '未监控', waiting: '等待开播', recording: '录制中', error: '出错' };
   var RC_CLASS = { idle: '', waiting: 'wait', recording: 'rec', error: 'err' };
 
   var RC_TABS = ['rooms', 'files', 'log', 'settings'];
 
+  function rcQ(id) { return document.getElementById(id); }
+
   function rcSetTab(tab) {
+    if (tab === 'log' && !rcState.showLog) tab = 'rooms';
     rcState.tab = RC_TABS.indexOf(tab) >= 0 ? tab : 'rooms';
     RC_TABS.forEach(function (k) {
-      var p = document.getElementById('rc-pane-' + k);
+      var p = rcQ('rc-pane-' + k);
       if (p) p.hidden = (k !== rcState.tab);
     });
     if (el.rcNav) {
@@ -5817,6 +5827,7 @@
       });
     }
     if (rcState.tab === 'log' && el.rcLog) el.rcLog.scrollTop = el.rcLog.scrollHeight;
+    if (rcState.tab === 'settings') rcFnamePreview();
   }
 
   /* 左栏：功能计数 + 房间快捷列表 + 自动录制开关。
@@ -5846,7 +5857,7 @@
       });
     }
     var auto = !!(d.settings && d.settings.auto);
-    [el.rcAuto, el.rcAuto2].forEach(function (cb) {
+    [el.rcAuto, el.rcAuto2, rcQ('rc-auto3')].forEach(function (cb) {
       if (cb && cb.checked !== auto) cb.checked = auto;
     });
   }
@@ -5865,18 +5876,47 @@
     return (d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
   }
 
+  /* 录制时长要**连续**走：状态 2.5 秒才拉一次，只靠服务端的 since/now 会一跳一跳，
+     所以本地按「上次拉取时刻 + 已经过去的秒数」补差。 */
+  function rcElapsed(r) {
+    if (!r || !r.since) return 0;
+    var base = (rcState.data && rcState.data.now) || 0;
+    var drift = rcState.at ? (Date.now() - rcState.at) / 1000 : 0;
+    return Math.max(0, base + drift - r.since);
+  }
+
+  function rcSorted(rooms) {
+    var arr = (rooms || []).slice();
+    if (rcState.sort === 'room') {
+      arr.sort(function (a, b) { return (+a.room || 0) - (+b.room || 0); });
+    } else if (rcState.sort === 'state') {
+      var rank = { recording: 0, waiting: 1, error: 2, idle: 3 };
+      arr.sort(function (a, b) {
+        var d = (rank[a.state] || 9) - (rank[b.state] || 9);
+        return d || ((+a.room || 0) - (+b.room || 0));
+      });
+    }
+    return arr;
+  }
+
   function rcRoomHtml(r) {
     return '<div class="rc-room" data-room="' + esc(r.room) + '">'
-      + '<div class="rc-room-h"><b title="' + esc(r.name) + '">' + esc(r.name) + '</b>'
-      + '<span class="rc-st" data-role="st"><i></i><span data-role="sttxt">未监控</span></span></div>'
+      + '<div class="rc-room-top">'
+      + faceHtml(r.face, 'rc-face', r.name)
+      + '<div class="rc-room-id"><b class="rc-name" title="' + esc(r.name) + '">'
+      + esc(r.name) + '</b><span class="rc-room-no"><span>房间 ' + esc(r.room) + '</span>'
+      + (r.uid ? '<span>UID ' + esc(r.uid) + '</span>' : '') + '</span></div>'
+      + '<span class="rc-st" data-role="st"><i></i><span data-role="sttxt">未监控</span></span>'
+      + '</div>'
       + '<p class="rc-title" data-role="title"></p>'
-      + '<div class="rc-ids"><span>房间 ' + esc(r.room) + '</span>'
-      + (r.uid ? '<span>UID ' + esc(r.uid) + '</span>' : '') + '</div>'
+      + '<div class="rc-meta-row"><span class="rc-area" data-role="area"></span>'
+      + '<span class="rc-size" data-role="size"></span></div>'
       + '<p class="rc-err" data-role="err" hidden></p>'
       + '<div class="rc-btns">'
-      + '<button class="btn small primary" data-act="toggle" type="button">开始监控</button>'
-      + '<button class="btn small ghost" data-act="dir" type="button">打开目录</button>'
-      + '<button class="btn small ghost" data-act="del" type="button">删除</button>'
+      + '<button class="btn small primary" data-act="toggle" type="button" title="开始/停止监控">开始</button>'
+      + '<button class="btn small ghost" data-act="live" type="button" title="在新标签页打开原直播间">直播间</button>'
+      + '<button class="btn small ghost" data-act="dir" type="button" title="打开这一路的输出目录">目录</button>'
+      + '<button class="btn small ghost" data-act="del" type="button" title="从列表里删除这个房间">删除</button>'
       + '</div></div>';
   }
 
@@ -5894,11 +5934,12 @@
   function rcPaintRooms(d) {
     var box = el.rcGrid;
     if (!box) return;
-    var rooms = d.rooms || [];
-    var sig = rooms.map(function (r) { return r.room; }).join(',');
+    var rooms = rcSorted(d.rooms || []);
+    var sig = rooms.map(function (r) { return r.room; }).join(',') + '|' + rcState.sort;
     if (box.getAttribute('data-sig') !== sig) {
       box.setAttribute('data-sig', sig);
       box.innerHTML = rooms.map(rcRoomHtml).join('') + rcAddHtml();
+      bindFaceFallback(box);
     }
     rooms.forEach(function (r) {
       var card = box.querySelector('.rc-room[data-room="' + r.room + '"]');
@@ -5906,7 +5947,7 @@
       var st = r.state || 'idle';
       var sb = card.querySelector('[data-role="st"]');
       var txt = RC_LABEL[st] || st;
-      if (st === 'recording' && r.since) txt = '录制中 ' + fmtClock((d.now || 0) - r.since);
+      if (st === 'recording') txt = '录制中 ' + fmtClock(rcElapsed(r));
       if (sb) {
         sb.className = 'rc-st ' + (RC_CLASS[st] || '');
         var tt = sb.querySelector('[data-role="sttxt"]');
@@ -5918,6 +5959,20 @@
         tl.textContent = r.title || (r.enabled ? '等待开播…' : '还没开始监控');
         tl.title = r.title || '';
       }
+      var ar = card.querySelector('[data-role="area"]');
+      if (ar) {
+        ar.textContent = r.area || '';
+        ar.hidden = !r.area;
+      }
+      var sz = card.querySelector('[data-role="size"]');
+      if (sz) {
+        var bits = [];
+        if (st === 'recording' && r.bytes) bits.push(rcSize(r.bytes));
+        if (r.segNo > 1) bits.push('第 ' + r.segNo + ' 段');
+        if (r.hasXml) bits.push('弹幕');
+        if (r.hasCover) bits.push('封面');
+        sz.textContent = bits.join(' · ');
+      }
       var er = card.querySelector('[data-role="err"]');
       if (er) {
         er.hidden = !r.error;
@@ -5925,23 +5980,32 @@
       }
       var btn = card.querySelector('[data-act="toggle"]');
       if (btn) {
-        btn.textContent = r.enabled ? '停止监控' : '开始监控';
+        btn.textContent = r.enabled ? '停止' : '开始';
         btn.className = 'btn small ' + (r.enabled ? 'ghost' : 'primary');
       }
     });
   }
 
   function rcPaintMeta(d) {
-    if (!el.rcMeta) return;
-    var live = (d.rooms || []).filter(function (r) {
-      return (r.state === 'recording');
-    }).length;
+    var rooms = d.rooms || [];
+    var rec = rooms.filter(function (r) { return r.state === 'recording'; }).length;
+    var wait = rooms.filter(function (r) { return r.enabled && r.state !== 'recording'; }).length;
     var free = (d.disk && d.disk.free) || 0;
-    el.rcMeta.innerHTML = '<span>ffmpeg '
-      + (d.ffmpeg ? '<b>已就绪</b>' : '<b class="warn">未找到</b>')
-      + '</span><span>剩余 <b>' + rcSize(free) + '</b></span>'
-      + '<span><b>' + live + '</b> / ' + d.maxLive + ' 路录制中</span>'
-      + '<span>' + (d.rooms || []).length + ' 个房间</span>';
+    if (el.rcMeta) {
+      el.rcMeta.innerHTML = '<span>ffmpeg '
+        + (d.ffmpeg ? '<b>已就绪</b>' : '<b class="warn">未找到</b>')
+        + '</span><span>剩余 <b>' + rcSize(free) + '</b></span>'
+        + '<span><b>' + rec + '</b> / ' + d.maxLive + ' 路录制中</span>'
+        + '<span>' + rooms.length + ' 个房间</span>'
+        + (d.busy ? '<span class="warn">后台写盘中，关页面不会中断</span>' : '');
+    }
+    var pill = rcQ('rc-head-pill');
+    var ptxt = rcQ('rc-head-pill-txt');
+    if (pill && ptxt) {
+      pill.className = 'rc-pill ' + (rec ? 'rec' : (wait ? 'wait' : ''));
+      ptxt.textContent = rec ? ('录制中 ' + rec + ' 路')
+        : (wait ? ('等待开播 ' + wait + ' 个') : '空闲');
+    }
   }
 
   function rcPaintFiles(d, f) {
@@ -5961,7 +6025,9 @@
     el.rcFiles.innerHTML = list.slice(0, 120).map(function (x) {
       return '<div class="rc-file"><span class="nm" title="' + esc(x.file) + '">'
         + esc(x.file) + '</span><span class="sz">' + rcSize(x.size) + '</span>'
-        + '<span class="tm">' + esc(rcStamp(x.mtime)) + '</span></div>';
+        + '<span class="tm">' + esc(rcStamp(x.mtime)) + '</span>'
+        + '<span class="op"><button class="rc-mini" type="button" data-reveal="'
+        + esc(x.path || '') + '">定位</button></span></div>';
     }).join('');
   }
 
@@ -5981,6 +6047,81 @@
     el.rcLog.scrollTop = el.rcLog.scrollHeight;      // 跟到最新一条
   }
 
+  /* 设置面板：所有 [data-rc-set] 控件都由这里回填。
+     ⚠️ 用户正在输入的框不要抢（document.activeElement 判定）。 */
+  function rcPaintSettings(d) {
+    var s = (d && d.settings) || {};
+    Array.prototype.forEach.call(document.querySelectorAll('[data-rc-set]'), function (inp) {
+      var k = inp.getAttribute('data-rc-set');
+      if (inp.type === 'radio') {
+        inp.checked = String(s[k] || '') === inp.value;
+      } else if (inp.type === 'checkbox') {
+        inp.checked = !!s[k];
+      }
+    });
+    function val(id, v) {
+      var e = rcQ(id);
+      if (e && document.activeElement !== e) e.value = v;
+    }
+    val('rc-dir', s.dir || '');
+    val('rc-qnids', s.qnIds || '');
+    val('rc-seg-size', s.segmentSize || 1024);
+    val('rc-seg-min', s.segmentMinutes || 60);
+    val('rc-skip', s.skipTitle || '');
+    val('rc-wh2', s.webhookV2 || '');
+    val('rc-wh1', s.webhookV1 || '');
+    var fname = rcQ('rc-fname');
+    if (fname && document.activeElement !== fname) {
+      fname.value = s.filenameDefault ? (d.template || '') : (s.filename || '');
+    }
+    rcSyncTraySwitches(s);
+  }
+
+  function rcSyncTraySwitches(s) {
+    s = s || ((rcState.data && rcState.data.settings) || {});
+    var on = !!s.tray;
+    var a = document.querySelector('[data-rc-set="tray"]');
+    if (a && a.checked !== on) a.checked = on;
+    var b = rcQ('set-tray');
+    if (b && b.checked !== on) b.checked = on;
+    var note = rcQ('set-tray-note');
+    var tn = rcQ('rc-tray-note');
+    var tray = (rcState.data && rcState.data.tray) || {};
+    if (note) {
+      note.textContent = on
+        ? '图标已显示在系统托盘。关闭图标不会影响录制；网页全部关闭且没有录制任务时后台进程会自动退出。'
+        : '图标已隐藏（不影响录制）。网页全部关闭且没有录制任务时后台进程会自动退出；'
+          + '如果还有录制在写盘，进程会留在后台，把当前文件完整写完再安全退出。';
+    }
+    if (tn && tray.failed) {
+      tn.textContent = '这台系统没能显示托盘图标：' + tray.failed + '（不影响录制）';
+    }
+  }
+
+  function rcApplyUI() {
+    var main = document.querySelector('.rc-main');
+    if (main) main.classList.toggle('rc-hide-meta', !rcState.showTitle);
+    if (el.rcNavLog) el.rcNavLog.hidden = !rcState.showLog;
+    if (!rcState.showLog && rcState.tab === 'log') rcSetTab('rooms');
+    rcSyncMenu();
+  }
+
+  function rcSyncMenu() {
+    var menu = rcQ('rc-view-menu');
+    if (!menu) return;
+    Array.prototype.forEach.call(menu.querySelectorAll('[data-sort]'), function (b) {
+      b.setAttribute('aria-checked',
+        b.getAttribute('data-sort') === rcState.sort ? 'true' : 'false');
+    });
+    var s = (rcState.data && rcState.data.settings) || {};
+    Array.prototype.forEach.call(menu.querySelectorAll('[data-toggle]'), function (b) {
+      var k = b.getAttribute('data-toggle');
+      var on = k === 'notify' ? !!s.notify
+        : (k === 'showTitle' ? rcState.showTitle : rcState.showLog);
+      b.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+  }
+
   function rcPaint() {
     var d = rcState.data;
     if (!d) return;
@@ -5989,13 +6130,8 @@
     rcPaintMeta(d);
     rcPaintFiles(d, rcState.files);
     rcPaintLog(d);
-    // 目录与画质：用户正在输入时不要抢他的内容
-    if (el.rcDir && document.activeElement !== el.rcDir) {
-      el.rcDir.value = (d.settings && d.settings.dir) || '';
-    }
-    if (el.rcQn && document.activeElement !== el.rcQn) {
-      el.rcQn.value = String((d.settings && d.settings.qn) || 10000);
-    }
+    rcPaintSettings(d);
+    rcApplyUI();
   }
 
   function rcLoad() {
@@ -6004,11 +6140,24 @@
       .then(function (d) {
         if (!d || d.error) return;
         rcState.data = d;
+        rcState.at = Date.now();
         return fetch('/api/recorder/files').then(function (r) { return r.json(); })
           .then(function (f) { rcState.files = f || null; });
       })
       .then(function () { rcPaint(); })
       .catch(function () { /* 下一轮会重试 */ });
+  }
+
+  function rcTickLocal() {
+    if (state.view !== 'recorder' || !rcState.data) return;
+    Array.prototype.forEach.call(document.querySelectorAll('#rc-grid .rc-room'), function (card) {
+      var room = card.getAttribute('data-room');
+      var r = null;
+      (rcState.data.rooms || []).forEach(function (x) { if (x.room === room) r = x; });
+      if (!r || r.state !== 'recording') return;
+      var tt = card.querySelector('[data-role="sttxt"]');
+      if (tt) tt.textContent = '录制中 ' + fmtClock(rcElapsed(r));
+    });
   }
 
   function rcPost(url, body) {
@@ -6031,8 +6180,18 @@
     });
   }
 
+  function rcSaveSettings(body, key) {
+    return rcPost('/api/recorder/settings', body).then(function (ok) {
+      if (!ok) return false;
+      pvToast('设置已保存');
+      if (key === 'tray') rcSyncTraySwitches();
+      if (key === 'filenameDefault' || key === 'filename') rcFnamePreview(true);
+      return true;
+    });
+  }
+
   function rcAdd() {
-    var inp = document.getElementById('rc-new');
+    var inp = rcQ('rc-new');
     var v = inp ? inp.value.trim() : '';
     if (!v) { if (inp) inp.focus(); return; }
     rcPost('/api/recorder/add', { input: v }).then(function (ok) {
@@ -6044,15 +6203,54 @@
     return rcPost(enabled ? '/api/recorder/stop' : '/api/recorder/start', { room: room });
   }
 
+  var rcNameTimer = 0;
+  function rcFnamePreview(force) {
+    var inp = rcQ('rc-fname');
+    var cb = document.querySelector('[data-rc-set="filenameDefault"]');
+    var prev = rcQ('rc-fname-prev');
+    if (!inp || !cb) return;
+    if (rcNameTimer) clearTimeout(rcNameTimer);
+    rcNameTimer = setTimeout(function () {
+      fetch('/api/recorder/name_test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template: inp.value, filenameDefault: cb.checked })
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        if (prev) prev.textContent = d && d.full ? ('示例：' + d.full) : '　';
+      }).catch(function () { /* 预览失败不影响保存 */ });
+    }, force ? 0 : 350);
+  }
+
+  function rcTrayLoad() {
+    fetch('/api/recorder/state').then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || d.error) return;
+        rcState.data = d;
+        rcState.at = Date.now();
+        rcSyncTraySwitches(d.settings);
+      }).catch(function () {});
+  }
+
   function rcEnter() {
     rcSetTab(rcState.tab);
     rcLoad();
     if (rcState.timer) clearInterval(rcState.timer);
+    if (rcState.tick) clearInterval(rcState.tick);
     rcState.timer = setInterval(rcLoad, 2500);
+    rcState.tick = setInterval(rcTickLocal, 1000);
   }
 
   function rcLeave() {
     if (rcState.timer) { clearInterval(rcState.timer); rcState.timer = 0; }
+    if (rcState.tick) { clearInterval(rcState.tick); rcState.tick = 0; }
+  }
+
+  function rcMenuOpen(open) {
+    var m = rcQ('rc-view-menu');
+    var b = rcQ('rc-view-btn');
+    if (!m || !b) return;
+    m.hidden = !open;
+    b.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
   function bindRecorder() {
@@ -6067,6 +6265,9 @@
         var act = b.getAttribute('data-act');
         if (act === 'toggle') {
           rcToggle(room, !!(b.textContent.indexOf('停止') >= 0));
+        } else if (act === 'live') {
+          window.open('https://live.bilibili.com/' + encodeURIComponent(room),
+                      '_blank', 'noopener');
         } else if (act === 'dir') {
           rcPost('/api/recorder/open', { room: room });
         } else if (act === 'del') {
@@ -6097,12 +6298,145 @@
       card.classList.add('flash');
       setTimeout(function () { card.classList.remove('flash'); }, 1200);
     });
-    [el.rcAuto, el.rcAuto2].forEach(function (cb) {
+    [el.rcAuto, el.rcAuto2, rcQ('rc-auto3')].forEach(function (cb) {
       if (!cb) return;
       cb.addEventListener('change', function () {
-        rcPost('/api/recorder/settings', { auto: cb.checked });
+        rcSaveSettings({ auto: cb.checked }, 'auto');
       });
     });
+
+    /* 视图菜单 */
+    var vbtn = rcQ('rc-view-btn');
+    var vmenu = rcQ('rc-view-menu');
+    if (vbtn) {
+      vbtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        rcMenuOpen(vmenu ? vmenu.hidden : false);
+      });
+    }
+    if (vmenu) {
+      vmenu.addEventListener('click', function (e) {
+        var b = e.target.closest ? e.target.closest('button') : null;
+        if (!b) return;
+        var sort = b.getAttribute('data-sort');
+        if (sort) {
+          rcState.sort = sort;
+          localStorage.setItem('xl_rc_sort', sort);
+          if (rcState.data) rcPaintRooms(rcState.data);
+          rcSyncMenu();
+          rcMenuOpen(false);
+          return;
+        }
+        var k = b.getAttribute('data-toggle');
+        if (!k) return;
+        var on = b.getAttribute('aria-checked') !== 'true';
+        if (k === 'notify') {
+          rcSaveSettings({ notify: on }, 'notify');
+        } else if (k === 'showTitle') {
+          rcState.showTitle = on;
+          localStorage.setItem('xl_rc_title', on ? '1' : '0');
+          rcApplyUI();
+        } else if (k === 'showLog') {
+          rcState.showLog = on;
+          localStorage.setItem('xl_rc_log', on ? '1' : '0');
+          rcApplyUI();
+        }
+        b.setAttribute('aria-checked', on ? 'true' : 'false');
+        rcMenuOpen(false);
+      });
+    }
+    document.addEventListener('click', function (e) {
+      if (!vmenu || vmenu.hidden) return;
+      if (e.target === vbtn || (vbtn && vbtn.contains(e.target))) return;
+      if (vmenu.contains(e.target)) return;
+      rcMenuOpen(false);
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') rcMenuOpen(false);
+    });
+
+    /* 设置面板：开关/单选框统一走 change 委托 */
+    var pane = rcQ('rc-pane-settings');
+    if (pane) {
+      pane.addEventListener('change', function (e) {
+        var inp = e.target;
+        var key = inp && inp.getAttribute ? inp.getAttribute('data-rc-set') : '';
+        if (!key) return;
+        var body = {};
+        if (inp.type === 'radio') {
+          if (!inp.checked) return;
+          body[key] = inp.value;
+        } else if (inp.type === 'checkbox') {
+          body[key] = inp.checked;
+        } else {
+          body[key] = inp.value;
+        }
+        rcSaveSettings(body, key);
+      });
+    }
+    if (el.rcDir) {
+      el.rcDir.addEventListener('change', function () {
+        rcSaveSettings({ dir: el.rcDir.value.trim() }, 'dir');
+      });
+    }
+    var qnids = rcQ('rc-qnids');
+    if (qnids) {
+      qnids.addEventListener('change', function () {
+        rcSaveSettings({ qnIds: qnids.value.trim() }, 'qnIds');
+      });
+    }
+    var segSize = rcQ('rc-seg-size');
+    if (segSize) {
+      segSize.addEventListener('change', function () {
+        rcSaveSettings({ segmentSize: parseInt(segSize.value, 10) || 1024 }, 'segmentSize');
+      });
+    }
+    var segMin = rcQ('rc-seg-min');
+    if (segMin) {
+      segMin.addEventListener('change', function () {
+        rcSaveSettings({ segmentMinutes: parseInt(segMin.value, 10) || 60 }, 'segmentMinutes');
+      });
+    }
+    var fname = rcQ('rc-fname');
+    if (fname) {
+      fname.addEventListener('input', function () {
+        // 用户开始改模板 → 自动取消「默认」，否则改了也不生效（会让人以为坏了）
+        var cb = document.querySelector('[data-rc-set="filenameDefault"]');
+        if (cb && cb.checked) cb.checked = false;
+        rcFnamePreview();
+      });
+      fname.addEventListener('change', function () {
+        var cb = document.querySelector('[data-rc-set="filenameDefault"]');
+        var body = { filename: fname.value.trim() };
+        if (cb) body.filenameDefault = !!cb.checked;
+        rcSaveSettings(body, 'filename');
+      });
+    }
+    var fbtn = rcQ('rc-fname-test');
+    if (fbtn) fbtn.addEventListener('click', function () { rcFnamePreview(true); });
+    var skip = rcQ('rc-skip');
+    if (skip) {
+      skip.addEventListener('change', function () {
+        rcSaveSettings({ skipTitle: skip.value }, 'skipTitle');
+      });
+    }
+    ['rc-wh2', 'rc-wh1'].forEach(function (id) {
+      var e2 = rcQ(id);
+      if (!e2) return;
+      e2.addEventListener('change', function () {
+        var body = {};
+        body[id === 'rc-wh2' ? 'webhookV2' : 'webhookV1'] = e2.value.trim();
+        rcSaveSettings(body, id);
+      });
+    });
+
+    /* 设置页里的「后台应用图标」与录播姬设置里的开关共用同一个设置项 */
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tray-set]'), function (cb) {
+      cb.addEventListener('change', function () {
+        rcSaveSettings({ tray: cb.checked }, 'tray');
+      });
+    });
+
     if (el.rcRefresh) el.rcRefresh.addEventListener('click', rcLoad);
     if (el.rcOpenDir) el.rcOpenDir.addEventListener('click', function () {
       rcPost('/api/recorder/open', {});
@@ -6115,22 +6449,24 @@
       var rooms = (rcState.data && rcState.data.rooms) || [];
       rooms.forEach(function (r) { if (r.enabled) rcPost('/api/recorder/stop', { room: r.room }); });
     });
+    if (el.rcFiles) {
+      el.rcFiles.addEventListener('click', function (e) {
+        var b = e.target.closest ? e.target.closest('[data-reveal]') : null;
+        if (!b) return;
+        rcPost('/api/recorder/reveal', { path: b.getAttribute('data-reveal') });
+      });
+    }
     if (el.rcPick) el.rcPick.addEventListener('click', function () {
-      fetch('/api/recorder/pick', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      fetch('/api/recorder/pick', { method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
                                     body: '{}' })
         .then(function (r) { return r.json(); })
         .then(function (d) {
           if (d && d.dir) {
             if (el.rcDir) el.rcDir.value = d.dir;
-            rcPost('/api/recorder/settings', { dir: d.dir });
+            rcSaveSettings({ dir: d.dir }, 'dir');
           }
         }).catch(function (e) { pvToast('选目录失败：' + e); });
-    });
-    if (el.rcSave) el.rcSave.addEventListener('click', function () {
-      rcPost('/api/recorder/settings', {
-        dir: el.rcDir ? el.rcDir.value.trim() : '',
-        qn: el.rcQn ? parseFloat(el.rcQn.value) : 10000
-      }).then(function (ok) { if (ok) pvToast('录播姬设置已保存'); });
     });
   }
 
@@ -7831,6 +8167,11 @@
       rcNavRooms: document.getElementById('rc-nav-rooms'),
       rcNavFiles: document.getElementById('rc-nav-files'),
       rcNavRoomsList: document.getElementById('rc-nav-rooms-list'),
+      rcNavLog: document.getElementById('rc-nav-log'),
+      rcHeadPill: document.getElementById('rc-head-pill'),
+      rcViewBtn: document.getElementById('rc-view-btn'),
+      rcViewMenu: document.getElementById('rc-view-menu'),
+      rcSetTray: document.getElementById('set-tray'),
       rcAuto: document.getElementById('rc-auto'),
       rcAuto2: document.getElementById('rc-auto2'),
       rcMeta: document.getElementById('rc-meta'),
@@ -7838,9 +8179,7 @@
       rcFilesStat: document.getElementById('rc-files-stat'),
       rcLog: document.getElementById('rc-log'),
       rcDir: document.getElementById('rc-dir'),
-      rcQn: document.getElementById('rc-qn'),
       rcPick: document.getElementById('rc-pick'),
-      rcSave: document.getElementById('rc-save'),
       rcRefresh: document.getElementById('rc-refresh'),
       rcOpenDir: document.getElementById('rc-open-dir'),
       rcAllStart: document.getElementById('rc-all-start'),

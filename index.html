@@ -811,9 +811,29 @@ window.__BOOT_T0 = Date.now();
     </section>
 
     <section class="view" id="view-recorder">
-      <h1 class="title sm">录播姬</h1>
-      <p class="sub">给任意 B 站直播间开录制：<b>自动录制</b>开着时，启动就会持续检测，
-        开播直接录、下播自动停。文件按 FLV 直存（不转码，CPU 几乎为 0）。</p>
+      <div class="rc-head">
+        <div class="rc-head-txt">
+          <h1 class="title sm">录播姬</h1>
+          <p class="sub">给任意 B 站直播间开录制：<b>自动录制</b>开着时，启动就持续检测，
+            开播直接录、下播自动停。文件按 FLV 直存（不转码，CPU 几乎为 0）。</p>
+        </div>
+        <div class="rc-head-side">
+          <span class="rc-pill" id="rc-head-pill"><i></i><span id="rc-head-pill-txt">空闲</span></span>
+          <div class="rc-menu-wrap">
+            <button class="btn small ghost" id="rc-view-btn" type="button"
+                    aria-haspopup="menu" aria-expanded="false">视图 ▾</button>
+            <div class="rc-menu" id="rc-view-menu" role="menu" hidden>
+              <button type="button" role="menuitemradio" data-sort="none" aria-checked="true"><i></i>不排序</button>
+              <button type="button" role="menuitemradio" data-sort="room" aria-checked="false"><i></i>按房间号排序</button>
+              <button type="button" role="menuitemradio" data-sort="state" aria-checked="false"><i></i>按录制状态排序</button>
+              <div class="rc-menu-sep"></div>
+              <button type="button" role="menuitemcheckbox" data-toggle="notify" aria-checked="true"><i></i>开播时弹出系统通知</button>
+              <button type="button" role="menuitemcheckbox" data-toggle="showTitle" aria-checked="true"><i></i>显示直播间标题和分区</button>
+              <button type="button" role="menuitemcheckbox" data-toggle="showLog" aria-checked="true"><i></i>显示日志</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div class="rc-layout">
         <!-- 左侧功能区：与录播页左栏同一套观感（小标题 + 12px 条目 + 8px 圆角） -->
@@ -822,7 +842,7 @@ window.__BOOT_T0 = Date.now();
           <div class="rc-nav" id="rc-nav">
             <button type="button" data-tab="rooms" class="on">房间<span class="rc-cnt" id="rc-nav-rooms">0</span></button>
             <button type="button" data-tab="files">录制文件<span class="rc-cnt" id="rc-nav-files">0</span></button>
-            <button type="button" data-tab="log">运行日志</button>
+            <button type="button" data-tab="log" id="rc-nav-log">运行日志</button>
             <button type="button" data-tab="settings">设置</button>
           </div>
 
@@ -867,26 +887,171 @@ window.__BOOT_T0 = Date.now();
             </div>
           </div>
 
-          <div class="rc-pane" id="rc-pane-settings" hidden>
+          <div class="rc-pane rc-set-pane" id="rc-pane-settings" hidden>
             <div class="live-card">
-              <div class="live-card-h">录制设置</div>
-              <div class="rc-dirrow">
-                <input class="rc-input" id="rc-dir" type="text" spellcheck="false" aria-label="录制输出目录">
-                <select class="rc-sel" id="rc-qn" title="录制画质">
-                  <option value="10000">原画</option>
-                  <option value="400">蓝光</option>
-                  <option value="250">超清</option>
-                  <option value="150">高清</option>
-                </select>
-                <button class="btn small ghost" id="rc-pick" type="button">选择…</button>
-                <button class="btn small primary" id="rc-save" type="button">保存</button>
+              <div class="live-card-h">输出</div>
+              <div class="rc-set-row">
+                <label class="rc-lab" for="rc-dir">录制输出目录</label>
+                <div class="rc-inline">
+                  <input class="rc-input" id="rc-dir" type="text" spellcheck="false" aria-label="录制输出目录">
+                  <button class="btn small ghost" id="rc-pick" type="button">选择…</button>
+                </div>
+              </div>
+              <div class="rc-set-row">
+                <label class="rc-lab" for="rc-qnids">录制画质ID
+                  <em>逗号分割，靠前优先；B 站按登录态决定实际档位</em></label>
+                <input class="rc-input" id="rc-qnids" type="text" spellcheck="false"
+                       placeholder="10000,400,250,150" aria-label="录制画质ID">
               </div>
               <p class="live-note">同时最多录 4 路；剩余空间低于 2 GB 时不再开新录制。
-                画质由 B 站按登录态决定，未登录通常只能拿到较低档。</p>
-              <label class="rc-auto-row rc-auto-inline">
-                <input type="checkbox" id="rc-auto2" data-rc-auto>
-                <span>自动录制（启动后持续检测，开播即录）</span>
+                未登录 B 站通常只能拿到较低档位。</p>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">弹幕录制</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">保存弹幕
+                  <em>与录像同名的 .xml 侧车文件，播放器可直接读；未登录时跳过</em></span>
+                <input type="checkbox" data-rc-set="danmaku">
+                <i class="rc-sw" aria-hidden="true"></i>
               </label>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">录制模式</div>
+              <label class="rc-radio">
+                <input type="radio" name="rc-mode" value="standard" data-rc-set="mode">
+                <i></i><span><b>标准模式</b><em>按标准 FLV 写入，可选下面的修复选项</em></span>
+              </label>
+              <label class="rc-radio">
+                <input type="radio" name="rc-mode" value="raw" data-rc-set="mode">
+                <i></i><span><b>原始数据模式</b><em>不做任何修补，收到什么写什么</em></span>
+              </label>
+              <div class="rc-sub-h">标准模式录制修复设置</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">检测到可能缺少数据时间段
+                  <em>给 ffmpeg 加 genpts / discardcorrupt，尽量修补时间戳断档</em></span>
+                <input type="checkbox" data-rc-set="repairMissing">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+              <label class="rc-opt">
+                <span class="rc-opt-t">使用实验性花屏修复判定逻辑
+                  <em>忽略解码错误继续写，花屏段保留而不是整段中断</em></span>
+                <input type="checkbox" data-rc-set="repairGlitch">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">自动分段</div>
+              <label class="rc-radio">
+                <input type="radio" name="rc-seg" value="none" data-rc-set="segment">
+                <i></i><span><b>不要根据文件大小/视频时间自动分段</b></span>
+              </label>
+              <label class="rc-radio">
+                <input type="radio" name="rc-seg" value="size" data-rc-set="segment">
+                <i></i><span><b>根据文件大小自动分段</b>
+                  <input class="rc-input rc-num" id="rc-seg-size" type="number" min="16" max="10240"
+                         step="64" aria-label="分片大小 MB"> MB</span>
+              </label>
+              <label class="rc-radio">
+                <input type="radio" name="rc-seg" value="time" data-rc-set="segment">
+                <i></i><span><b>根据视频时间自动分段</b>
+                  <input class="rc-input rc-num" id="rc-seg-min" type="number" min="1" max="720"
+                         step="5" aria-label="分片时长 分钟"> 分钟</span>
+              </label>
+              <label class="rc-opt">
+                <span class="rc-opt-t">直播间更改标题后自动分段
+                  <em>检测到标题变化就另起一个文件（每 2 分钟查一次）</em></span>
+                <input type="checkbox" data-rc-set="segmentTitle">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">直播封面</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">录制时同时保存直播封面
+                  <em>与录像同名的 .cover.jpg</em></span>
+                <input type="checkbox" data-rc-set="cover">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">文件名</div>
+              <p class="live-note" style="margin-top:0">可用变量：
+                <code>{{ roomid }}</code> <code>{{ name }}</code> <code>{{ title }}</code>
+                <code>{{ uid }}</code> <code>{{ time }}</code> <code>{{ date }}</code>；
+                用 <code>/</code> 可以分子目录。</p>
+              <div class="rc-inline">
+                <input class="rc-input" id="rc-fname" type="text" spellcheck="false"
+                       aria-label="录制文件名格式">
+                <button class="btn small ghost" id="rc-fname-test" type="button">测试</button>
+              </div>
+              <label class="rc-opt rc-opt-tight">
+                <span class="rc-opt-t">默认<em>用内置格式：主播名/录制-房间号-时间</em></span>
+                <input type="checkbox" data-rc-set="filenameDefault">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+              <p class="live-note" id="rc-fname-prev">　</p>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">开播通知</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">直播间开播时弹出系统通知
+                  <em>需要「后台应用图标」开着才有气泡；否则只记运行日志</em></span>
+                <input type="checkbox" data-rc-set="notify">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">后台应用图标</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">在系统托盘显示应用图标
+                  <em>右键可打开控制台 / 录制目录 / 停止录制并退出</em></span>
+                <input type="checkbox" data-rc-set="tray">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+              <p class="live-note" id="rc-tray-note">关闭图标只是不显示它，<b>不会中断录制</b>。
+                页面关闭且没有录制任务时后台进程会自动退出；正在录制时会留在后台把文件写完再退。</p>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">录制条件</div>
+              <label class="rc-lab" for="rc-skip">跳过录制的直播标题正则匹配表达式
+                <em>每行一个；命中就不录这一场（可留空）</em></label>
+              <textarea class="rc-input rc-textarea" id="rc-skip" rows="3" spellcheck="false"
+                        aria-label="跳过录制的标题正则"></textarea>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">Webhook</div>
+              <div class="rc-set-row">
+                <label class="rc-lab" for="rc-wh2">Webhook v2
+                  <em>POST { Event, EventData }</em></label>
+                <input class="rc-input" id="rc-wh2" type="url" spellcheck="false"
+                       placeholder="https://example.com/hook" aria-label="Webhook v2">
+              </div>
+              <div class="rc-set-row">
+                <label class="rc-lab" for="rc-wh1">Webhook v1
+                  <em>POST { event, data }</em></label>
+                <input class="rc-input" id="rc-wh1" type="url" spellcheck="false"
+                       placeholder="https://example.com/hook" aria-label="Webhook v1">
+              </div>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">自动录制</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">启动后持续检测，开播即录
+                  <em>关闭后每个房间都要手动点「开始监控」</em></span>
+                <input type="checkbox" id="rc-auto3" data-rc-set="auto">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+              <p class="live-note">改动会即时保存，不需要额外点保存。</p>
             </div>
           </div>
         </div>
@@ -919,6 +1084,18 @@ window.__BOOT_T0 = Date.now();
         </label>
         <p class="live-note">浅色下主色会压深一档，主播各自的板块色也按亮度压深，
           免得小字在白底上发飘。选择只记在本机浏览器里。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">后台运行</div>
+        <label class="rc-opt rc-opt-tight">
+          <span class="rc-opt-t">后台应用图标
+            <em>在系统托盘显示图标；右键可打开控制台 / 录制目录 / 停止录制并退出</em></span>
+          <input type="checkbox" id="set-tray" data-tray-set>
+          <i class="rc-sw" aria-hidden="true"></i>
+        </label>
+        <p class="live-note" id="set-tray-note">关闭图标不会影响录制。网页全部关闭且没有录制任务时，
+          后台进程会自动退出；如果还有录制在写盘，进程会留在后台，把当前文件完整写完再安全退出。</p>
       </div>
 
       <div class="live-card" style="margin-top:18px">

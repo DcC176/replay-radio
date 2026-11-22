@@ -1078,6 +1078,7 @@ STATIONLESS_OK = (
     "/api/recorder/state", "/api/recorder/files", "/api/recorder/add",
     "/api/recorder/remove", "/api/recorder/start", "/api/recorder/stop",
     "/api/recorder/settings", "/api/recorder/pick", "/api/recorder/open",
+    "/api/recorder/name_test", "/api/recorder/reveal",
 )
 
 
@@ -1798,16 +1799,80 @@ RC_POLL = 45.0                 # 未开播时的复查间隔（秒）
 RC_TICK = 4.0                  # 调度线程扫描间隔
 RC_MAX_ROOMS = 20
 RC_LOG_MAX = 400
+RC_DEFAULT_TEMPLATE = "{{ name }}/录制-{{ roomid }}-{{ time }}"
+RC_DEFAULT_SEG_MB = 1024        # 按大小分段：默认 1 GB
+RC_DEFAULT_SEG_MIN = 60         # 按时间分段：默认 60 分钟
+RC_QN_VALID = (10000, 400, 250, 150, 80)
 
 REC_LOCK = threading.Lock()
 RC_RT = {}       # room -> 运行态（内存，不落盘）
 RC_PROC = {}     # room -> Popen
+RC_DM = {}       # room -> {"stop": Event, "thread": Thread, "xml": path}
 RC_LOG = []      # [{t, room, name, msg, lv}]
 RC_LOOP = {"thread": None}
+RC_EXITING = [0.0]      # >0 = 页面已关闭、正在等录制收尾（此时不再开新录制）
 
 
 def _rc_default_dir():
     return os.path.join(os.path.expanduser("~"), "Videos", "噼里啪啦", "录播")
+
+
+def _rc_settings(st):
+    """把落盘的设置补全成一套完整值。
+
+    老版本 recorder.json 只有 dir / qn / auto —— 其余键按默认补齐，
+    所以升级不会把老用户的配置读成空。
+    """
+    st = st if isinstance(st, dict) else {}
+
+    def flag(k, d):
+        v = st.get(k)
+        return d if v is None else bool(v)
+
+    def num(k, d, lo, hi):
+        try:
+            v = int(st.get(k, d))
+        except (TypeError, ValueError):
+            v = d
+        return max(lo, min(hi, v))
+
+    seg = str(st.get("segment") or "none")
+    if seg not in ("none", "size", "time"):
+        seg = "none"
+    mode = str(st.get("mode") or "standard")
+    if mode not in ("standard", "raw"):
+        mode = "standard"
+    qn_ids = re.sub(r"[^0-9,]", "", str(st.get("qnIds") or "")) or "10000,400,250,150"
+    parts = [x for x in qn_ids.split(",") if x.strip()]
+    qn_ids = ",".join(parts[:6])
+    try:
+        qn = int(st.get("qn") or RC_QN)
+    except (TypeError, ValueError):
+        qn = RC_QN
+    return {
+        "dir": st.get("dir") or _rc_default_dir(),
+        "qn": qn if qn in RC_QN_VALID else RC_QN,
+        "qnIds": qn_ids,
+        # 自动录制：启动即把房间置为监控，开播就录（默认开）
+        "auto": flag("auto", True),
+        # 后台应用图标（系统托盘）。关掉只是不显示图标，**不影响录制**
+        "tray": flag("tray", True),
+        "danmaku": flag("danmaku", True),          # 保存弹幕（XML 侧车文件）
+        "mode": mode,                              # standard / raw
+        "repairMissing": flag("repairMissing", True),
+        "repairGlitch": flag("repairGlitch", False),
+        "segment": seg,
+        "segmentSize": num("segmentSize", RC_DEFAULT_SEG_MB, 16, 10240),
+        "segmentMinutes": num("segmentMinutes", RC_DEFAULT_SEG_MIN, 1, 720),
+        "segmentTitle": flag("segmentTitle", True),
+        "cover": flag("cover", False),
+        "filename": str(st.get("filename") or "")[:200],
+        "filenameDefault": flag("filenameDefault", True),
+        "notify": flag("notify", True),
+        "skipTitle": str(st.get("skipTitle") or "")[:500],
+        "webhookV2": str(st.get("webhookV2") or "")[:300],
+        "webhookV1": str(st.get("webhookV1") or "")[:300],
+    }
 
 
 def _rc_doc():
@@ -1826,13 +1891,7 @@ def _rc_doc():
                       "face": str(r.get("face") or ""),
                       "enabled": bool(r.get("enabled")),
                       "dir": str(r.get("dir") or "")})
-    auto = st.get("auto")
-    return {"version": 1,
-            "settings": {"dir": st.get("dir") or _rc_default_dir(),
-                         "qn": int(st.get("qn") or RC_QN),
-                         # 自动录制：启动即把房间置为监控，开播就录（默认开）
-                         "auto": True if auto is None else bool(auto)},
-            "rooms": rooms}
+    return {"version": 1, "settings": _rc_settings(st), "rooms": rooms}
 
 
 def _rc_save(doc):
@@ -1852,7 +1911,36 @@ def _rc_rt(room):
     with REC_LOCK:
         return RC_RT.setdefault(str(room), {
             "state": "idle", "since": 0, "file": "", "bytes": 0, "error": "",
-            "pid": 0, "title": "", "living": False, "next": 0})
+            "pid": 0, "title": "", "living": False, "next": 0,
+            "liveTitle": "", "segNo": 0, "xml": "", "cover": "",
+            "area": "", "titleAt": 0, "skip": ""})
+
+
+def _rc_busy():
+    """是否还有录制在写盘。退出判定只看这一个 —— 托盘、页面、自动录制开关都不算。"""
+    with REC_LOCK:
+        procs = list(RC_PROC.values())
+    for p in procs:
+        try:
+            if p.poll() is None:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _rc_busy_n():
+    """正在录的路数（给托盘提示用）。"""
+    n = 0
+    with REC_LOCK:
+        procs = list(RC_PROC.values())
+    for p in procs:
+        try:
+            if p.poll() is None:
+                n += 1
+        except Exception:
+            pass
+    return n
 
 
 def _rc_disk(path):
@@ -1880,8 +1968,12 @@ def _rc_room_info(room):
     x = d.get("data") or {}
     if not str(x.get("room_id") or "").isdigit():
         raise RuntimeError("房间不存在")
+    area = x.get("area_name") or ""
+    parent = x.get("parent_area_name") or ""
     return {"uid": str(x.get("uid") or ""), "title": x.get("title") or "",
-            "living": int(x.get("live_status") or 0) == 1}
+            "living": int(x.get("live_status") or 0) == 1,
+            "area": (parent + " · " + area) if (parent and area) else (area or parent),
+            "cover": x.get("keyframe") or x.get("user_cover") or ""}
 
 
 def _rc_master(uid):
@@ -1947,22 +2039,736 @@ def _rc_parse(text):
     raise RuntimeError("这个号既不是房间号也不是 UID：%s" % str(err)[:80])
 
 
-def _rc_filename(name, room, when=None):
-    t = time.strftime("%Y%m%d_%H%M%S", time.localtime(when or time.time()))
-    safe = re.sub(r'[\\/:*?"<>|\s]+', "_", str(name or room)).strip("_")[:40] or str(room)
-    return "%s_%s_%s.flv" % (safe, room, t)
+RC_NAME_TOKENS = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\|[^}]*)?\}\}")
+RC_NAME_MAX_DEPTH = 3
 
 
-def _rc_kill(room, why=""):
+def _rc_safe_part(s, fallback=""):
+    """文件名/目录名的一段：去掉 Windows 不允许的字符，别让模板造出越级路径。"""
+    s = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", str(s or ""))
+    s = re.sub(r"\s+", " ", s).strip(" ._")
+    return s[:60] or fallback
+
+
+def _rc_name_values(room, name, uid, title, area, when=None, seq=0):
+    """模板可用变量。时间取**开录那一刻**，与文件名里的时间戳一致。"""
+    t = time.localtime(when or time.time())
+    return {
+        "roomid": str(room or ""),
+        "room": str(room or ""),
+        "uid": str(uid or ""),
+        "name": str(name or room or ""),
+        "title": str(title or name or room or ""),
+        "area": str(area or ""),
+        "time": time.strftime("%Y%m%d_%H%M%S", t),
+        "date": time.strftime("%Y-%m-%d", t),
+        "year": time.strftime("%Y", t),
+        "month": time.strftime("%m", t),
+        "day": time.strftime("%d", t),
+        "seq": "%02d" % int(seq or 0),
+    }
+
+
+def _rc_render_name(tpl, values):
+    """模板 → 相对路径（不含扩展名）。
+
+    BililiveRecorder 的模板写法允许用 `/` 分子目录（默认就是
+    `房间号-主播名/录制-房间号-时间`），这里同样支持，但只接受**相对**路径：
+    去掉开头的斜杠、丢掉 `..`，最多 3 层 —— 否则一个手滑的模板能把文件写到
+    `C:/Windows` 去（模板本身也进文件名，不能当代码执行）。
+    """
+    tpl = str(tpl or "").strip() or RC_DEFAULT_TEMPLATE
+
+    def sub(m):
+        k = m.group(1).lower()
+        return values.get(k, "")
+
+    raw = RC_NAME_TOKENS.sub(sub, tpl)
+    raw = raw.replace("\\", "/")
+    parts = []
+    for seg in raw.split("/"):
+        seg = _rc_safe_part(seg)
+        if not seg or seg in (".", ".."):
+            continue
+        parts.append(seg)
+        if len(parts) >= RC_NAME_MAX_DEPTH:
+            break
+    if not parts:
+        parts = [_rc_safe_part(values.get("name"), values.get("roomid") or "录制")]
+    return os.path.join(*parts)
+
+
+def _rc_out_base(doc, r, title="", area="", when=None, seq=0):
+    """该房间这一段的输出路径（不含扩展名）。
+
+    分段文件的区分靠模板里的时间（每段开录时刻不同），不再额外加 `_partNN` ——
+    用户按文件名找录像时，「录制-123-20261122_150000」比「..._part03」直观。
+    seq 仍保留：模板里可以用 `{{ seq }}` 自己编号。
+    """
+    st = doc["settings"]
+    tpl = RC_DEFAULT_TEMPLATE if st.get("filenameDefault", True) else st.get("filename")
+    rel = _rc_render_name(tpl, _rc_name_values(
+        r.get("room"), r.get("name"), r.get("uid"), title, area, when, seq))
+    outdir = _clip_check_dir(r.get("dir") or st["dir"]) or st["dir"]
+    base = os.path.join(outdir, rel)
+    n = 2
+    while os.path.exists(base + ".flv"):
+        base = "%s_%d" % (base, n)
+        n += 1
+    return base
+
+
+def _rc_skip_re(doc):
+    """录制条件：标题命中正则就跳过这一场。写坏的正则当没填（保存时会先校验）。"""
+    raw = str(doc["settings"].get("skipTitle") or "").strip()
+    if not raw:
+        return None
+    try:
+        return re.compile(raw)
+    except re.error:
+        return None
+
+
+def _rc_webhook(doc, event, data):
+    """Webhook v2 / v1。发不出去只记日志 —— 绝不能让它挡住录制。"""
+    pairs = [("v2", str(doc["settings"].get("webhookV2") or "").strip()),
+             ("v1", str(doc["settings"].get("webhookV1") or "").strip())]
+    targets = [(k, u) for k, u in pairs if u]
+    if not targets:
+        return
+
+    def run():
+        for kind, u in targets:
+            # v2 用 Event/EventData（与 BililiveRecorder v2 同形），v1 用扁平事件名
+            body = ({"Event": event, "EventData": data} if kind == "v2" else
+                    {"event": event, "data": data})
+            try:
+                req = urllib.request.Request(
+                    u, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "User-Agent": UA})
+                with DIRECT_OPENER.open(req, timeout=6) as resp:
+                    resp.read(1)
+            except Exception as e:
+                _rc_log("Webhook %s 发送失败（%s）：%s" % (kind, event, str(e)[:80]),
+                        lv="warn")
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _rc_notify(title, msg, room="", name=""):
+    """开播/开录的系统通知。有托盘走托盘气泡，没有就只写日志。"""
+    _rc_log("%s：%s" % (title, msg), room, name, "ok")
+    try:
+        tray_balloon(title, msg, error=False)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- 后台应用图标（系统托盘）
+#
+# 只依赖 ctypes + Win32（不引 pystray / Pillow）：打包体积不变，也不新增 hidden-import。
+#
+# 设计要点（都是踩过的）：
+#   · 托盘只是**显示层**：创建失败、被关掉、Shell 重启，都不许影响录制线程；
+#     所有入口都吞异常，失败时 TRAY["failed"] 记一句，界面照常工作。
+#   · 必须有一个隐藏窗口承接回调（Shell_NotifyIcon 要 hWnd + 消息）。
+#   · 回调函数要挂在模块级变量上，否则被 GC 掉 → 点击图标直接崩。
+#   · 菜单里只提供「安全退出」：它会先给 ffmpeg 写 q 收尾，再关服务。
+TRAY = {"on": False, "ready": None, "hwnd": 0, "thread": None,
+        "failed": "", "tip": "", "icon": 0}
+TRAY_LOCK = threading.Lock()
+
+WM_TRAY = 0x8000 + 17          # WM_APP+17：图标回调
+WM_TRAY_EXIT = 0x8000 + 18     # 退出消息循环
+WM_TRAY_REFRESH = 0x8000 + 19  # 更新提示文字
+
+_TRAY_PROC = [None]            # 保住 WNDPROC 引用
+_TRAY_API = {}
+
+
+def _tray_api():
+    """懒加载 Win32 函数与常量。非 Windows / 加载失败返回 None。"""
+    if _TRAY_API:
+        return _TRAY_API or None
+    if os.name != "nt":
+        _TRAY_API["bad"] = True
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes as wt
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        LRESULT = ctypes.c_ssize_t
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+        class WNDCLASSW(ctypes.Structure):
+            _fields_ = [("style", wt.UINT), ("lpfnWndProc", WNDPROC),
+                        ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                        ("hInstance", wt.HINSTANCE), ("hIcon", wt.HICON),
+                        ("hCursor", wt.HANDLE), ("hbrBackground", wt.HBRUSH),
+                        ("lpszMenuName", wt.LPCWSTR), ("lpszClassName", wt.LPCWSTR)]
+
+        class NOTIFYICONDATAW(ctypes.Structure):
+            _fields_ = [("cbSize", wt.DWORD), ("hWnd", wt.HWND),
+                        ("uID", wt.UINT), ("uFlags", wt.UINT),
+                        ("uCallbackMessage", wt.UINT), ("hIcon", wt.HICON),
+                        ("szTip", wt.WCHAR * 128), ("dwState", wt.DWORD),
+                        ("dwStateMask", wt.DWORD), ("szInfo", wt.WCHAR * 256),
+                        ("uVersion", wt.UINT), ("szInfoTitle", wt.WCHAR * 64),
+                        ("dwInfoFlags", wt.DWORD)]
+
+        _TRAY_API.update({
+            "ctypes": ctypes, "wt": wt, "user32": user32, "shell32": shell32,
+            "kernel32": kernel32, "WNDPROC": WNDPROC, "WNDCLASSW": WNDCLASSW,
+            "NID": NOTIFYICONDATAW, "LRESULT": LRESULT,
+            "NIM_ADD": 0, "NIM_MODIFY": 1, "NIM_DELETE": 2,
+            "NIF_MESSAGE": 1, "NIF_ICON": 2, "NIF_TIP": 4, "NIF_INFO": 0x10,
+            "NIIF_INFO": 1, "NIIF_WARNING": 2,
+            "WM_LBUTTONUP": 0x0202, "WM_LBUTTONDBLCLK": 0x0203,
+            "WM_RBUTTONUP": 0x0205, "WM_COMMAND": 0x0111, "WM_NULL": 0,
+            "TPM_RETURNCMD": 0x0100, "TPM_RIGHTBUTTON": 0x0002,
+            "MF_STRING": 0, "MF_SEPARATOR": 0x0800, "MF_GRAYED": 1,
+            "IMAGE_ICON": 1, "LR_LOADFROMFILE": 0x10, "LR_DEFAULTSIZE": 0x40,
+            "IDI_APPLICATION": 32512,
+        })
+        u = user32
+        u.DefWindowProcW.restype = LRESULT
+        u.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        u.CreateWindowExW.restype = wt.HWND
+        u.CreateWindowExW.argtypes = [wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD,
+                                      ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_int, wt.HWND, wt.HMENU,
+                                      wt.HINSTANCE, wt.LPVOID]
+        u.LoadImageW.restype = wt.HANDLE
+        u.LoadImageW.argtypes = [wt.HINSTANCE, wt.LPCWSTR, wt.UINT,
+                                 ctypes.c_int, ctypes.c_int, wt.UINT]
+        u.LoadIconW.restype = wt.HICON
+        u.LoadIconW.argtypes = [wt.HINSTANCE, wt.LPCWSTR]
+        u.CreatePopupMenu.restype = wt.HMENU
+        u.AppendMenuW.argtypes = [wt.HMENU, wt.UINT, wt.WPARAM, wt.LPCWSTR]
+        u.TrackPopupMenu.restype = ctypes.c_int
+        u.TrackPopupMenu.argtypes = [wt.HMENU, wt.UINT, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, wt.HWND, wt.LPVOID]
+        u.SetForegroundWindow.argtypes = [wt.HWND]
+        u.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        u.DestroyMenu.argtypes = [wt.HMENU]
+        u.DestroyWindow.argtypes = [wt.HWND]
+        u.PostQuitMessage.argtypes = [ctypes.c_int]
+        u.RegisterClassW.restype = wt.ATOM
+        u.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+        u.GetMessageW.argtypes = [ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT]
+        u.TranslateMessage.argtypes = [ctypes.POINTER(wt.MSG)]
+        u.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
+        kernel32.GetModuleHandleW.restype = wt.HMODULE
+        kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+        shell32.Shell_NotifyIconW.argtypes = [wt.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+        shell32.Shell_NotifyIconW.restype = wt.BOOL
+        return _TRAY_API
+    except Exception as e:
+        _TRAY_API["bad"] = True
+        try:
+            print("[tray] Win32 初始化失败：%s" % e)
+        except Exception:
+            pass
+        return None
+
+
+def _tray_menu_items():
+    n = _rc_busy_n()
+    return [
+        ("open", "打开控制台"),
+        ("state", ("录制中 · %d 路" % n) if n else "空闲（等待开播）"),
+        ("dir", "打开录制目录"),
+        ("sep", ""),
+        ("quit", "停止录制并退出（先写完文件）"),
+    ]
+
+
+def _tray_popup(hwnd):
+    A = _tray_api()
+    if not A:
+        return
+    ct, u, wt = A["ctypes"], A["user32"], A["wt"]
+    menu = u.CreatePopupMenu()
+    ids = {}
+    try:
+        i = 0
+        for key, label in _tray_menu_items():
+            if key == "sep":
+                u.AppendMenuW(menu, A["MF_SEPARATOR"], 0, None)
+            else:
+                i += 1
+                ids[i] = key
+                flags = A["MF_STRING"] | (A["MF_GRAYED"] if key == "state" else 0)
+                u.AppendMenuW(menu, flags, i, label)
+        u.SetForegroundWindow(hwnd)
+        cmd = u.TrackPopupMenu(menu, A["TPM_RETURNCMD"] | A["TPM_RIGHTBUTTON"],
+                               0, 0, 0, hwnd, None)
+        u.PostMessageW(hwnd, A["WM_NULL"], 0, 0)
+    finally:
+        u.DestroyMenu(menu)
+    key = ids.get(cmd)
+    if not key:
+        return
+    if key == "open":
+        open_browser(service_url())
+    elif key == "dir":
+        try:
+            d = _rc_doc()["settings"]["dir"]
+            os.makedirs(d, exist_ok=True)
+            os.startfile(d)
+        except Exception as e:
+            _rc_log("打开录制目录失败：%s" % str(e)[:80], lv="warn")
+    elif key == "quit":
+        _rc_log("托盘：停止录制并退出", lv="warn")
+        threading.Thread(target=rc_quit_async, daemon=True).start()
+
+
+def _tray_wndproc(hwnd, msg, wparam, lparam):
+    A = _tray_api()
+    if not A:
+        return 0
+    u = A["user32"]
+    if msg == WM_TRAY:
+        ev = int(lparam) & 0xFFFF
+        if ev in (A["WM_LBUTTONUP"], A["WM_LBUTTONDBLCLK"]):
+            open_browser(service_url())
+        elif ev == A["WM_RBUTTONUP"]:
+            _tray_popup(hwnd)
+        return 0
+    if msg == WM_TRAY_EXIT:
+        _tray_remove()
+        u.DestroyWindow(hwnd)
+        u.PostQuitMessage(0)
+        return 0
+    if msg == WM_TRAY_REFRESH:
+        _tray_apply_tip()
+        return 0
+    return u.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+
+def _tray_nid(flags):
+    A = _tray_api()
+    nid = A["NID"]()
+    nid.cbSize = A["ctypes"].sizeof(A["NID"])
+    nid.hWnd = TRAY["hwnd"]
+    nid.uID = 1
+    nid.uFlags = flags
+    nid.uCallbackMessage = WM_TRAY
+    nid.hIcon = TRAY["icon"]
+    nid.szTip = (TRAY["tip"] or "噼里啪啦")[:127]
+    return nid
+
+
+def _tray_apply_tip():
+    A = _tray_api()
+    if not A or not TRAY["hwnd"] or not TRAY["on"]:
+        return
+    try:
+        A["shell32"].Shell_NotifyIconW(A["NIM_MODIFY"], _tray_nid(A["NIF_TIP"]))
+    except Exception:
+        pass
+
+
+def _tray_remove():
+    A = _tray_api()
+    if not A or not TRAY["hwnd"]:
+        return
+    try:
+        A["shell32"].Shell_NotifyIconW(A["NIM_DELETE"], _tray_nid(0))
+    except Exception:
+        pass
+
+
+def _tray_thread():
+    A = _tray_api()
+    if not A:
+        TRAY["failed"] = "这台系统不支持托盘图标"
+        TRAY["ready"].set()
+        return
+    ct, u, wt = A["ctypes"], A["user32"], A["wt"]
+    try:
+        hinst = A["kernel32"].GetModuleHandleW(None)
+        cls = "ReplayRadioTrayWnd"
+        # ⚠️ 窗口类只注册一次、回调对象必须**永久**留住：
+        #    第二次 tray_start 时类已经注册（1410），如果这里换成新的 WNDPROC，
+        #    旧回调会被 GC，而类里存的还是旧指针 —— CreateWindowExW 一调 WndProc
+        #    就 access violation（实测崩在创建窗口那一行）。
+        proc = _TRAY_PROC[0]
+        if proc is None:
+            proc = A["WNDPROC"](_tray_wndproc)
+            _TRAY_PROC[0] = proc
+        wc = A["WNDCLASSW"]()
+        wc.lpfnWndProc = proc
+        wc.hInstance = hinst
+        wc.lpszClassName = cls
+        if not u.RegisterClassW(ct.byref(wc)):
+            err = ct.get_last_error()
+            if err not in (0, 1410):        # 1410 = 类已注册（重启托盘时）
+                raise RuntimeError("RegisterClassW 失败 %s" % err)
+        hwnd = u.CreateWindowExW(0, cls, "噼里啪啦", 0, 0, 0, 0, 0,
+                                 None, None, hinst, None)
+        if not hwnd:
+            raise RuntimeError("CreateWindowExW 失败 %s" % ct.get_last_error())
+        TRAY["hwnd"] = hwnd
+        ico = os.path.join(ROOT, "favicon.ico")
+        icon = 0
+        if os.path.exists(ico):
+            icon = u.LoadImageW(None, ico, A["IMAGE_ICON"], 16, 16,
+                                A["LR_LOADFROMFILE"])
+        if not icon:
+            icon = u.LoadIconW(None, wt.LPCWSTR(A["IDI_APPLICATION"]))
+        TRAY["icon"] = icon
+        TRAY["tip"] = "噼里啪啦"
+        nid = _tray_nid(A["NIF_MESSAGE"] | A["NIF_ICON"] | A["NIF_TIP"])
+        if not A["shell32"].Shell_NotifyIconW(A["NIM_ADD"], nid):
+            raise RuntimeError("Shell_NotifyIcon 添加失败")
+        TRAY["on"] = True
+        TRAY["failed"] = ""
+        TRAY["ready"].set()
+        msg = wt.MSG()
+        while u.GetMessageW(ct.byref(msg), None, 0, 0) > 0:
+            u.TranslateMessage(ct.byref(msg))
+            u.DispatchMessageW(ct.byref(msg))
+    except Exception as e:
+        TRAY["failed"] = str(e)[:120]
+        TRAY["on"] = False
+        if TRAY["ready"]:
+            TRAY["ready"].set()
+        try:
+            print("[tray] 创建失败：%s" % e)
+        except Exception:
+            pass
+    finally:
+        TRAY["on"] = False
+        TRAY["hwnd"] = 0
+
+
+def tray_start():
+    """按设置显示托盘图标。已经显示就只刷新提示。返回是否成功。"""
+    if TRAY["on"]:
+        tray_tip("噼里啪啦")
+        return True
+    if TRAY["thread"] is not None and TRAY["thread"].is_alive():
+        return False
+    TRAY["ready"] = threading.Event()
+    TRAY["failed"] = ""
+    t = threading.Thread(target=_tray_thread, name="tray", daemon=True)
+    TRAY["thread"] = t
+    t.start()
+    TRAY["ready"].wait(3.0)
+    if TRAY["on"]:
+        _rc_log("后台应用图标已显示（托盘）")
+    elif TRAY["failed"]:
+        _rc_log("后台应用图标没有显示：%s（不影响录制）" % TRAY["failed"], lv="warn")
+    return bool(TRAY["on"])
+
+
+def tray_stop():
+    """隐藏图标。⚠️ 只关显示层，**不动** RC_PROC / 调度线程。"""
+    if not TRAY["on"]:
+        return
+    A = _tray_api()
+    if not A:
+        return
+    try:
+        A["user32"].PostMessageW(TRAY["hwnd"], WM_TRAY_EXIT, 0, 0)
+    except Exception:
+        pass
+    TRAY["on"] = False
+    _rc_log("后台应用图标已隐藏（录制继续）")
+
+
+def tray_tip(text=None):
+    """更新悬停提示；传 None 时按当前录制路数自动生成。"""
+    if not TRAY["on"]:
+        return
+    if text is None:
+        n = _rc_busy_n()
+        text = ("噼里啪啦 · 录制中 %d 路" % n) if n else "噼里啪啦 · 空闲"
+    text = str(text)[:120]
+    if text == TRAY["tip"]:
+        return
+    TRAY["tip"] = text
+    A = _tray_api()
+    if not A:
+        return
+    try:
+        A["user32"].PostMessageW(TRAY["hwnd"], WM_TRAY_REFRESH, 0, 0)
+    except Exception:
+        pass
+
+
+def tray_balloon(title, msg, error=False):
+    """托盘气泡通知（开播通知用）。没有图标时静默跳过。"""
+    if not TRAY["on"]:
+        return
+    A = _tray_api()
+    if not A:
+        return
+    try:
+        nid = _tray_nid(A["NIF_INFO"])
+        nid.szInfoTitle = str(title)[:63]
+        nid.szInfo = str(msg)[:255]
+        nid.dwInfoFlags = A["NIIF_WARNING"] if error else A["NIIF_INFO"]
+        A["shell32"].Shell_NotifyIconW(A["NIM_MODIFY"], nid)
+    except Exception:
+        pass
+
+
+def tray_sync(show):
+    """设置页那个开关的入口。"""
+    if show:
+        return tray_start()
+    tray_stop()
+    return False
+
+
+# ---- 弹幕保存 -------------------------------------------------------------
+# 与录制并行的一条 WS：把 DANMU_MSG 写成 B 站播放器认得的 XML 侧车文件。
+# 它**完全独立**于录制进程 —— 弹幕连不上只少一份 XML，录制照旧。
+DM_LOCK = threading.Lock()
+
+
+def _rc_danmu_info(room):
+    """按**指定房间**取弹幕网关（api_live_danmu_info 用的是「当前主播」，这里不能用）。"""
+    url = wbi_signed("https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo",
+                     {"id": str(room), "type": "0"})
+    d = bili_get(url, "https://live.bilibili.com/%s" % room)
+    if d.get("code") != 0:
+        raise RuntimeError("弹幕网关 code=%s" % d.get("code"))
+    data = d.get("data") or {}
+    hosts = [{"host": h.get("host"), "wss_port": h.get("wss_port") or 443}
+             for h in (data.get("host_list") or []) if h.get("host")]
+    return {"token": data.get("token") or "", "hosts": hosts}
+
+
+def _rc_dm_write(entry, line):
+    fh = entry.get("fh")
+    if not fh:
+        return
+    try:
+        with DM_LOCK:
+            fh.write(line)
+            fh.flush()
+    except Exception:
+        pass
+
+
+def _rc_dm_line(info, start_ts):
+    """DANMU_MSG → 一行 <d p="...">。解析不出来返回空串。"""
+    try:
+        meta = info[0] or []
+        text = str(info[1] or "")
+        who = info[2] or []
+        style = info[3] or []
+        ts = float(meta[4] or 0) / 1000.0
+        rel = max(0.0, ts - start_ts) if ts else 0.0
+        mode = int(meta[1] if len(meta) > 1 else 1) or 1
+        size = int(style[0] if style else 25) or 25
+        color = int(style[1] if len(style) > 1 else 16777215) or 16777215
+        uid = int(who[0] or 0) if who else 0
+        p = "%.2f,%d,%d,%d,%d,0,%d,0" % (rel, mode, size, color,
+                                         int(ts * 1000) if ts else 0, uid)
+        return '<d p="%s">%s</d>\n' % (p, html.escape(text, quote=False))
+    except Exception:
+        return ""
+
+
+def _rc_dm_parse(data, entry, start_ts):
+    off = 0
+    n = 0
+    while off + 16 <= len(data):
+        ln = struct.unpack(">I", data[off:off + 4])[0]
+        if ln < 16 or off + ln > len(data):
+            break
+        ver = struct.unpack(">H", data[off + 6:off + 8])[0]
+        op = struct.unpack(">I", data[off + 8:off + 12])[0]
+        body = data[off + 16:off + ln]
+        if op == 5 and ver in (2, 3):
+            if ver == 2:
+                try:
+                    n += _rc_dm_parse(zlib.decompress(body), entry, start_ts)
+                except Exception:
+                    pass
+        elif op == 5 and ver == 0:
+            try:
+                j = json.loads(body.decode("utf-8", "replace"))
+                if str(j.get("cmd") or "").startswith("DANMU_MSG") and j.get("info"):
+                    line = _rc_dm_line(j["info"], start_ts)
+                    if line:
+                        _rc_dm_write(entry, line)
+                        entry["n"] = int(entry.get("n") or 0) + 1
+            except Exception:
+                pass
+        elif op == 5:
+            n += _rc_dm_parse(body, entry, start_ts)
+        off += ln
+    return n
+
+
+def _rc_dm_worker(room, path, start_ts, stop, entry):
+    try:
+        if self_uid() <= 0:
+            _rc_log("未登录 B 站，跳过弹幕保存", room, entry.get("name"), "warn")
+            return
+    except Exception:
+        return
+    try:
+        fh = open(path, "w", encoding="utf-8", newline="\n")
+    except OSError as e:
+        entry["err"] = str(e)[:100]
+        return
+    entry["fh"] = fh
+    try:
+        with DM_LOCK:
+            fh.write('<?xml version="1.0" encoding="UTF-8"?><i>'
+                     "<chatserver>chat.bilibili.com</chatserver><chatid>%s</chatid>"
+                     "<mission>0</mission><maxlimit>100000</maxlimit><state>0</state>"
+                     "<real_name>0</real_name><source>k-v</source>\n" % room)
+            fh.flush()
+        while not stop.is_set():
+            sock = None
+            try:
+                info = _rc_danmu_info(room)
+                if not info["hosts"]:
+                    raise RuntimeError("没取到弹幕网关")
+                host = info["hosts"][0]["host"]
+                port = info["hosts"][0]["wss_port"]
+                sess = load_credentials()[0]
+                ck = "buvid3=%s; b_nut=%d" % (bili_buvid3(), int(time.time()))
+                if sess:
+                    ck = "SESSDATA=%s; %s" % (sess, ck)
+                sock = _ws_handshake(host, port, "/sub", {
+                    "Origin": "https://live.bilibili.com", "User-Agent": UA, "Cookie": ck})
+                _ws_send(sock, _bili_pack(json.dumps({
+                    "uid": self_uid(), "roomid": int(room), "proto_ver": 2,
+                    "buvid": bili_buvid3(), "platform": "web", "clientver": "1.14.3",
+                    "type": 2, "key": info["token"]}).encode(), 7))
+                entry["err"] = ""
+                last_hb = time.time()
+                while not stop.is_set():
+                    if time.time() - last_hb > 25:
+                        _ws_send(sock, _bili_pack(b"", 2))
+                        last_hb = time.time()
+                    try:
+                        opcode, data = _ws_recv(sock, 3)
+                    except socket.timeout:
+                        continue
+                    if opcode is None:
+                        raise RuntimeError("网关关闭了连接")
+                    if opcode == 2:
+                        _rc_dm_parse(data, entry, start_ts)
+                    elif opcode == 9:
+                        _ws_send(sock, data, opcode=10)
+                    elif opcode == 8:
+                        raise RuntimeError("网关要求关闭")
+            except Exception as e:
+                if stop.is_set():
+                    break
+                msg = "%s: %s" % (type(e).__name__, str(e)[:80])
+                if entry.get("err") != msg:
+                    entry["err"] = msg
+                    _rc_log("弹幕保存中断（%s），3 秒后重连" % msg, room, entry.get("name"), "warn")
+                time.sleep(3)
+            finally:
+                if sock:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+    finally:
+        try:
+            with DM_LOCK:
+                fh.write("</i>\n")
+                fh.close()
+        except Exception:
+            pass
+        entry["fh"] = None
+
+
+def _rc_dm_start(room, path, start_ts, name=""):
+    """开一条弹幕保存线程。
+
+    ⚠️ 登录检查放在线程里做：self_uid() 是网络请求，放在 _rc_launch（调度线程）里
+       会卡住整个房间扫描；放在这里最多影响这一路的 XML。
+    """
+    stop = threading.Event()
+    entry = {"stop": stop, "xml": path, "n": 0, "err": "", "name": name}
+    t = threading.Thread(target=_rc_dm_worker,
+                         args=(str(room), path, start_ts, stop, entry),
+                         name="dm-%s" % room, daemon=True)
+    with REC_LOCK:
+        old = RC_DM.get(str(room))
+        RC_DM[str(room)] = entry
+    if old:
+        try:
+            old["stop"].set()
+        except Exception:
+            pass
+    t.start()
+    entry["thread"] = t
+
+
+def _rc_dm_stop(room, wait=2.0):
+    with REC_LOCK:
+        entry = RC_DM.pop(str(room), None)
+    if not entry:
+        return
+    try:
+        entry["stop"].set()
+        t = entry.get("thread")
+        if t is not None:
+            t.join(wait)
+    except Exception:
+        pass
+
+
+def _rc_cover_save(url, path):
+    if not url:
+        return
+
+    def run():
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": UA, "Referer": "https://live.bilibili.com/"})
+            with DIRECT_OPENER.open(req, timeout=15) as resp:
+                data = resp.read(4 * 1024 * 1024)
+            if data:
+                with open(path, "wb") as f:
+                    f.write(data)
+        except Exception:
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _rc_qn(doc):
+    """按「逗号分割的画质ID」取第一个可用档位（原画优先）。"""
+    for x in str(doc["settings"].get("qnIds") or "").split(","):
+        x = x.strip()
+        if x.isdigit() and int(x) in RC_QN_VALID:
+            return int(x)
+    return doc["settings"].get("qn") or RC_QN
+
+
+def _rc_kill(room, why="", rotate=False):
     """停掉这一路的 ffmpeg。
 
     先给它 stdin 写一个 `q`（ffmpeg 的交互退出键）：它会把当前包写完、把文件尾部
     收干净再退。直接 terminate 会截在任意位置 —— FLV 还能播，但最后几秒容易丢。
     卡住不响应时才退回强杀。
+
+    rotate=True 表示「自动分段换文件」，此时不把状态置回 idle、也不发收尾 webhook
+    之外的通知（新的一路马上接上）。
     """
     room = str(room)
     p = RC_PROC.pop(room, None)
     rt = _rc_rt(room)
+    _rc_dm_stop(room, 2.0)
     if p is not None:
         clean = False
         try:
@@ -1983,47 +2789,113 @@ def _rc_kill(room, why=""):
                 p.wait(timeout=3)
             except Exception:
                 pass
-        _rc_log("结束录制（%s，%s）" % (why or "手动停止",
-                                       "正常收尾" if clean else "强制结束"), room)
-    rt.update(state="idle", since=0, pid=0)
+        try:
+            got = os.path.getsize(rt["file"]) if rt.get("file") else 0
+        except OSError:
+            got = 0
+        rt["bytes"] = got
+        _rc_log("结束录制（%s，%s，%.1f MB）" % (
+            why or "手动停止", "正常收尾" if clean else "强制结束", got / 1024.0 ** 2),
+            room, rt.get("name") or "", "warn" if not clean else "info")
+        if not rotate:
+            _rc_webhook(_rc_doc(), "SessionEnded", {
+                "RoomId": int(room) if room.isdigit() else 0,
+                "Name": rt.get("name") or "",
+                "Title": rt.get("liveTitle") or rt.get("title") or "",
+                "FilePath": rt.get("file") or "",
+                "FileSize": got,
+                "Duration": max(0, int(time.time() - (rt.get("since") or time.time()))),
+                "Reason": why or "手动停止",
+            })
+    if not rotate:
+        rt.update(state="idle", since=0, pid=0)
     return p is not None
 
 
 def _rc_launch(doc, r):
     """起一路录制。失败抛异常，由调度器记进该房间的 error。"""
+    st = doc["settings"]
     room = str(r["room"])
     rt = _rc_rt(room)
-    outdir = _clip_check_dir(r.get("dir") or doc["settings"]["dir"]) or doc["settings"]["dir"]
+    outdir = _clip_check_dir(r.get("dir") or st["dir"]) or st["dir"]
     os.makedirs(outdir, exist_ok=True)
     ff = seg_ffmpeg()
     if not ff:
         raise RuntimeError("本机没找到 ffmpeg，无法录制")
     # 录制要「现在就新鲜」的地址：播放器那个缓存 TTL 是给 <video> 用的，别复用
     LIVE_URL_CACHE.pop(room, None)
-    info = live_play_url(room, doc["settings"]["qn"])
-    base = _rc_filename(r.get("name"), room)
-    out = os.path.join(outdir, base)
-    n = 2
-    while os.path.exists(out):          # 同一秒重复开录（极少）：加序号，不覆盖
-        out = os.path.join(outdir, base[:-4] + "_%d.flv" % n)
-        n += 1
+    try:
+        info = _rc_room_info(room)
+    except Exception:
+        info = {"title": rt.get("title") or "", "area": "", "cover": ""}
+    qn = _rc_qn(doc)
+    play = live_play_url(room, qn)
+    now = time.time()
+    # 开了任何一种分段就带 _partNN；否则单一文件（更接近「一场一个文件」的习惯）
+    seg_no = int(rt.get("segNo") or 0)
+    if st["segment"] != "none" or st["segmentTitle"]:
+        seg_no += 1
+    base = _rc_out_base(doc, r, info.get("title") or rt.get("title"),
+                        info.get("area") or rt.get("area"), now, seg_no)
+    os.makedirs(os.path.dirname(base) or outdir, exist_ok=True)
+    out = base + ".flv"
     hdr = "Referer: https://live.bilibili.com/\r\nUser-Agent: %s\r\n" % UA
-    cmd = [ff, "-hide_banner", "-loglevel", "error",
+    # 「标准模式录制修复设置」在这里落地：原始数据模式下什么都不加
+    extra = []
+    if st["mode"] == "standard":
+        if st["repairMissing"]:
+            extra += ["-fflags", "+genpts+discardcorrupt"]
+        if st["repairGlitch"]:
+            extra += ["-err_detect", "ignore_err"]
+    cmd = [ff, "-hide_banner", "-loglevel", "error"] + extra + [
            # 断线自动重连：B 站 FLV 拉流偶尔会断，ffmpeg 自己接得上就不用重启进程
            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
            "-headers", hdr,
-           "-i", info["url"], "-c", "copy", "-f", "flv", "-y", out]
+           "-i", play["url"], "-c", "copy", "-f", "flv", "-y", out]
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with REC_LOCK:
         RC_PROC[room] = p
-    rt.update(state="recording", since=time.time(), file=out, bytes=0,
-              error="", pid=p.pid, next=0, living=True)
+    rt.update(state="recording", since=now, file=out, bytes=0, error="", pid=p.pid,
+              next=0, living=True, segNo=seg_no, liveTitle=info.get("title") or "",
+              title=info.get("title") or rt.get("title"), area=info.get("area") or "",
+              name=r.get("name") or room, cover=base + ".cover.jpg",
+              xml=base + ".xml", titleAt=now, skip="")
     _rc_log("开始录制 → %s" % os.path.basename(out), room, r.get("name"), "ok")
+    if st["cover"]:
+        _rc_cover_save(info.get("cover"), base + ".cover.jpg")
+    if st["danmaku"]:
+        _rc_dm_start(room, base + ".xml", now, r.get("name"))
+    _rc_webhook(doc, "SessionStarted", {
+        "RoomId": int(room) if room.isdigit() else 0,
+        "Name": r.get("name") or "",
+        "Title": info.get("title") or "",
+        "FilePath": out,
+        "Qn": qn,
+    })
+    if st["notify"]:
+        _rc_notify("开始录制", "%s · %s" % (r.get("name") or room,
+                                          (info.get("title") or "直播中")[:40]),
+                   room, r.get("name"))
+    tray_tip(None)
+
+
+def _rc_rotate(doc, r, why):
+    """分段换文件：先正常收尾，再立刻接上下一段（不经过调度等待）。"""
+    room = str(r["room"])
+    _rc_kill(room, why, rotate=True)
+    try:
+        _rc_launch(doc, r)
+    except Exception as e:
+        rt = _rc_rt(room)
+        rt.update(state="error", error=str(e)[:140], since=0, pid=0)
+        rt["next"] = time.time() + 20
+        _rc_log("分段后重开失败：%s" % str(e)[:120], room, r.get("name"), "err")
 
 
 def _rc_tick():
     doc = _rc_doc()
+    st = doc["settings"]
     now = time.time()
     live_n = 0
     for p in list(RC_PROC.values()):
@@ -2032,6 +2904,7 @@ def _rc_tick():
                 live_n += 1
         except Exception:
             pass
+    skip_re = _rc_skip_re(doc)
     for r in doc["rooms"]:
         room = str(r["room"])
         rt = _rc_rt(room)
@@ -2042,6 +2915,31 @@ def _rc_tick():
                     rt["bytes"] = os.path.getsize(rt["file"]) if rt["file"] else 0
                 except OSError:
                     pass
+                # 自动分段：按大小 / 按时间
+                size_mb = (rt.get("bytes") or 0) / 1024.0 ** 2
+                mins = (now - (rt.get("since") or now)) / 60.0
+                if ((st["segment"] == "size" and size_mb >= st["segmentSize"])
+                        or (st["segment"] == "time"
+                            and mins >= st["segmentMinutes"])):
+                    _rc_rotate(doc, r, "自动分段")
+                    continue
+                # 改标题分段：每 2 分钟问一次（不查的话标题只在开播时那次请求里）
+                if st["segmentTitle"] and now - (rt.get("titleAt") or 0) > 120:
+                    rt["titleAt"] = now
+                    try:
+                        info = _rc_room_info(room)
+                        new_title = info.get("title") or ""
+                        if new_title and rt.get("liveTitle") and new_title != rt["liveTitle"]:
+                            _rc_log("直播间改了标题（%s）→ 分段" % new_title[:40],
+                                    room, r.get("name"))
+                            _rc_rotate(doc, r, "标题变更")
+                            continue
+                        if new_title:
+                            rt["liveTitle"] = new_title
+                            rt["title"] = new_title
+                        rt["living"] = info.get("living")
+                    except Exception:
+                        pass
                 continue
             RC_PROC.pop(room, None)
             live_n = max(0, live_n - 1)
@@ -2053,6 +2951,7 @@ def _rc_tick():
                 got = os.path.getsize(rt["file"]) if rt["file"] else 0
             except OSError:
                 got = 0
+            _rc_dm_stop(room, 1.0)
             if got < 1024 * 1024:
                 rt["tinyN"] = int(rt.get("tinyN") or 0) + 1
             else:
@@ -2063,13 +2962,32 @@ def _rc_tick():
             _rc_log("录制进程结束（退出码 %s，%.0f KB）%s" % (
                 rc, got / 1024.0, "，%d 秒后重试" % back if r["enabled"] else ""),
                 room, r.get("name"), "warn" if rc or got < 1024 * 1024 else "info")
+            _rc_webhook(doc, "SessionEnded", {
+                "RoomId": int(room) if room.isdigit() else 0,
+                "Name": r.get("name") or "",
+                "Title": rt.get("liveTitle") or rt.get("title") or "",
+                "FilePath": rt.get("file") or "",
+                "FileSize": got,
+                "Duration": max(0, int(now - (rt.get("since") or now))),
+                "Reason": "流中断" if rc else "主播下播",
+            })
+            if st["notify"] and got >= 1024 * 1024:
+                _rc_notify("录制结束", "%s · %.1f MB" % (r.get("name") or room,
+                                                        got / 1024.0 ** 2),
+                           room, r.get("name"))
             if int(rt.get("tinyN") or 0) == 3:
                 _rc_log("这个直播间连续 3 次只录到不到 1MB，像是在测试或推流不稳；"
                         "已放慢重试，不再频繁新开文件", room, r.get("name"), "err")
+            tray_tip(None)
             continue
         if not r["enabled"]:
             if rt["state"] != "idle":
                 rt.update(state="idle", since=0, pid=0, error="")
+            continue
+        if RC_EXITING[0]:
+            # 页面已关、正在等收尾：不再开新的文件，让当前这一段写完就走
+            if rt["state"] != "waiting":
+                rt.update(state="waiting", error="页面已关闭，收尾后退出")
             continue
         if now < (rt.get("next") or 0):
             continue
@@ -2081,18 +2999,28 @@ def _rc_tick():
             _rc_log("查询开播失败：%s" % str(e)[:120], room, r.get("name"), "err")
             continue
         rt["title"] = info["title"]
+        rt["area"] = info.get("area") or rt.get("area") or ""
         rt["living"] = info["living"]
         if not info["living"]:
             rt.update(state="waiting", error="")
             rt["next"] = now + RC_POLL
             continue
+        if skip_re is not None and skip_re.search(info["title"] or ""):
+            rt.update(state="waiting", error="标题命中跳过规则")
+            rt["next"] = now + RC_POLL
+            if rt.get("skip") != info["title"]:
+                rt["skip"] = info["title"]
+                _rc_log("标题「%s」命中跳过规则，不录这一场" % (info["title"] or "")[:40],
+                        room, r.get("name"), "warn")
+            continue
+        rt["skip"] = ""
         if live_n >= RC_MAX_LIVE:
             rt.update(state="waiting", error="")
             rt["next"] = now + 20
             _rc_log("同时录制已达上限 %d 路，这一路稍后再试" % RC_MAX_LIVE,
                     room, r.get("name"), "warn")
             continue
-        outdir = _clip_check_dir(r.get("dir") or doc["settings"]["dir"]) or doc["settings"]["dir"]
+        outdir = _clip_check_dir(r.get("dir") or st["dir"]) or st["dir"]
         free = _rc_disk(outdir)["free"]
         if free and free < RC_MIN_FREE:
             rt.update(state="error", error="磁盘剩余不足 2GB")
@@ -2107,6 +3035,7 @@ def _rc_tick():
             rt.update(state="error", error=str(e)[:140])
             rt["next"] = now + 30
             _rc_log("开录失败：%s" % str(e)[:120], room, r.get("name"), "err")
+    tray_tip(None)
 
 
 def _rc_loop():
@@ -2137,10 +3066,16 @@ def _rc_room_payload(doc, r):
     out.update(state=rt.get("state") or "idle",
                since=int(rt.get("since") or 0),
                file=os.path.basename(rt.get("file") or ""),
+               filePath=rt.get("file") or "",
                bytes=int(rt.get("bytes") or 0),
                error=rt.get("error") or "",
                pid=int(rt.get("pid") or 0),
                title=rt.get("title") or "",
+               liveTitle=rt.get("liveTitle") or "",
+               area=rt.get("area") or "",
+               segNo=int(rt.get("segNo") or 0),
+               hasXml=bool(rt.get("xml") and os.path.exists(rt.get("xml"))),
+               hasCover=bool(rt.get("cover") and os.path.exists(rt.get("cover"))),
                living=bool(rt.get("living")))
     return out
 
@@ -2163,6 +3098,9 @@ def recorder_kick():
         _rc_ensure_loop()
         _rc_log("录制调度已启动（%d 个房间%s）" % (
             len(doc["rooms"]), "，自动录制开" if doc["settings"].get("auto", True) else ""))
+        # 后台应用图标按设置显示。失败不影响录制（tray_start 内部吞异常）
+        if doc["settings"].get("tray", True):
+            tray_start()
     except Exception as e:
         print("[recorder] 启动调度失败：%s" % e)
 
@@ -2175,9 +3113,12 @@ def api_rc_state(query):
     with REC_LOCK:
         log = list(RC_LOG[-120:])
     return 200, {"settings": doc["settings"], "defaultDir": _rc_default_dir(),
+                 "template": RC_DEFAULT_TEMPLATE,
                  "ffmpeg": seg_ffmpeg(), "maxLive": RC_MAX_LIVE,
                  "minFree": RC_MIN_FREE, "maxRooms": RC_MAX_ROOMS,
                  "disk": disk, "now": time.time(), "log": log,
+                 "busy": _rc_busy_n(), "exiting": bool(RC_EXITING[0]),
+                 "tray": {"on": bool(TRAY["on"]), "failed": TRAY["failed"]},
                  "rooms": [_rc_room_payload(doc, r) for r in doc["rooms"]]}
 
 
@@ -2217,7 +3158,8 @@ def api_rc_files(query):
                 continue
             seen.add(fp)
             out.append({"room": rm, "name": nm, "file": f, "size": stt.st_size,
-                        "mtime": int(stt.st_mtime), "dir": d2})
+                        "mtime": int(stt.st_mtime), "dir": d2,
+                        "path": fp})
     out.sort(key=lambda x: -x["mtime"])
     return 200, {"files": out[:300], "total": len(out),
                  "dir": doc["settings"]["dir"]}
@@ -2294,28 +3236,102 @@ def api_rc_stop(obj):
     return 200, {"ok": True, "wasRecording": killed}
 
 
+def _rc_bool(v):
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
 def api_rc_settings(obj):
-    """POST /api/recorder/settings {dir?, qn?}。"""
+    """POST /api/recorder/settings —— 增量保存。只处理请求里出现的键。"""
     doc = _rc_doc()
+    st = doc["settings"]
     if "dir" in obj:
         d = _clip_check_dir(obj.get("dir"))
         if not d:
             return 400, {"error": "目录不合法：要绝对路径，且不能是系统目录"}
-        doc["settings"]["dir"] = d
+        st["dir"] = d
     if "qn" in obj:
         try:
             qn = int(obj.get("qn"))
         except (TypeError, ValueError):
             qn = RC_QN
-        doc["settings"]["qn"] = qn if qn in (10000, 400, 250, 150) else RC_QN
-    if "auto" in obj:
-        doc["settings"]["auto"] = bool(obj.get("auto"))
-        # 打开时把现有房间一并置为监控（否则「打开了却还在等用户点」）
-        if doc["settings"]["auto"]:
-            for r in doc["rooms"]:
-                r["enabled"] = True
+        st["qn"] = qn if qn in RC_QN_VALID else RC_QN
+    if "qnIds" in obj:
+        raw = re.sub(r"[^0-9,]", "", str(obj.get("qnIds") or ""))
+        ids = [x for x in raw.split(",") if x.strip()]
+        bad = [x for x in ids if int(x) not in RC_QN_VALID]
+        if bad:
+            return 400, {"error": "画质 ID 只支持 %s"
+                                  % "、".join(str(x) for x in RC_QN_VALID)}
+        st["qnIds"] = ",".join(ids[:6]) or "10000,400,250,150"
+    if "mode" in obj:
+        st["mode"] = "raw" if str(obj.get("mode")) == "raw" else "standard"
+    if "segment" in obj:
+        seg = str(obj.get("segment") or "none")
+        if seg not in ("none", "size", "time"):
+            return 400, {"error": "自动分段方式不合法"}
+        st["segment"] = seg
+    if "segmentSize" in obj:
+        try:
+            st["segmentSize"] = max(16, min(10240, int(obj.get("segmentSize"))))
+        except (TypeError, ValueError):
+            return 400, {"error": "分片大小要填 16~10240 MB"}
+    if "segmentMinutes" in obj:
+        try:
+            st["segmentMinutes"] = max(1, min(720, int(obj.get("segmentMinutes"))))
+        except (TypeError, ValueError):
+            return 400, {"error": "分片时长要填 1~720 分钟"}
+    if "filename" in obj:
+        tpl = str(obj.get("filename") or "")[:200]
+        if tpl.count("{{") != tpl.count("}}"):
+            return 400, {"error": "文件名模板的 {{ }} 没有配对"}
+        st["filename"] = tpl
+    if "skipTitle" in obj:
+        raw = str(obj.get("skipTitle") or "")[:500]
+        if raw.strip():
+            try:
+                re.compile(raw)
+            except re.error as e:
+                return 400, {"error": "跳过规则不是合法正则：%s" % str(e)[:80]}
+        st["skipTitle"] = raw
+    for k in ("webhookV2", "webhookV1"):
+        if k in obj:
+            u = str(obj.get(k) or "").strip()[:300]
+            if u and not re.match(r"^https?://", u, re.I):
+                return 400, {"error": "Webhook 地址必须以 http:// 或 https:// 开头"}
+            st[k] = u
+    for k in ("auto", "tray", "danmaku", "repairMissing", "repairGlitch",
+              "segmentTitle", "cover", "filenameDefault", "notify"):
+        if k in obj:
+            st[k] = _rc_bool(obj.get(k))
+    # 打开自动录制时把现有房间一并置为监控（否则「打开了却还在等用户点」）。
+    # ⚠️ 只在本次请求真的改了 auto 时才做：否则用户手动停掉的房间会被
+    #    「保存任意一个设置」重新打开（看着像停止按钮失效）。
+    if "auto" in obj and st["auto"]:
+        for r in doc["rooms"]:
+            r["enabled"] = True
     _rc_save(doc)
-    return 200, {"ok": True, "settings": doc["settings"]}
+    if "tray" in obj:
+        try:
+            tray_sync(st["tray"])
+        except Exception as e:
+            _rc_log("切换后台图标失败：%s（不影响录制）" % str(e)[:80], lv="warn")
+    return 200, {"ok": True, "settings": st, "tray": {"on": bool(TRAY["on"]),
+                                                     "failed": TRAY["failed"]}}
+
+
+def api_rc_name_test(obj):
+    """POST /api/recorder/name_test {template, filenameDefault} —— 模板预览。"""
+    doc = _rc_doc()
+    tpl = (RC_DEFAULT_TEMPLATE if _rc_bool(obj.get("filenameDefault"))
+           else str(obj.get("template") or ""))[:200]
+    r = doc["rooms"][0] if doc["rooms"] else {"room": "123456", "name": "主播名",
+                                             "uid": "10000"}
+    rel = _rc_render_name(tpl, _rc_name_values(
+        r.get("room"), r.get("name"), r.get("uid"), "直播标题", "虚拟主播", time.time(), 1))
+    return 200, {"ok": True, "rel": rel, "full": os.path.join(
+        _clip_check_dir(doc["settings"]["dir"]) or doc["settings"]["dir"], rel) + ".flv"}
 
 
 def api_rc_pick(obj):
@@ -2327,6 +3343,36 @@ def api_rc_pick(obj):
     if p == "":
         return 200, {"ok": False, "cancelled": True}
     return 200, {"ok": True, "dir": p}
+
+
+def api_rc_reveal(obj):
+    """POST /api/recorder/reveal {path} —— 在资源管理器里定位某个录制文件。
+
+    只允许配置过的输出目录下的文件（这是本机服务，但也不能变成任意路径探测器）。
+    """
+    p = os.path.abspath(str(obj.get("path") or "").strip())
+    doc = _rc_doc()
+    roots = [doc["settings"]["dir"]] + [r.get("dir") for r in doc["rooms"] if r.get("dir")]
+    inside = False
+    for d in roots:
+        d = _clip_check_dir(d) or ""
+        if not d:
+            continue
+        try:
+            if os.path.commonpath([p, os.path.abspath(d)]) == os.path.abspath(d):
+                inside = True
+                break
+        except ValueError:
+            pass
+    if not inside or not os.path.exists(p):
+        return 400, {"error": "这个文件不在录制目录里"}
+    if os.name != "nt":
+        return 501, {"error": "只支持 Windows"}
+    try:
+        subprocess.Popen(["explorer.exe", "/select,", p])
+    except OSError as e:
+        return 400, {"error": str(e)}
+    return 200, {"ok": True}
 
 
 def api_rc_open(obj):
@@ -6348,13 +7394,15 @@ def _seg_busy():
 
 
 def _exit_now():
-    """关掉网页就退出 —— 但**正在补分段时不走**。
+    """关掉网页就退出 —— 但**正在补分段 / 正在录制时不走**。
 
-    分析一整场回放要十几分钟到半小时，而分段跑在 daemon 线程里，进程一死它就跟着没。
-    于是「页面一关」= 排队里的几期永远补不完：每次开页面都从头开始，进度永远停在 0，
-    自动更新看着就像坏了。所以没跑完就先不退，每 30 秒再看一次；
-    超过 SEG_EXIT_GRACE 照退 —— 已完成的分P 都落盘了，下次接着补，不会白干。
-    /api/quit（脚本 / 命令行停止）直接 shutdown，不走这条路，始终立即生效。
+    分段：分析一整场回放要十几分钟，进程一死 daemon 线程就跟着没。
+    录制：写盘中途被杀会丢最后几秒（强杀更糟），所以一发现有录制在写，
+          就只是把进程留在后台，每 15 秒看一次；写完后自动退出。
+          ⚠️ 这里**不做超时**：用户明确要求「不得因页面关闭而中断录制」。
+          页面关掉期间也不会再开新录制（见 _rc_tick 里的 RC_EXITING 判断），
+          所以当前这一段结束就是退出点。
+    /api/quit 与托盘的「停止录制并退出」走 rc_quit_async：先正常收尾再关服务。
     """
     if _seg_busy():
         now = time.time()
@@ -6367,12 +7415,76 @@ def _exit_now():
             _schedule_exit(30.0)
             return
         print("等分段超时，先退出（下次启动会接着补）")
+    if _rc_busy():
+        n = _rc_busy_n()
+        if not RC_EXITING[0]:
+            RC_EXITING[0] = time.time()
+            _rc_log("网页已关闭，但还有 %d 路录制在写盘 —— 后台继续录，"
+                    "文件写完自动退出" % n, lv="warn")
+            tray_tip("噼里啪啦 · 收尾中（%d 路录制）" % n)
+        _schedule_exit(15.0)
+        return
+    if RC_EXITING[0]:
+        RC_EXITING[0] = 0.0
+        _rc_log("录制已收尾，后台进程退出", lv="ok")
     srv = SERVER_REF[0]
     if srv:
         try:
             srv.shutdown()       # main() 的 serve_forever 会随即返回，进程正常退出
         except Exception:
             pass
+
+
+def service_url():
+    srv = SERVER_REF[0]
+    try:
+        return "http://127.0.0.1:%d/" % srv.server_address[1]
+    except Exception:
+        return "http://127.0.0.1:8765/"
+
+
+def rc_finalize_all(why="应用退出"):
+    """把所有录制正常收尾（写 q、等 ffmpeg 落盘），并停掉弹幕侧车。
+
+    这是「安全退出」的唯一入口：托盘退出、/api/quit、主循环结束都走它。
+    单路失败只记日志，不影响其它路 —— 但会等每一路自己写完。
+    """
+    with REC_LOCK:
+        rooms = list(RC_PROC.keys())
+    for room in rooms:
+        try:
+            _rc_kill(room, why)
+        except Exception as e:
+            _rc_log("收尾 %s 失败：%s" % (room, str(e)[:80]), room, lv="err")
+    with REC_LOCK:
+        dms = list(RC_DM.keys())
+    for room in dms:
+        try:
+            _rc_dm_stop(room, 3.0)
+        except Exception:
+            pass
+
+
+def rc_quit_async(why="应用退出"):
+    """安全退出：先收尾（可能阻塞几秒），再关服务。必须跑在独立线程里。"""
+    try:
+        _rc_log("正在收尾录制并退出…", lv="warn")
+        try:
+            tray_balloon("正在停止录制", "文件写完后自动退出，请稍候…")
+        except Exception:
+            pass
+        rc_finalize_all(why)
+    finally:
+        try:
+            tray_stop()
+        except Exception:
+            pass
+        srv = SERVER_REF[0]
+        if srv:
+            try:
+                srv.shutdown()
+            except Exception:
+                pass
 
 
 def _schedule_exit(delay):
@@ -6398,6 +7510,9 @@ def page_alive(cid):
         PAGES[cid] = time.time()
         PAGES_SEEN[0] = True
     SEG_EXIT_DEADLINE[0] = 0.0       # 页面回来了，之前那次「等分段」的宽限期作废
+    if RC_EXITING[0]:
+        RC_EXITING[0] = 0.0
+        _rc_log("页面重新连上，继续按房间检测开播", lv="ok")
     _cancel_exit()
     return 200, {"ok": True}
 
@@ -7037,8 +8152,10 @@ class Handler(SimpleHTTPRequestHandler):
                                     "build": read_build_stamp(), "ban_left": _left})
         if parsed.path == "/api/quit":
             # 供「停止」脚本调用。服务只绑 127.0.0.1，外部访问不到。
-            # shutdown() 要等 serve_forever 退出，必须另起线程，否则会把当前响应卡死。
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            # ⚠️ 现在要先给正在录的 ffmpeg 写 q 收尾（否则最后几秒丢），
+            #    shutdown() 也要等 serve_forever 退出，所以统一丢到线程里做。
+            threading.Thread(target=rc_quit_async, args=("停止服务",),
+                             daemon=True).start()
             return self._json(200, {"ok": True})
         if parsed.path == "/api/playurl":
             code, obj = api_playurl(q)
@@ -7259,6 +8376,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_rc_pick(obj))
         if parsed.path == "/api/recorder/open":
             return self._json(*api_rc_open(obj))
+        if parsed.path == "/api/recorder/name_test":
+            return self._json(*api_rc_name_test(obj))
+        if parsed.path == "/api/recorder/reveal":
+            return self._json(*api_rc_reveal(obj))
         if parsed.path == "/api/clip/pick":
             return self._json(*api_clip_pick(obj))
         if parsed.path == "/api/series/refresh":
@@ -8430,13 +9551,20 @@ def main():
     series_kick()
     # 录播姬：启动即开始按房间检测开播（auto 开着时不需要手动点「开始监控」）
     recorder_kick()
-    print("  退出时机：网页全部关闭后自动退出（另有 %d 分钟无心跳兜底）"
-          % int(PAGE_IDLE // 60))
+    print("  退出时机：网页全部关闭后自动退出（正在录制时会先等文件写盘；"
+          "另有 %d 分钟无心跳兜底）" % int(PAGE_IDLE // 60))
 
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n已停止")
+    finally:
+        # 不管从哪条路退出（/api/quit、托盘、Ctrl+C），都先让 ffmpeg 正常收尾
+        try:
+            rc_finalize_all("应用退出")
+        except Exception as e:
+            print("[recorder] 收尾异常：%s" % e)
+        tray_stop()
     return 0
 
 
