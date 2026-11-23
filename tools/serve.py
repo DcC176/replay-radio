@@ -1166,7 +1166,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.23"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.24"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
@@ -4713,7 +4713,10 @@ FOLLOW_UIDS_TTL = 1800           # 关注关系变化很慢，uid 名单缓存�
 # 落盘缓存：进程重启后第一次进监控室也不必干等（实测冷启动约 1.2 秒）。
 # 超过这个时长就当作没有 —— 半年前的名单没有意义。
 FOLLOW_DISK = os.path.join(ROOT, "data", "follow_cache.json")
-FOLLOW_DISK_TTL = 86400
+# 落盘缓存只负责「刚重启就有一份东西可画」。在播名单是会过期的：晚上 88 位、
+# 次日白天只剩 36 位是正常现象，所以最多认一小时 —— 之前给 24 小时，
+# 结果 20 小时前的名单被当成「当前在播」，格子里全写着「未开播」。
+FOLLOW_DISK_TTL = 3600
 FOLLOW_CACHE = {"at": 0.0, "list": [], "uids": [], "uids_at": 0.0, "busy": False,
                 "disk_tried": False}
 FOLLOW_LOCK = threading.Lock()
@@ -4881,7 +4884,12 @@ def _follow_batch(batch):
 
 
 def _follow_live_fetch():
-    """同步跑完整条链：名单 → 并发查开播 → 按人气排序。"""
+    """同步跑完整条链：名单 → 并发查开播 → 按人气排序。
+
+    ⚠️ 只要**有一批**取失败就必须整体抛错：那一批里的在播主播会整批消失，
+       对比旧数据看起来就像「大家都下播了」，会被当成正常结果写进缓存。
+       以前只在「所有批都失败」时才抛，单批失败会被静默吞掉。
+    """
     uids = _following_uids()
     batches = [uids[i:i + FOLLOW_BATCH] for i in range(0, len(uids), FOLLOW_BATCH)]
     live = []
@@ -4889,11 +4897,18 @@ def _follow_live_fetch():
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(FOLLOW_WORKERS, len(batches))) as ex:
             got = list(ex.map(_follow_batch, batches))
-        if all(g is None for g in got):
-            raise RuntimeError("开播状态全部取失败（可能被限流）")
+        # 失败批次单独重试一次（间隔 0.4 秒，避开瞬时 412 / 连接被关）
+        for i, g in enumerate(got):
+            if g is None:
+                time.sleep(0.4)
+                got[i] = _follow_batch(batches[i])
+        missing = [i + 1 for i, g in enumerate(got) if g is None]
+        if missing:
+            raise RuntimeError("开播状态有 %d/%d 批取失败（第 %s 批，可能被限流）"
+                               % (len(missing), len(batches),
+                                  "、".join(str(x) for x in missing[:5])))
         for g in got:
-            if g:
-                live.extend(g)
+            live.extend(g)
     live.sort(key=lambda x: -(x.get("online") or 0))    # 人多的排前面，监控场景直觉
     return live
 
@@ -4902,7 +4917,8 @@ def _follow_disk_load():
     """把上次落盘的名单 / 在播列表装回内存（进程重启后第一次进监控室不必干等）。
 
     任何异常都当作「没有缓存」—— 缓存不该把功能带崩。只装「还新鲜」的东西：
-    在播列表给 24 小时（当 stale 用，后台会立刻刷新），名单给 `FOLLOW_UIDS_TTL`。
+    在播列表只认 `FOLLOW_DISK_TTL`（1 小时，当 stale 用、后台立刻刷新），
+    名单给 `FOLLOW_UIDS_TTL`。
     """
     try:
         with open(FOLLOW_DISK, encoding="utf-8") as f:
@@ -4939,11 +4955,14 @@ def _follow_disk_save():
 
 
 def _follow_store(live):
-    """写缓存，并挡住「新结果比旧结果少一半以上」这种残缺覆盖。"""
-    old = FOLLOW_CACHE["list"]
-    if old and len(old) >= 4 and len(live) < len(old) / 2:
-        raise RuntimeError("新结果只有 %d 位在播（旧数据 %d 位），疑似上游残缺，保留旧数据"
-                           % (len(live), len(old)))
+    """写缓存。
+
+    ⚠️ **不要**再按「新结果比旧结果少一半」判残缺。在播人数从晚高峰到白天掉一半
+       是正常现象；这条启发式一旦误判，新的正确名单会被永远挡在门外，页面就一直
+       显示几小时前的那份（实测：88 → 36 被拒，20 小时后仍是 88，格子里 71 个
+       写着「未开播」）。完整性现在由 `_follow_live_fetch` 的「任一批失败即抛错」
+       保证，这里只负责落盘。
+    """
     with FOLLOW_LOCK:
         FOLLOW_CACHE["at"] = time.time()
         FOLLOW_CACHE["list"] = live
@@ -5001,9 +5020,19 @@ def api_following_live(force=False):
                      "age": int(now - FOLLOW_CACHE["at"]), "refreshing": busy}
     if old and force and FOLLOW_CACHE["busy"]:
         # 已经在后台刷了：再同步跑一轮只会白打一遍接口（还可能招风控）
-        return 200, {"list": old, "cached": True, "stale": True, "refreshing": True}
+        return 200, {"list": old, "cached": True, "stale": True, "refreshing": True,
+                     "age": int(now - FOLLOW_CACHE["at"])}
     t0 = time.time()
-    live = _follow_live_fetch()
+    try:
+        live = _follow_live_fetch()
+    except Exception as e:
+        # 同步取失败：有旧数据就把它连同原因一起给前端（列表不清空、只标「刷新失败」），
+        # 没有旧数据才真的报错。以前这里直接抛 500，页面只剩一句「读取失败」。
+        if old:
+            return 200, {"list": old, "cached": True, "stale": True, "refreshing": False,
+                         "age": int(now - FOLLOW_CACHE["at"]),
+                         "error": "刷新失败：%s" % str(e)[:80]}
+        return 502, {"error": "读取关注列表失败：%s" % str(e)[:100]}
     _follow_store(live)
     ms = int((time.time() - t0) * 1000)
     print("[follow] 取到 %d 位在播，耗时 %d ms" % (len(live), ms))

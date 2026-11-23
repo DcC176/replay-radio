@@ -10457,6 +10457,8 @@
   var FREE_MIN_W = 14, FREE_MIN_H = 16;                     // 再小就看不清画面了
   var mfPickedKey = '';      // 墙上这批格子的指纹（mid@room）：没变就不重建，别把直播流断掉
   var mfReqSeq = 0;          // 关注列表请求序号：晚回来的旧响应不许覆盖新结果
+  var mfRetryN = 0;          // 旧数据（stale）的静默重试次数
+  var mfRetryTimer = 0;      // 已排队的重试（同时只允许一条）
 
   function mfAllList() {   // 左栏 = 手动添加的 + 关注列表里在播的（按 mid 去重，添加的在前）
     var seen = {};
@@ -11182,6 +11184,30 @@
     return true;
   }
 
+  /* 旧数据的静默重试：**必须有上限和退避**。
+     旧实现无脑 setTimeout 2.5 秒再来一次，而后端一旦刷新失败就会一直回 stale ——
+     页面于是每 2.5 秒重取一次、永远停不下来（用户看到的「反复自动刷新」）。
+     现在最多追 3 次（3 / 8 / 15 秒），仍失败就停在「数据为 N 分钟前，刷新失败」，
+     等用户点「刷新开播状态」再同步取。 */
+  function mfScheduleRetry(ageMin, n, auto) {
+    if (mfRetryTimer) return;                 // 已经排了一条，别叠加
+    if (!auto) return;                        // 后端已明确报错：等用户手动刷新
+    if (mfRetryN >= 3) {
+      if (state.view === 'multi' && multiSrc === 'following') {
+        mfNote(n + ' 位关注在播 · 数据为 ' + ageMin + ' 分钟前，刷新失败（可点「刷新开播状态」重试）');
+      }
+      return;
+    }
+    var wait = [3000, 8000, 15000][mfRetryN] || 15000;
+    mfRetryN += 1;
+    mfRetryTimer = setTimeout(function () {
+      mfRetryTimer = 0;
+      if (state.view === 'multi' && multiSrc === 'following') {
+        renderMultiFollowing(false, true);
+      }
+    }, wait);
+  }
+
   function renderMultiFollowing(force, quiet) {
     var side = document.getElementById('multi-side');
     var grid = document.getElementById('multi-grid');
@@ -11216,18 +11242,22 @@
         var list = res.j.list || [];
         mfApplyList(list);
         renderFollowGrid(true);      // 墙上的格子没变就不重建（见 renderFollowGrid 的 keepIfSame）
+        var ageMin = Math.max(1, Math.round((res.j.age || 0) / 60));
         if (!quiet) {
           mfNote(list.length + ' 位关注在播 · 点左侧加入监控墙（声音默认关）'
-            + (res.j.stale ? '　·　正在后台刷新…' : ''));
+            + (res.j.stale
+                ? ('　·　数据为 ' + ageMin + ' 分钟前，'
+                   + (res.j.error || '正在后台刷新…'))
+                : ''));
         }
         if (res.j.stale) {
-          // 后端给的是旧数据（>2 分钟）并已在后台刷新：2.5 秒后静默取一次新的。
-          // 刷新结果没变就什么都不做（不重渲染、不重建格子）。
-          setTimeout(function () {
-            if (state.view === 'multi' && multiSrc === 'following') {
-              renderMultiFollowing(false, true);
-            }
-          }, 2500);
+          /* 明确失败（不是后台还在刷）就别再自动追了：再自动重试只会继续失败，
+             把「刷新」留给用户点按钮，避免看起来像在不停刷新。 */
+          mfScheduleRetry(ageMin, list.length, !res.j.error || res.j.refreshing);
+        } else {
+          /* 拿到了新数据：把重试预算清回去，下一次旧数据还能再追三轮 */
+          mfRetryN = 0;
+          if (mfRetryTimer) { clearTimeout(mfRetryTimer); mfRetryTimer = 0; }
         }
       })
       .catch(function (e) {
