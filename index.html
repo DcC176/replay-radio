@@ -1232,6 +1232,9 @@ window.__BOOT_T0 = Date.now();
 
       <div class="live-card" style="margin-top:18px">
         <div class="live-card-h">反馈与错误上报</div>
+        <p class="live-note" style="margin:0 0 8px">写清「怎么复现、什么条件下出现、实际看到什么」，
+          定位问题基本不用再问第二轮。提交后默认自动上传给开发者，同时在本机留一份完整档案。</p>
+
         <label class="seg-auto">类型
           <select id="fb-kind" title="反馈类型">
             <option value="bug">问题 / 错误</option>
@@ -1239,26 +1242,63 @@ window.__BOOT_T0 = Date.now();
             <option value="other">其他</option>
           </select>
         </label>
-        <textarea id="fb-text" class="fb-text" rows="4" maxlength="4000"
-                  placeholder="发生了什么？怎么复现？期望的结果是什么？"></textarea>
-        <label class="seg-auto" style="margin-top:8px">
-          <input type="checkbox" id="fb-ctx" checked> 附带诊断信息（版本、当前页面、最近报错）
+
+        <label class="fb-lab">一句话概述
+          <input id="fb-text" class="fb-input" maxlength="200"
+                 placeholder="例：监控室 4 路时功能栏按钮点不到">
         </label>
+        <label class="fb-lab">复现步骤
+          <textarea id="fb-steps" class="fb-text" rows="3" maxlength="2000"
+                    placeholder="1. 打开监控室，选「4 路」&#10;2. 把浏览器缩放到 125%&#10;3. 鼠标移到任意一格"></textarea>
+        </label>
+        <label class="fb-lab">触发条件（可选）
+          <input id="fb-trigger" class="fb-input" maxlength="300"
+                 placeholder="例：只在缩放 125% 且 4 路以上出现；登录后才有">
+        </label>
+        <label class="fb-lab">异常表现
+          <textarea id="fb-actual" class="fb-text" rows="2" maxlength="1000"
+                    placeholder="实际看到了什么：报错文案、界面错位、点了没反应…"></textarea>
+        </label>
+        <label class="fb-lab">期望结果（可选）
+          <input id="fb-expected" class="fb-input" maxlength="500"
+                 placeholder="例：四个按钮始终可见可点">
+        </label>
+
+        <div class="fb-shots-h">
+          <button class="btn small ghost" id="fb-pick" type="button">＋ 添加截图</button>
+          <input type="file" id="fb-file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+          <span class="live-note" id="fb-shots-note" style="margin:0">可直接 Ctrl+V 粘贴截图，最多 3 张</span>
+        </div>
+        <div class="fb-shots" id="fb-shots"></div>
+
+        <label class="seg-auto" style="margin-top:8px">
+          <input type="checkbox" id="fb-ctx" checked> 附带诊断信息（版本、页面、环境、最近报错、日志末尾）
+        </label>
+        <label class="seg-auto" style="margin-top:8px">
+          <input type="checkbox" id="fb-upload" checked> 提交后自动上传
+          <span class="live-note" id="fb-target" style="margin:0"></span>
+        </label>
+
         <details class="fb-details" style="margin-top:8px">
           <summary>看看会提交什么</summary>
           <pre id="fb-preview" class="fb-preview"></pre>
         </details>
         <div class="qp-btns" style="margin-top:10px">
           <button class="btn small primary" id="fb-submit" type="button">提交反馈</button>
+          <button class="btn small ghost" id="fb-reupload" type="button" hidden>一键上传</button>
+          <button class="btn small ghost" id="fb-open" type="button" hidden>打开保存文件夹</button>
           <button class="btn small ghost" id="fb-copy" type="button">复制内容</button>
           <a class="btn small ghost" id="fb-gh"
              href="https://github.com/DcC176/replay-radio/issues/new"
              target="_blank" rel="noopener">去 GitHub 提 Issue</a>
         </div>
         <p class="live-note" id="fb-result" style="margin-top:8px"></p>
-        <p class="live-note">默认只保存到本机 <code>data/feedback/</code>（JSONL），不上传任何服务器；
-          不含登录凭据、Cookie 与完整文件路径。只有在 <code>data/feedback.json</code> 里配了
-          <code>webhook</code> 时才会额外上报一份。</p>
+        <p class="live-note">档案写在 <code>data/feedback/</code>：每月一个 JSONL + 每条一份 Markdown
+          （含复现步骤、环境、日志末尾与截图引用），截图存在 <code>data/feedback/attach/</code>。
+          不含登录凭据与 Cookie；关掉「自动上传」时提交后会直接弹出这个文件夹。
+          想换收集地址：<code>data/feedback.json</code> 里写 <code>{"upload_url": "https://你的地址"}</code>。</p>
+        <p class="live-note">上传内容不加密，默认走公共推送服务的私有主题（主题名等同口令）；
+          含账号信息、私人截图时请关掉「自动上传」，只保留本机档案。</p>
       </div>
 
       <div class="live-card" style="margin-top:18px">

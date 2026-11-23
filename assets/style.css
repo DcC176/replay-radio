@@ -3612,9 +3612,9 @@ body.view-broadcast #btn-quality { display: none; }
 .station-lamps {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex: none;
-  padding: 5px 11px;
+  padding: 5px 9px;
   border: 1px solid var(--line);
   border-radius: 999px;
   /* 一点点「装置外壳」的质感：上缘有高光、内部有纵深 */
@@ -3639,19 +3639,53 @@ body.view-broadcast #btn-quality { display: none; }
 }
 .lamp-more:hover { color: var(--text); border-color: var(--red); }
 .lamp-trigger {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 4px 10px; border-radius: 999px;
+  display: inline-flex; align-items: center; gap: 7px;
+  max-width: 232px; min-width: 0;
+  padding: 3px 8px 3px 4px; border-radius: 999px;
   border: 1px solid var(--line); background: rgba(var(--ink), .04);
   color: var(--text-2); font: inherit; font-size: 12px;
   cursor: pointer; white-space: nowrap;
 }
 .lamp-trigger:hover { border-color: var(--line-2); color: var(--text); }
-.lamp-trigger b { font-weight: 500; font-variant-numeric: tabular-nums; }
-.lt-dot {
-  width: 9px; height: 9px; border-radius: 50%;
-  background: var(--lc, #8a8a95); flex: none;
+.lamp-trigger[aria-expanded="true"] { border-color: var(--red); }
+/* 触发条直接显示「当前是谁」：头像 + 名字 + 直播状态/标题 */
+.lt-ava {
+  flex: none; width: 26px; height: 26px; border-radius: 50%; overflow: hidden;
+  display: grid; place-items: center; background: var(--panel-2);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--lc, #8a8a95) 55%, transparent);
 }
-.lt-caret { font-size: 10px; color: var(--muted); }
+.lt-ava-img { width: 100%; height: 100%; object-fit: cover; }
+.lt-ava-img-ph { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.lt-body { display: flex; flex-direction: column; min-width: 0; line-height: 1.18; text-align: left; }
+.lt-name {
+  display: flex; align-items: center; gap: 4px;
+  max-width: 150px; min-width: 0;
+  font-size: 12.5px; font-weight: 500; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lt-main {
+  flex: none; font-style: normal; font-size: 9.5px; line-height: 13px;
+  padding: 0 4px; border-radius: 4px; color: var(--muted-2);
+  border: 1px solid var(--line);
+}
+.lt-sub {
+  max-width: 158px; min-width: 0;
+  font-style: normal; font-size: 10.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lt-sub.on { color: color-mix(in srgb, var(--green, #35c46a) 70%, var(--text)); }
+.lt-count {
+  flex: none; font-size: 10.5px; color: var(--muted-2);
+  font-variant-numeric: tabular-nums;
+}
+.lt-caret { flex: none; font-size: 10px; color: var(--muted); }
+@media (max-width: 1400px) {
+  /* 窄一点只收窄文字，不隐藏第二行：「当前主播在播什么」就是这一行的意义，
+     藏掉它等于回到「只有 1/N」那种看不出是谁的状态。 */
+  .lamp-trigger { max-width: 198px; }
+  .lt-name { max-width: 116px; }
+  .lt-sub { max-width: 124px; }
+}
 .lamp-panel {
   position: fixed; top: 0; right: 14px; z-index: 300;
   width: min(92vw, 420px); max-height: 62vh; overflow: auto;
@@ -6685,3 +6719,40 @@ body.view-dd .views { grid-column: 1 / -1; }
   background: var(--panel-2); color: var(--text-2);
   font-size: 11px; white-space: pre-wrap; word-break: break-all;
 }
+
+/* ---- 反馈表单（v1.9.27）：结构化字段 + 截图缩略图 ---- */
+/* display:block 必须显式写：.seg-auto 是 flex，label 里塞 input 会横排挤成一条 */
+.fb-lab {
+  display: block; margin-top: 10px;
+  font-size: var(--fs-fine); color: var(--muted-2);
+}
+.fb-lab > .fb-input, .fb-lab > .fb-text { margin-top: 5px; }
+.fb-input {
+  width: 100%; padding: 7px 10px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel-2); color: var(--text);
+  font: inherit; font-size: 12.5px;
+}
+.fb-input:focus { border-color: var(--red); outline: none; }
+.fb-shots-h { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.fb-shots { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.fb-shots:empty { margin-top: 0; }
+.fb-shot {
+  position: relative; margin: 0; width: 128px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel-2); overflow: hidden;
+}
+.fb-shot img { display: block; width: 100%; height: 72px; object-fit: cover; }
+.fb-shot figcaption {
+  padding: 3px 6px; font-size: 10px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fb-shot-x {
+  position: absolute; top: 3px; right: 3px;
+  width: 18px; height: 18px; padding: 0; line-height: 16px;
+  border: 0; border-radius: 50%;
+  background: rgba(0, 0, 0, .62); color: #fff;
+  font-size: 13px; cursor: pointer;
+}
+.fb-shot-x:hover { background: var(--red); }
+#fb-upload + .live-note { display: inline; }

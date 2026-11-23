@@ -1097,6 +1097,7 @@ STATIONLESS_OK = (
     "/api/protocol/register", "/api/protocol/unregister",
     "/api/following/live",     # 只依赖登录态，与有没有注册主播无关
     "/api/feedback", "/api/feedback/conf",   # 反馈是本机功能，与主播无关
+    "/api/feedback/upload", "/api/feedback/reveal",
     "/api/live/ws",            # 同上：房间号由 URL 带，跟注册表无关
     # 歌单：导入的是任意 B 站投稿，与注册表里有没有主播无关（首批用户就是先导歌单）
     "/api/playlists", "/api/playlist",
@@ -1167,7 +1168,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.26"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.27"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
@@ -1390,12 +1391,22 @@ def api_update_apply():
 # 默认只写 `data/feedback/feedback-YYYYMM.jsonl`；`data/feedback.json` 里配了
 # `{"webhook": "https://..."}` 才会额外 POST 一份（企业微信/飞书/Slack 的机器人地址都能接）。
 FEEDBACK_DIR = os.path.join(ROOT, "data", "feedback")
+FEEDBACK_ATTACH = os.path.join(FEEDBACK_DIR, "attach")
 FEEDBACK_CONF = os.path.join(ROOT, "data", "feedback.json")
 FEEDBACK_KINDS = ("bug", "idea", "other")
 FEEDBACK_MAX = 4000
+FEEDBACK_FIELD_MAX = 2000
 # 只收这些诊断字段：**不碰** SESSDATA / Cookie / 完整路径。多收一个字段就多一分隐私风险。
 FEEDBACK_FIELDS = ("app", "version", "build", "view", "station", "ua",
-                   "platform", "screen", "errors")
+                   "platform", "screen", "errors", "theme", "lang", "zoom", "route")
+# 默认收集地址：ntfy.sh 的一个**私有主题**（随机串，等同口令，没订阅就收不到）。
+# 想换成自己的服务器：data/feedback.json 里写 {"upload_url": "https://..."}；
+# 关掉默认上传：{"upload": false}（提交后会直接打开保存文件夹）。
+FEEDBACK_UPLOAD_URL = "https://ntfy.sh/rr-fb-2a7c41d9e6b35f80"
+FEEDBACK_UPLOAD_ON = True
+FEEDBACK_IMG_MAX = 3
+FEEDBACK_IMG_BYTES = 4 * 1024 * 1024
+FEEDBACK_LOG_LINES = 120
 
 
 def _feedback_conf():
@@ -1405,6 +1416,25 @@ def _feedback_conf():
     except Exception:
         return {}
     return d if isinstance(d, dict) else {}
+
+
+def _feedback_target():
+    """收集地址与是否默认上传。配置写坏了就退回内置的默认值，功能不能因此不可用。"""
+    c = _feedback_conf()
+    url = str(c.get("upload_url") or c.get("webhook") or FEEDBACK_UPLOAD_URL).strip()
+    if not url.startswith("https://"):
+        url = FEEDBACK_UPLOAD_URL
+    on = c.get("upload")
+    if not isinstance(on, bool):
+        on = FEEDBACK_UPLOAD_ON
+    return {"upload": on, "url": url}
+
+
+def _feedback_host(url):
+    try:
+        return urllib.parse.urlparse(url).hostname or url
+    except Exception:
+        return url
 
 
 def _feedback_context(ctx):
@@ -1422,47 +1452,344 @@ def _feedback_context(ctx):
     return out
 
 
+def _feedback_log_tail():
+    """日志末尾若干行。凭据一律先涂掉 —— 反馈是要发出去的，不能夹带 SESSDATA。"""
+    p = os.path.join(APPDIR, "log.txt")
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()[-FEEDBACK_LOG_LINES:]
+    except Exception:
+        return []
+    out = []
+    for ln in lines:
+        x = ln.rstrip("\n")
+        x = re.sub(r"(?i)(SESSDATA|bili_jct|cookie)\s*[=:]\s*\S+", r"\1=***", x)
+        x = re.sub(r"[A-Za-z]:\\Users\\[^\\\s]+", r"<user>", x)
+        out.append(x[:400])
+    return out
+
+
+def _feedback_images(fid, images):
+    """把前端压好的 dataURL 落盘。只认 png/jpg/webp/gif，最多 3 张、每张 ≤4MB。"""
+    out = []
+    if not isinstance(images, list):
+        return out
+    d = os.path.join(FEEDBACK_ATTACH, fid)
+    for i, im in enumerate(images[:FEEDBACK_IMG_MAX]):
+        if not isinstance(im, dict):
+            continue
+        raw = str(im.get("data") or "")
+        mime = str(im.get("type") or "")
+        if raw.startswith("data:") and "," in raw:
+            head, raw = raw.split(",", 1)
+            mime = head[5:].split(";")[0] or mime
+        try:
+            blob = base64.b64decode(raw, validate=False)
+        except Exception:
+            continue
+        ext = {"image/png": "png", "image/jpeg": "jpg",
+               "image/webp": "webp", "image/gif": "gif"}.get(mime)
+        if not blob or not ext or len(blob) > FEEDBACK_IMG_BYTES:
+            continue
+        try:
+            os.makedirs(d, exist_ok=True)
+            name = "shot-%d.%s" % (i + 1, ext)
+            full = os.path.join(d, name)
+            with open(full, "wb") as f:
+                f.write(blob)
+        except OSError:
+            continue
+        out.append({"name": name, "type": mime, "size": len(blob),
+                    "sha256": hashlib.sha256(blob).hexdigest()[:16],
+                    "path": os.path.relpath(full, ROOT).replace("\\", "/")})
+    return out
+
+
+def _feedback_summary(rec):
+    """给推送通道看的纯文本：一条消息就能读懂「什么问题、怎么复现、什么环境」。"""
+    c = rec.get("context") or {}
+    bits = ["[%s] %s" % (rec.get("kind"), rec.get("summary") or "(无概述)")]
+    for label, key in (("复现", "steps"), ("触发", "trigger"),
+                       ("异常", "actual"), ("期望", "expected")):
+        v = (rec.get(key) or "").strip()
+        if v:
+            bits.append(label + ": " + v.replace("\n", " / ")[:300])
+    env = " · ".join(x for x in (
+        ("v" + str(c.get("version") or "")).strip("v"),
+        str(c.get("build") or ""),
+        str(c.get("view") or ""),
+        str(c.get("station") or ""),
+        str(c.get("screen") or ""),
+        str(c.get("platform") or "")) if x)
+    if env:
+        bits.append("环境: " + env)
+    errs = c.get("errors") or []
+    if errs:
+        bits.append("最近报错: " + " | ".join(str(e)[:120] for e in errs[:3]))
+    n = len(rec.get("images") or [])
+    bits.append("截图: %d 张 · 编号 %s" % (n, rec.get("id")))
+    return "\n".join(bits)[:3500]
+
+
+def _feedback_upload(rec, images=None):
+    """把一条反馈发到配置的收集地址。
+
+    · ntfy.sh：发一条**可读的纯文本摘要**（推送里直接能看），截图用 PUT 作为附件；
+      完整 JSON 留在本机（ntfy 单条消息 4KB、附件 3 小时，不适合当档案库）。
+    · 其他 HTTPS 地址：POST 完整 JSON（含 base64 截图），交给对方自己存。
+    任何失败都只返回原因，不影响「本机已保存」这个事实。
+    """
+    t = _feedback_target()
+    url = t["url"]
+    host = _feedback_host(url)
+    is_ntfy = host.endswith("ntfy.sh")
+    out = {"ok": False, "target": host, "at": int(time.time())}
+    try:
+        if is_ntfy:
+            body = _feedback_summary(rec).encode("utf-8")
+            req = urllib.request.Request(url, data=body, method="POST", headers={
+                "User-Agent": UA, "Content-Type": "text/plain; charset=utf-8",
+                "Title": "ReplayRadio feedback", "Tags": "speech_balloon",
+                "Priority": "default"})
+            with urlopen(req, 15) as r:
+                out["status"] = getattr(r, "status", 200)
+            out["ok"] = 200 <= int(out.get("status") or 0) < 300
+            sent = 0
+            for im in (images or []):
+                blob = im.get("_blob")
+                if blob is None:
+                    continue
+                fn = "FB-%s-%s" % (rec.get("id"), im.get("name") or "shot.png")
+                req2 = urllib.request.Request(url, data=blob, method="PUT", headers={
+                    "User-Agent": UA, "Filename": fn,
+                    "Title": "ReplayRadio screenshot", "Tags": "camera"})
+                try:
+                    with urlopen(req2, 20) as r2:
+                        if 200 <= int(getattr(r2, "status", 200)) < 300:
+                            sent += 1
+                except Exception:
+                    pass
+            out["images"] = sent
+        else:
+            payload = dict(rec)
+            payload["images"] = []
+            for im in (images or []):
+                blob = im.get("_blob")
+                if blob is None:
+                    continue
+                payload["images"].append({
+                    "name": im.get("name"), "type": im.get("type"),
+                    "data": base64.b64encode(blob).decode("ascii")})
+            req = urllib.request.Request(
+                url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json; charset=utf-8",
+                         "User-Agent": UA})
+            with urlopen(req, 20) as r:
+                out["status"] = getattr(r, "status", 200)
+            out["ok"] = 200 <= int(out.get("status") or 0) < 300
+    except Exception as e:
+        out["error"] = str(e)[:160]
+    return out
+
+
+def _feedback_state_load():
+    try:
+        with open(os.path.join(FEEDBACK_DIR, "upload-state.json"), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _feedback_state_save(d):
+    try:
+        os.makedirs(FEEDBACK_DIR, exist_ok=True)
+        with open(os.path.join(FEEDBACK_DIR, "upload-state.json"), "w",
+                  encoding="utf-8", newline="\n") as f:
+            json.dump(d, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def _feedback_find(fid):
+    """按编号在 JSONL 里找回一条记录（一键上传要重新读出来）。"""
+    if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", str(fid or "")):
+        return None
+    try:
+        names = sorted(os.listdir(FEEDBACK_DIR))
+    except OSError:
+        return None
+    for n in names:
+        if not (n.startswith("feedback-") and n.endswith(".jsonl")):
+            continue
+        try:
+            with open(os.path.join(FEEDBACK_DIR, n), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or fid not in line:
+                        continue
+                    d = json.loads(line)
+                    if d.get("id") == fid:
+                        return d
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _feedback_md(rec):
+    c = rec.get("context") or {}
+    lines = ["# 反馈 %s" % rec.get("id"), "",
+             "- 时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(rec["at"])),
+             "- 类型：%s" % rec.get("kind"), ""]
+    for label, key in (("概述", "summary"), ("复现步骤", "steps"),
+                       ("触发条件", "trigger"), ("异常表现", "actual"),
+                       ("期望结果", "expected")):
+        v = (rec.get(key) or "").strip()
+        if v:
+            lines += ["## " + label, "", v, ""]
+    lines += ["## 环境", "", "```json",
+              json.dumps(c, ensure_ascii=False, indent=2), "```", ""]
+    logs = rec.get("logs") or []
+    if logs:
+        lines += ["## 日志末尾（%d 行，已涂掉凭据）" % len(logs), "", "```", *logs, "```", ""]
+    imgs = rec.get("images") or []
+    if imgs:
+        lines += ["## 截图", ""]
+        for im in imgs:
+            lines.append("- `%s`（%d KB，sha256 %s）"
+                         % (im.get("path"), int(im.get("size") or 0) // 1024,
+                            im.get("sha256")))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _feedback_reveal(fid=""):
+    """在资源管理器里定位到反馈文件（Windows）；其他平台只回路径。"""
+    path = ""
+    if fid:
+        rec = _feedback_find(fid)
+        if rec:
+            path = os.path.join(FEEDBACK_DIR, "%s.md" % rec["id"])
+    if not path or not os.path.exists(path):
+        path = FEEDBACK_DIR
+    try:
+        os.makedirs(FEEDBACK_DIR, exist_ok=True)
+    except OSError:
+        pass
+    # 自动化验收用：只回路径，不真的弹窗（CI/截图时不该抢焦点）
+    if os.environ.get("REPLAY_NO_REVEAL") == "1":
+        return {"ok": True, "suppressed": True,
+                "path": os.path.relpath(path, ROOT).replace("\\", "/")}
+    if os.name != "nt":
+        return {"ok": False, "path": os.path.relpath(path, ROOT).replace("\\", "/")}
+    try:
+        if os.path.isfile(path):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        else:
+            subprocess.Popen(["explorer", os.path.normpath(path)])
+        return {"ok": True, "path": os.path.relpath(path, ROOT).replace("\\", "/")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:80],
+                "path": os.path.relpath(path, ROOT).replace("\\", "/")}
+
+
 def api_feedback_conf():
-    hook = str(_feedback_conf().get("webhook") or "").strip()
-    return 200, {"webhook": hook.startswith("https://")}
+    t = _feedback_target()
+    return 200, {"upload": t["upload"], "target": _feedback_host(t["url"]),
+                 "url": t["url"] if t["upload"] else ""}
 
 
 def api_feedback(obj):
     kind = str(obj.get("kind") or "other")
     if kind not in FEEDBACK_KINDS:
         kind = "other"
-    text = str(obj.get("text") or "").strip()
-    if len(text) < 4:
-        return 400, {"error": "请至少写 4 个字，说明发生了什么"}
-    if len(text) > FEEDBACK_MAX:
-        return 400, {"error": "最多 %d 字（当前 %d 字）" % (FEEDBACK_MAX, len(text))}
+    txt = {k: str(obj.get(k) or "").strip()[:FEEDBACK_FIELD_MAX]
+           for k in ("text", "steps", "trigger", "actual", "expected")}
+    if len(txt["text"]) + len(txt["steps"]) + len(txt["actual"]) < 4:
+        return 400, {"error": "请至少写一句概述，或填一下现象 / 复现步骤"}
+    if len(txt["text"]) > FEEDBACK_MAX:
+        return 400, {"error": "概述最多 %d 字" % FEEDBACK_MAX}
+    fid = time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex()
+    ctx = _feedback_context(obj.get("context"))
     rec = {
-        "id": time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex(),
+        "id": fid,
         "at": int(time.time()),
         "kind": kind,
-        "text": text,
-        "context": _feedback_context(obj.get("context")),
+        "summary": txt["text"],
+        "steps": txt["steps"],
+        "trigger": txt["trigger"],
+        "actual": txt["actual"],
+        "expected": txt["expected"],
+        "context": ctx,
+        # 有诊断信息才带日志：用户明确关掉诊断时不该偷偷收集日志
+        "logs": _feedback_log_tail() if ctx else [],
+        "images": [],
     }
+    rec["images"] = _feedback_images(fid, obj.get("images"))
+    # 把截图字节读回来给上传用（落盘后再读，避免同一份数据在内存里留两份）
+    blobs = []
+    for im in rec["images"]:
+        try:
+            with open(os.path.join(ROOT, im["path"].replace("/", os.sep)), "rb") as f:
+                blobs.append(dict(im, _blob=f.read()))
+        except OSError:
+            pass
     path = os.path.join(FEEDBACK_DIR, "feedback-%s.jsonl" % time.strftime("%Y%m"))
     try:
         os.makedirs(FEEDBACK_DIR, exist_ok=True)
         with open(path, "a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with open(os.path.join(FEEDBACK_DIR, fid + ".md"), "w",
+                  encoding="utf-8", newline="\n") as f:
+            f.write(_feedback_md(rec))
     except OSError as e:
         return 500, {"error": "写入本机失败：%s" % str(e)[:80]}
-    out = {"ok": True, "id": rec["id"],
-           "stored": os.path.relpath(path, ROOT).replace("\\", "/")}
-    hook = str(_feedback_conf().get("webhook") or "").strip()
-    if hook.startswith("https://"):
-        try:
-            req = urllib.request.Request(
-                hook, data=json.dumps(rec, ensure_ascii=False).encode("utf-8"),
-                headers={"Content-Type": "application/json", "User-Agent": UA})
-            with urlopen(req, 10) as r:
-                out["delivered"] = getattr(r, "status", 200)
-        except Exception as e:
-            out["warn"] = "已保存到本机，但上报失败：%s" % str(e)[:80]
+    out = {"ok": True, "id": fid,
+           "stored": os.path.relpath(path, ROOT).replace("\\", "/"),
+           "md": "data/feedback/%s.md" % fid,
+           "dir": "data/feedback",
+           "images": len(rec["images"])}
+    t = _feedback_target()
+    want = obj.get("upload")
+    do_up = t["upload"] if not isinstance(want, bool) else want
+    if do_up:
+        res = _feedback_upload(rec, blobs)
+        out["upload"] = res
+        st = _feedback_state_load()
+        st[fid] = {"at": res.get("at"), "ok": bool(res.get("ok")),
+                   "target": res.get("target"), "error": res.get("error", "")}
+        _feedback_state_save(st)
+        if not res.get("ok"):
+            out["warn"] = "已保存到本机，但上传失败：%s" % (res.get("error") or "对方未接受")
+    else:
+        # 明确不上传：直接把保存位置弹出来，省得用户去翻 data 目录
+        out["reveal"] = _feedback_reveal(fid)
     return 200, out
+
+
+def api_feedback_upload(obj):
+    """一键（重新）上传：按编号找回已保存的记录再发一次。"""
+    rec = _feedback_find(obj.get("id"))
+    if not rec:
+        return 404, {"error": "找不到这条反馈（编号不对或文件已被移走）"}
+    blobs = []
+    for im in rec.get("images") or []:
+        try:
+            with open(os.path.join(ROOT, str(im.get("path")).replace("/", os.sep)), "rb") as f:
+                blobs.append(dict(im, _blob=f.read()))
+        except OSError:
+            pass
+    res = _feedback_upload(rec, blobs)
+    st = _feedback_state_load()
+    st[rec["id"]] = {"at": res.get("at"), "ok": bool(res.get("ok")),
+                     "target": res.get("target"), "error": res.get("error", "")}
+    _feedback_state_save(st)
+    return (200 if res.get("ok") else 502), {"ok": bool(res.get("ok")),
+                                             "id": rec["id"], **res}
+
+
+def api_feedback_reveal(obj):
+    return 200, _feedback_reveal(str(obj.get("id") or ""))
 
 
 # B 站风控：请求太密会回 412（响应体 code=-412「request was banned」），持续几十分钟。
@@ -2532,6 +2859,34 @@ def _rc_room_info(room):
             "living": int(x.get("live_status") or 0) == 1,
             "area": (parent + " · " + area) if (parent and area) else (area or parent),
             "cover": x.get("keyframe") or x.get("user_cover") or ""}
+
+
+_BRIEF = {}          # room -> {"at": ts, "d": {...}}：顶栏那行小字，30 秒够新鲜
+
+
+def api_live_brief():
+    """当前主播的「直播简报」：在播与否 + 标题。给顶栏选择器显示，不进主状态面板。
+
+    房间信息接口本身就带标题，一次请求就够；失败时给上一次结果并标注 stale，
+    顶栏那行字退化成一居「状态未知」，但不该因此报错刷屏。
+    """
+    room = cur_room()
+    now = time.time()
+    c = _BRIEF.get(room)
+    if c and now - c["at"] < 30:
+        return 200, c["d"]
+    try:
+        info = _rc_room_info(room)
+        d = {"room": room, "living": bool(info.get("living")),
+             "title": info.get("title") or "", "area": info.get("area") or "",
+             "at": int(now)}
+    except Exception as e:
+        if c:
+            return 200, dict(c["d"], stale=True, error=str(e)[:80])
+        return 200, {"room": room, "living": False, "title": "",
+                     "error": str(e)[:80], "at": int(now)}
+    _BRIEF[room] = {"at": now, "d": d}
+    return 200, d
 
 
 def _rc_master(uid):
@@ -9391,6 +9746,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*page_alive(q.get("cid", [""])[0] or "anon"))
         if parsed.path == "/api/live/wheel":
             return self._json(*api_live_wheel_status())
+        if parsed.path == "/api/live/brief":
+            return self._json(*api_live_brief())
         if parsed.path == "/api/live/emoticons":
             return self._json(*api_live_emoticons("refresh" in q))
         if parsed.path == "/api/feedback/conf":
@@ -9539,6 +9896,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, {"ok": True, "queued": queued})
         if parsed.path == "/api/feedback":
             return self._json(*api_feedback(obj))
+        if parsed.path == "/api/feedback/upload":
+            return self._json(*api_feedback_upload(obj))
+        if parsed.path == "/api/feedback/reveal":
+            return self._json(*api_feedback_reveal(obj))
         if parsed.path == "/api/live/send":
             return self._json(*api_live_send(obj))
         if parsed.path == "/api/live/wheel/start":

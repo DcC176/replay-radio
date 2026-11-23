@@ -9032,7 +9032,8 @@
      默认只写本机 data/feedback/feedback-YYYYMM.jsonl，不上传；
      data/feedback.json 里配了 webhook 才会额外 POST 一份。
      诊断信息只取白名单字段（版本/页面/UA/最近报错），不碰 SESSDATA、Cookie、完整路径。 */
-  var FB = { busy: false, meta: {} };
+  var FB = { busy: false, meta: {}, shots: [], id: '', conf: { upload: true, target: '' } };
+  var FB_SHOT_MAX = 3;
 
   function fbContext() {
     return {
@@ -9040,7 +9041,11 @@
       version: FB.meta.version || '',
       build: FB.meta.build || '',
       view: state.view || '',
+      route: (location.hash || '').slice(0, 60),
       station: ST_NAME || '',
+      theme: document.documentElement.getAttribute('data-theme') || 'dark',
+      lang: (document.getElementById('lang') || {}).value || '',
+      zoom: Math.round((window.outerWidth / Math.max(1, window.innerWidth)) * 100) + '%',
       ua: navigator.userAgent,
       platform: navigator.platform || '',
       screen: screen.width + 'x' + screen.height + ' @' + (window.devicePixelRatio || 1) + 'x',
@@ -9048,40 +9053,118 @@
     };
   }
 
+  function fbShotsRender() {
+    var box = document.getElementById('fb-shots');
+    var note = document.getElementById('fb-shots-note');
+    if (!box) return;
+    box.innerHTML = FB.shots.map(function (sh, i) {
+      return '<figure class="fb-shot"><img src="' + sh.data + '" alt="">'
+        + '<figcaption>' + esc(sh.name || ('截图 ' + (i + 1)))
+        + ' · ' + Math.max(1, Math.round((sh.data.length * 0.75) / 1024)) + ' KB</figcaption>'
+        + '<button type="button" class="fb-shot-x" data-shot="' + i
+        + '" title="移除这张截图">×</button></figure>';
+    }).join('');
+    if (note) {
+      note.textContent = FB.shots.length >= FB_SHOT_MAX
+        ? '最多 ' + FB_SHOT_MAX + ' 张（再添加请先移除一张）'
+        : '可直接 Ctrl+V 粘贴截图，还能加 ' + (FB_SHOT_MAX - FB.shots.length) + ' 张';
+    }
+  }
+
+  /* 截图先在本机压到最长边 1400、JPEG 0.82 再传：原图动辄 3~5MB，
+     既撑爆请求体，也没必要为一张截图传那么多像素。 */
+  function fbAddFiles(files) {
+    var out = document.getElementById('fb-result');
+    var list = Array.prototype.slice.call(files || []);
+    var room = FB_SHOT_MAX - FB.shots.length;
+    if (room <= 0) {
+      if (out) out.textContent = '最多 ' + FB_SHOT_MAX + ' 张截图，请先移除一张';
+      return;
+    }
+    list.slice(0, room).forEach(function (f) {
+      if (!f || !/^image\//.test(f.type || '')) return;
+      var fr = new FileReader();
+      fr.onload = function () {
+        var img = new Image();
+        img.onload = function () {
+          var scale = Math.min(1, 1400 / Math.max(img.width, img.height));
+          var cv = document.createElement('canvas');
+          cv.width = Math.max(1, Math.round(img.width * scale));
+          cv.height = Math.max(1, Math.round(img.height * scale));
+          cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+          FB.shots.push({ name: (f.name || '截图').slice(0, 40),
+                          type: 'image/jpeg',
+                          data: cv.toDataURL('image/jpeg', 0.82) });
+          fbShotsRender();
+          fbPreview();
+        };
+        img.onerror = function () {
+          if (out) out.textContent = '这张图读不出来：' + (f.name || '');
+        };
+        img.src = fr.result;
+      };
+      fr.readAsDataURL(f);
+    });
+  }
+
   function fbPayload() {
+    function val(id) {
+      var e = document.getElementById(id);
+      return ((e && e.value) || '').trim();
+    }
     var kindEl = document.getElementById('fb-kind');
-    var textEl = document.getElementById('fb-text');
     var ctxEl = document.getElementById('fb-ctx');
+    var upEl = document.getElementById('fb-upload');
     return {
       kind: (kindEl && kindEl.value) || 'bug',
-      text: ((textEl && textEl.value) || '').trim(),
-      context: (ctxEl && ctxEl.checked) ? fbContext() : {}
+      text: val('fb-text'),
+      steps: val('fb-steps'),
+      trigger: val('fb-trigger'),
+      actual: val('fb-actual'),
+      expected: val('fb-expected'),
+      upload: !!(upEl && upEl.checked),
+      context: (ctxEl && ctxEl.checked) ? fbContext() : {},
+      images: FB.shots.map(function (sh) {
+        return { name: sh.name, type: sh.type, data: sh.data };
+      })
     };
   }
 
   function fbPreview() {
     var pre = document.getElementById('fb-preview');
     var p = fbPayload();
-    if (pre) {
-      pre.textContent = JSON.stringify(
-        { kind: p.kind, text: p.text, context: p.context }, null, 2);
-    }
+    var shown = {
+      kind: p.kind, summary: p.text, steps: p.steps, trigger: p.trigger,
+      actual: p.actual, expected: p.expected,
+      upload: p.upload, images: FB.shots.map(function (sh) { return sh.name; }),
+      context: p.context, note: '提交时后台会自动附上日志末尾（凭据已涂掉）'
+    };
+    if (pre) pre.textContent = JSON.stringify(shown, null, 2);
     var gh = document.getElementById('fb-gh');
     if (gh) {
-      var title = '[反馈] ' + (p.kind === 'bug' ? '问题' : p.kind === 'idea' ? '建议' : '其他');
-      var body = (p.text || '（没有填写描述）') + '\n\n```json\n'
-        + JSON.stringify(p.context, null, 2) + '\n```';
+      var title = '[反馈] ' + (p.kind === 'bug' ? '问题' : p.kind === 'idea' ? '建议' : '其他')
+        + '：' + (p.text || '（无概述）');
+      var body = '### 概述\n' + (p.text || '（未填）')
+        + '\n\n### 复现步骤\n' + (p.steps || '（未填）')
+        + '\n\n### 触发条件\n' + (p.trigger || '（未填）')
+        + '\n\n### 异常表现\n' + (p.actual || '（未填）')
+        + '\n\n### 期望结果\n' + (p.expected || '（未填）')
+        + '\n\n### 环境\n```json\n' + JSON.stringify(p.context, null, 2) + '\n```';
       gh.href = 'https://github.com/DcC176/replay-radio/issues/new?title='
-        + encodeURIComponent(title) + '&body=' + encodeURIComponent(body.slice(0, 6000));
+        + encodeURIComponent(title.slice(0, 120))
+        + '&body=' + encodeURIComponent(body.slice(0, 6000));
     }
   }
 
   function fbCopy() {
     var out = document.getElementById('fb-result');
     var p = fbPayload();
-    var txt = '【' + (p.kind === 'bug' ? '问题 / 错误' : p.kind === 'idea' ? '功能建议' : '其他')
-      + '】\n' + (p.text || '') + '\n\n--- 诊断信息 ---\n'
-      + JSON.stringify(p.context, null, 2);
+    var txt = '【' + (p.kind === 'bug' ? '问题 / 错误' : p.kind === 'idea' ? '功能建议' : '其他') + '】'
+      + (p.text || '') + '\n\n复现步骤：\n' + (p.steps || '（未填）')
+      + '\n\n触发条件：' + (p.trigger || '（未填）')
+      + '\n异常表现：' + (p.actual || '（未填）')
+      + '\n期望结果：' + (p.expected || '（未填）')
+      + '\n\n--- 诊断信息 ---\n' + JSON.stringify(p.context, null, 2);
     function done(ok) {
       if (out) out.textContent = ok ? '已复制到剪贴板' : '复制失败，请手动选中预览里的内容';
     }
@@ -9093,38 +9176,93 @@
     done(false);
   }
 
+  function fbSetButtons() {
+    var re = document.getElementById('fb-reupload');
+    var op = document.getElementById('fb-open');
+    if (re) re.hidden = !FB.id;
+    if (op) op.hidden = !FB.id;
+  }
+
+  function fbReset() {
+    ['fb-text', 'fb-steps', 'fb-trigger', 'fb-actual', 'fb-expected'].forEach(function (id) {
+      var e = document.getElementById(id);
+      if (e) e.value = '';
+    });
+    FB.shots = [];
+    fbShotsRender();
+    fbPreview();
+  }
+
   function fbSubmit() {
     if (FB.busy) return;
     var out = document.getElementById('fb-result');
     var p = fbPayload();
-    if (p.text.length < 4) {
-      if (out) out.textContent = '请至少写 4 个字，说明发生了什么';
+    if ((p.text + p.steps + p.actual).length < 4) {
+      if (out) out.textContent = '请至少写一句概述，或填一下现象 / 复现步骤';
       return;
     }
     FB.busy = true;
-    if (out) out.textContent = '正在提交…';
+    if (out) out.textContent = p.upload ? '正在提交并上传…' : '正在提交…';
     postJSON('/api/feedback', p).then(function (d) {
       if (!d || d.error) {
         if (out) out.textContent = '提交失败：' + ((d && d.error) || '未知原因');
         return;
       }
-      if (out) {
-        out.textContent = '已提交 · 编号 ' + d.id + ' · 保存在 ' + d.stored
-          + (d.delivered ? ' · 已上报' : '') + (d.warn ? '（' + d.warn + '）' : '');
+      FB.id = d.id || '';
+      fbSetButtons();
+      var msg = '已提交 · 编号 ' + d.id + ' · ';
+      if (d.upload && d.upload.ok) {
+        msg += '已上传到 ' + (d.upload.target || '收集地址')
+          + (d.upload.images ? '（含截图 ' + d.upload.images + ' 张）' : '');
+      } else if (d.upload) {
+        msg += '本机已保存（' + d.stored + '），上传失败：'
+          + (d.upload.error || '对方未接受') + '。可点「一键上传」重试。';
+      } else {
+        msg += '本机已保存（' + d.stored + '）'
+          + (d.reveal && d.reveal.ok ? '，已打开保存文件夹' : '');
       }
-      var t = document.getElementById('fb-text');
-      if (t) t.value = '';
-      fbPreview();
+      if (out) out.textContent = msg;
+      fbReset();
     }).catch(function () {
       if (out) out.textContent = '提交失败：没有连上本机服务';
     }).then(function () { FB.busy = false; });
+  }
+
+  function fbReupload() {
+    if (!FB.id || FB.busy) return;
+    var out = document.getElementById('fb-result');
+    FB.busy = true;
+    if (out) out.textContent = '正在重新上传 ' + FB.id + '…';
+    postJSON('/api/feedback/upload', { id: FB.id }).then(function (d) {
+      if (out) {
+        out.textContent = (d && d.ok)
+          ? '已上传到 ' + (d.target || '收集地址')
+          : ('上传仍失败：' + ((d && (d.error || d.message)) || '未知原因'));
+      }
+    }).catch(function () {
+      if (out) out.textContent = '上传失败：没有连上本机服务';
+    }).then(function () { FB.busy = false; });
+  }
+
+  function fbOpen() {
+    var out = document.getElementById('fb-result');
+    postJSON('/api/feedback/reveal', { id: FB.id }).then(function (d) {
+      if (out) {
+        out.textContent = (d && d.ok)
+          ? '已在资源管理器中打开：' + (d.path || 'data/feedback')
+          : ('打不开文件夹：' + ((d && d.error) || '') + ' 手动位置：' + ((d && d.path) || 'data/feedback'));
+      }
+    }).catch(function () {
+      if (out) out.textContent = '打不开文件夹：没有连上本机服务';
+    });
   }
 
   function bindFeedback() {
     var sub = document.getElementById('fb-submit');
     if (!sub || sub.getAttribute('data-bound') === '1') return;
     sub.setAttribute('data-bound', '1');
-    ['fb-kind', 'fb-text', 'fb-ctx'].forEach(function (id) {
+    ['fb-kind', 'fb-text', 'fb-steps', 'fb-trigger', 'fb-actual', 'fb-expected',
+     'fb-ctx', 'fb-upload'].forEach(function (id) {
       var e = document.getElementById(id);
       if (!e) return;
       e.addEventListener('input', fbPreview);
@@ -9133,6 +9271,46 @@
     sub.addEventListener('click', fbSubmit);
     var cp = document.getElementById('fb-copy');
     if (cp) cp.addEventListener('click', fbCopy);
+    var re = document.getElementById('fb-reupload');
+    if (re) re.addEventListener('click', fbReupload);
+    var op = document.getElementById('fb-open');
+    if (op) op.addEventListener('click', fbOpen);
+
+    var pick = document.getElementById('fb-pick');
+    var file = document.getElementById('fb-file');
+    if (pick && file) {
+      pick.addEventListener('click', function () { file.click(); });
+      file.addEventListener('change', function () {
+        fbAddFiles(file.files);
+        file.value = '';
+      });
+    }
+    var shots = document.getElementById('fb-shots');
+    if (shots) shots.addEventListener('click', function (e) {
+      var x = e.target.closest ? e.target.closest('[data-shot]') : null;
+      if (!x) return;
+      FB.shots.splice(+x.getAttribute('data-shot') || 0, 1);
+      fbShotsRender();
+      fbPreview();
+    });
+    /* 粘贴截图：只在设置页、且焦点不在别的输入框里时接管，
+       否则会把用户粘贴到输入框的文字也当图片处理。 */
+    document.addEventListener('paste', function (e) {
+      if (state.view !== 'settings') return;
+      var items = (e.clipboardData && e.clipboardData.items) || [];
+      var imgs = [];
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].type && items[i].type.indexOf('image/') === 0) {
+          var f = items[i].getAsFile();
+          if (f) imgs.push(f);
+        }
+      }
+      if (!imgs.length) return;
+      e.preventDefault();
+      fbAddFiles(imgs);
+    });
+    fbShotsRender();
+    fbSetButtons();
   }
 
   function syncFeedbackUI() {
@@ -9141,6 +9319,18 @@
       FB.meta = { version: (d && d.version) || '', build: (d && d.build) || '' };
       fbPreview();
     }).catch(function () { /* 服务不在：版本留空 */ });
+    fetch('/api/feedback/conf').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d) return;
+      FB.conf = d;
+      var up = document.getElementById('fb-upload');
+      if (up) up.checked = !!d.upload;      // 默认值以服务端为准（可在 data/feedback.json 关掉）
+      var t = document.getElementById('fb-target');
+      if (t) {
+        t.textContent = d.upload
+          ? '（' + (d.target || '开发者收集地址') + '；关掉则只存本机并弹出文件夹）'
+          : '（当前已关闭上传，提交后只存本机）';
+      }
+    }).catch(function () { /* 配置取不到：保持默认勾选 */ });
   }
 
   function bindUpdate() {
@@ -9851,11 +10041,13 @@
      ⚠️ 浮层必须挂在 header 外面并且 position:fixed —— 放在顶栏里会被标签条按绘制
         顺序盖住（同一个坑在「更多」菜单上踩过）。 */
   var LAMP_MODE_KEY = 'xl_lamp_mode';
-  /* 7 位时整条灯已经 200px。实测 1500 宽的顶栏在 7 位时溢出 27px，
-     所以阈值定在 6：≤6 直接排灯，≥7 收起成「3 个灯 + N」。 */
-  var LAMP_COLLAPSE_AT = 6;
-  var LAMP_INLINE_KEEP = 3;        // 收起时顶栏仍保留几个灯
+  /* 默认最多直接排 7 个灯（用户要求）；第 8 位起收进浮层。
+     7 个灯 ≈ 170px，配合下面 .station-lamps 的紧凑间距仍能塞进 1400+ 的单行顶栏。 */
+  var LAMP_COLLAPSE_AT = 7;
+  var LAMP_INLINE_KEEP = 7;        // 收起时顶栏仍保留几个灯
   var lampHoverTimer = 0;
+  var lampBrief = { key: '', at: 0, data: null, seq: 0 };
+  var LAMP_BRIEF_TTL = 45000;      // 顶栏那行「直播中 · 标题」的新鲜度
 
   function lampMode() {
     var m = store.get(LAMP_MODE_KEY, 'hover');
@@ -9901,15 +10093,20 @@
         + ' title="还有 ' + rest + ' 位主播：悬停或点击查看全部">+' + rest + '</button>';
     } else {
       var onN = list.filter(function (s) { return ST_SET.indexOf(s.id) >= 0; }).length;
-      /* 下拉选单里已经有全名，触发按钮就不用再点色点；二级窗口才需要色点占位 */
-      var dots = mode === 'select' ? '' : ST_SET.slice(0, 3).map(function (id) {
-        var s = findStation(id);
-        return '<i class="lt-dot" style="--lc:' + esc((s && s.accent) || '#8a8a95') + '"></i>';
-      }).join('');
+      /* 触发条直接给「当前主播是谁」：头像 + 名字 + 一行直播状态/标题。
+         以前只有「主播 2/7 ▾」，单看数字根本不知道自己在看谁 —— 必须点开才知道。 */
+      var cur = findStation(ST) || list[0] || {};
+      var accent = cur.accent || '#8a8a95';
+      var nm = cur.name || cur.short || cur.id || '未选择';
       box.innerHTML = '<button type="button" class="lamp-trigger" data-lamp-open="1"'
         + ' aria-haspopup="true" aria-expanded="false"'
-        + ' title="选择要观看的主播（可多选）">' + dots
-        + '<b>' + (mode === 'select' ? '主播 ' : '') + onN + '/' + list.length + '</b>'
+        + ' style="--lc:' + esc(accent) + '"'
+        + ' title="' + esc(nm + ' · 点击切换要观看的主播（可多选）') + '">'
+        + '<span class="lt-ava">' + faceHtml(cur.face, 'lt-ava-img', nm) + '</span>'
+        + '<span class="lt-body">'
+        + '<b class="lt-name">' + esc(nm) + (cur.main ? '<i class="lt-main">主站</i>' : '') + '</b>'
+        + '<i class="lt-sub">读取直播状态…</i></span>'
+        + '<span class="lt-count" title="已点亮 / 全部主播">' + onN + '/' + list.length + '</span>'
         + '<span class="lt-caret" aria-hidden="true">▾</span></button>';
     }
     /* select / popover 收起态只有一颗按钮：别让它套在「灯条外壳」里 */
@@ -9919,7 +10116,49 @@
       var b = box.querySelector('[data-id="' + ST + '"]');
       if (b) b.classList.add('living');
     }
+    bindFaceFallback(box);
+    lampFillBrief();
     if (lampPanelIsOpen()) renderLampPanel();   // 开着的时候跟上选择状态
+  }
+
+  /* 顶栏触发条的第二行：直播中 + 标题 / 未开播。走 /api/live/brief（30 秒缓存），
+     不碰状态面板那套重接口；失败只写「状态未知」，不弹错、不重试刷屏。 */
+  function lampFillBrief() {
+    var box = document.getElementById('station-lamps');
+    if (!box) return;
+    var sub = box.querySelector('.lt-sub');
+    if (!sub) return;
+    var cur = findStation(ST);
+    if (!cur) { sub.textContent = '未选择主播'; return; }
+    var key = cur.id + '@' + (cur.room || '');
+
+    function paint(d) {
+      if (!sub.isConnected) return;
+      if (!d) { sub.textContent = '直播状态未知'; return; }
+      if (d.error && !d.living) { sub.textContent = '状态未知 · 点击选择主播'; return; }
+      if (d.living) {
+        sub.textContent = '直播中' + (d.title ? ' · ' + d.title : '');
+        sub.classList.add('on');
+      } else {
+        sub.textContent = '未开播' + (cur.room ? ' · 房间 ' + cur.room : '');
+        sub.classList.remove('on');
+      }
+      sub.title = d.living ? (d.title || '直播中') : '当前未开播';
+    }
+
+    if (lampBrief.key === key && lampBrief.data) paint(lampBrief.data);
+    if (lampBrief.key === key && Date.now() - lampBrief.at < LAMP_BRIEF_TTL) return;
+    var seq = ++lampBrief.seq;
+    fetch('/api/live/brief?station=' + encodeURIComponent(cur.id))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (seq !== lampBrief.seq) return;         // 晚回来的旧响应不许覆盖
+        lampBrief = { key: key, at: Date.now(), data: d || null, seq: seq };
+        paint(d || null);
+      })
+      .catch(function () {
+        if (seq === lampBrief.seq) paint(null);
+      });
   }
 
   function lampPanelEl() { return document.getElementById('lamp-panel'); }
