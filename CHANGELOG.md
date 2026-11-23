@@ -12,6 +12,47 @@ v1.6.3 的平行版本：去掉了全部内置主播与品牌元素，首次打�
 
 ---
 
+## v1.9.28 · 2026-11-23
+
+### 反馈合并为单一自包含文档；主播选择器去掉房间号
+
+**1. 一条反馈 = 一个 JSON 文档**
+
+- 以前一次提交会散成三类文件：月度 `feedback-YYYYMM.jsonl`、每条一个 `.md`、
+  截图目录 `attach/<编号>/`，外加 `upload-state.json`。转发时经常只带走 md、
+  图片路径失效；自动上传也要分两次请求（摘要 + 逐个图片）。
+- 现在只生成 **`data/feedback/<编号>.json`**，结构固定：
+
+  ```
+  schema / schema_version / id / created_at / created_at_local
+  app / version / build / kind
+  report { summary, steps, trigger, actual, expected }
+  environment { ... }        // 版本、构建、页面、主播、UA、分辨率、缩放、主题、语言、报错
+  logs { source, lines }     // 日志末尾 120 行，凭据已涂掉
+  images [ {name,type,size,sha256,data} ]   // base64 内嵌
+  markdown                   // 同一份内容的人读版，可直接贴 Issue
+  ```
+
+- **上传发送的就是这个文件本身**：普通 HTTPS 地址直接 POST 该 JSON；
+  ntfy 通道发一条可读摘要 + 把整份 JSON 作为**一个附件**上传。不再有第二个附件请求。
+- **旧文件自动合并**：启动或打开设置页时，把旧 jsonl/md/attach 里的记录转成单文档
+  （图片按路径读回并内嵌），旧文件整批移到 `data/feedback/legacy/`，不删除、可回溯。
+  已存在同名 JSON 的跳过，重复执行安全。
+- `upload-state.json` 取消：上传结果写在文档自己的 `upload` 字段里。
+  「一键上传」「打开保存文件夹」都针对这一份 JSON。
+
+**2. 主播选择器不再显示房间号**
+
+- 触发条第二行改为「直播中 · 标题」或「未开播」，去掉 `· 房间 1703955312`。
+  只改显示文案，选择逻辑、混合播放、持久化与提交数据都没有动。
+
+**3. 兼容性**
+
+- `/api/feedback` 返回字段保持（`id` / `stored` / `images` / `upload` / `reveal`），
+  `stored` 现在指向 `.json`；旧记录通过迁移继续可读、可一键上传。
+
+---
+
 ## v1.9.27 · 2026-11-23
 
 ### 选择器直接显示当前主播；默认排 7 个灯；反馈变成可定位问题的档案

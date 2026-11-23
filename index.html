@@ -1293,8 +1293,9 @@ window.__BOOT_T0 = Date.now();
              target="_blank" rel="noopener">去 GitHub 提 Issue</a>
         </div>
         <p class="live-note" id="fb-result" style="margin-top:8px"></p>
-        <p class="live-note">档案写在 <code>data/feedback/</code>：每月一个 JSONL + 每条一份 Markdown
-          （含复现步骤、环境、日志末尾与截图引用），截图存在 <code>data/feedback/attach/</code>。
+        <p class="live-note">每条反馈只生成一个自包含文档 <code>data/feedback/&lt;编号&gt;.json</code>：
+          五段描述、环境、日志末尾和截图（base64 内嵌）都在同一份文件里，上传时原样发送，
+          不会出现「只带走 md、图丢了」。文档里还含一份 <code>markdown</code> 人读版。
           不含登录凭据与 Cookie；关掉「自动上传」时提交后会直接弹出这个文件夹。
           想换收集地址：<code>data/feedback.json</code> 里写 <code>{"upload_url": "https://你的地址"}</code>。</p>
         <p class="live-note">上传内容不加密，默认走公共推送服务的私有主题（主题名等同口令）；

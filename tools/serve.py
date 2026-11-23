@@ -1168,7 +1168,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.27"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.28"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
@@ -1469,12 +1469,32 @@ def _feedback_log_tail():
     return out
 
 
-def _feedback_images(fid, images):
-    """把前端压好的 dataURL 落盘。只认 png/jpg/webp/gif，最多 3 张、每张 ≤4MB。"""
+def _feedback_norm(rec):
+    """兼容 v1.9.26 的旧记录（当时叫 text、图片是磁盘路径），统一成内部结构。"""
+    return {
+        "id": str(rec.get("id") or ""),
+        "at": int(rec.get("at") or time.time()),
+        "kind": str(rec.get("kind") or "other"),
+        "summary": str(rec.get("summary") or rec.get("text") or ""),
+        "steps": str(rec.get("steps") or ""),
+        "trigger": str(rec.get("trigger") or ""),
+        "actual": str(rec.get("actual") or ""),
+        "expected": str(rec.get("expected") or ""),
+        "context": rec.get("context") if isinstance(rec.get("context"), dict) else {},
+        "logs": rec.get("logs") if isinstance(rec.get("logs"), list) else [],
+        "images": rec.get("images") if isinstance(rec.get("images"), list) else [],
+    }
+
+
+def _feedback_images(images):
+    """把前端压好的 dataURL 收进文档本身（base64），不再单独落盘。
+
+    以前截图放在 attach/<编号>/ 下、md 里写相对路径，结果是「一条反馈三个文件」，
+    转发时经常只带走 md、图丢了。现在图片就是文档里的一个字段。
+    """
     out = []
     if not isinstance(images, list):
         return out
-    d = os.path.join(FEEDBACK_ATTACH, fid)
     for i, im in enumerate(images[:FEEDBACK_IMG_MAX]):
         if not isinstance(im, dict):
             continue
@@ -1491,152 +1511,16 @@ def _feedback_images(fid, images):
                "image/webp": "webp", "image/gif": "gif"}.get(mime)
         if not blob or not ext or len(blob) > FEEDBACK_IMG_BYTES:
             continue
-        try:
-            os.makedirs(d, exist_ok=True)
-            name = "shot-%d.%s" % (i + 1, ext)
-            full = os.path.join(d, name)
-            with open(full, "wb") as f:
-                f.write(blob)
-        except OSError:
-            continue
-        out.append({"name": name, "type": mime, "size": len(blob),
+        out.append({"name": "shot-%d.%s" % (i + 1, ext), "type": mime,
+                    "size": len(blob),
                     "sha256": hashlib.sha256(blob).hexdigest()[:16],
-                    "path": os.path.relpath(full, ROOT).replace("\\", "/")})
+                    "data": "data:%s;base64,%s"
+                            % (mime, base64.b64encode(blob).decode("ascii"))})
     return out
-
-
-def _feedback_summary(rec):
-    """给推送通道看的纯文本：一条消息就能读懂「什么问题、怎么复现、什么环境」。"""
-    c = rec.get("context") or {}
-    bits = ["[%s] %s" % (rec.get("kind"), rec.get("summary") or "(无概述)")]
-    for label, key in (("复现", "steps"), ("触发", "trigger"),
-                       ("异常", "actual"), ("期望", "expected")):
-        v = (rec.get(key) or "").strip()
-        if v:
-            bits.append(label + ": " + v.replace("\n", " / ")[:300])
-    env = " · ".join(x for x in (
-        ("v" + str(c.get("version") or "")).strip("v"),
-        str(c.get("build") or ""),
-        str(c.get("view") or ""),
-        str(c.get("station") or ""),
-        str(c.get("screen") or ""),
-        str(c.get("platform") or "")) if x)
-    if env:
-        bits.append("环境: " + env)
-    errs = c.get("errors") or []
-    if errs:
-        bits.append("最近报错: " + " | ".join(str(e)[:120] for e in errs[:3]))
-    n = len(rec.get("images") or [])
-    bits.append("截图: %d 张 · 编号 %s" % (n, rec.get("id")))
-    return "\n".join(bits)[:3500]
-
-
-def _feedback_upload(rec, images=None):
-    """把一条反馈发到配置的收集地址。
-
-    · ntfy.sh：发一条**可读的纯文本摘要**（推送里直接能看），截图用 PUT 作为附件；
-      完整 JSON 留在本机（ntfy 单条消息 4KB、附件 3 小时，不适合当档案库）。
-    · 其他 HTTPS 地址：POST 完整 JSON（含 base64 截图），交给对方自己存。
-    任何失败都只返回原因，不影响「本机已保存」这个事实。
-    """
-    t = _feedback_target()
-    url = t["url"]
-    host = _feedback_host(url)
-    is_ntfy = host.endswith("ntfy.sh")
-    out = {"ok": False, "target": host, "at": int(time.time())}
-    try:
-        if is_ntfy:
-            body = _feedback_summary(rec).encode("utf-8")
-            req = urllib.request.Request(url, data=body, method="POST", headers={
-                "User-Agent": UA, "Content-Type": "text/plain; charset=utf-8",
-                "Title": "ReplayRadio feedback", "Tags": "speech_balloon",
-                "Priority": "default"})
-            with urlopen(req, 15) as r:
-                out["status"] = getattr(r, "status", 200)
-            out["ok"] = 200 <= int(out.get("status") or 0) < 300
-            sent = 0
-            for im in (images or []):
-                blob = im.get("_blob")
-                if blob is None:
-                    continue
-                fn = "FB-%s-%s" % (rec.get("id"), im.get("name") or "shot.png")
-                req2 = urllib.request.Request(url, data=blob, method="PUT", headers={
-                    "User-Agent": UA, "Filename": fn,
-                    "Title": "ReplayRadio screenshot", "Tags": "camera"})
-                try:
-                    with urlopen(req2, 20) as r2:
-                        if 200 <= int(getattr(r2, "status", 200)) < 300:
-                            sent += 1
-                except Exception:
-                    pass
-            out["images"] = sent
-        else:
-            payload = dict(rec)
-            payload["images"] = []
-            for im in (images or []):
-                blob = im.get("_blob")
-                if blob is None:
-                    continue
-                payload["images"].append({
-                    "name": im.get("name"), "type": im.get("type"),
-                    "data": base64.b64encode(blob).decode("ascii")})
-            req = urllib.request.Request(
-                url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={"Content-Type": "application/json; charset=utf-8",
-                         "User-Agent": UA})
-            with urlopen(req, 20) as r:
-                out["status"] = getattr(r, "status", 200)
-            out["ok"] = 200 <= int(out.get("status") or 0) < 300
-    except Exception as e:
-        out["error"] = str(e)[:160]
-    return out
-
-
-def _feedback_state_load():
-    try:
-        with open(os.path.join(FEEDBACK_DIR, "upload-state.json"), encoding="utf-8") as f:
-            d = json.load(f)
-        return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
-
-
-def _feedback_state_save(d):
-    try:
-        os.makedirs(FEEDBACK_DIR, exist_ok=True)
-        with open(os.path.join(FEEDBACK_DIR, "upload-state.json"), "w",
-                  encoding="utf-8", newline="\n") as f:
-            json.dump(d, f, ensure_ascii=False)
-    except OSError:
-        pass
-
-
-def _feedback_find(fid):
-    """按编号在 JSONL 里找回一条记录（一键上传要重新读出来）。"""
-    if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", str(fid or "")):
-        return None
-    try:
-        names = sorted(os.listdir(FEEDBACK_DIR))
-    except OSError:
-        return None
-    for n in names:
-        if not (n.startswith("feedback-") and n.endswith(".jsonl")):
-            continue
-        try:
-            with open(os.path.join(FEEDBACK_DIR, n), encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or fid not in line:
-                        continue
-                    d = json.loads(line)
-                    if d.get("id") == fid:
-                        return d
-        except (OSError, ValueError):
-            continue
-    return None
 
 
 def _feedback_md(rec):
+    """人读版正文（作为文档的 markdown 字段，不再单独写 .md 文件）。"""
     c = rec.get("context") or {}
     lines = ["# 反馈 %s" % rec.get("id"), "",
              "- 时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(rec["at"])),
@@ -1654,23 +1538,224 @@ def _feedback_md(rec):
         lines += ["## 日志末尾（%d 行，已涂掉凭据）" % len(logs), "", "```", *logs, "```", ""]
     imgs = rec.get("images") or []
     if imgs:
-        lines += ["## 截图", ""]
+        lines += ["## 截图（已内嵌在 images 字段）", ""]
         for im in imgs:
             lines.append("- `%s`（%d KB，sha256 %s）"
-                         % (im.get("path"), int(im.get("size") or 0) // 1024,
+                         % (im.get("name"), int(im.get("size") or 0) // 1024,
                             im.get("sha256")))
         lines.append("")
     return "\n".join(lines)
 
 
+def _feedback_document(rec):
+    """一条反馈 = 一个自包含文档：正文、环境、日志、截图全在里面。
+
+    上传时**原样发送这个 JSON**，接收端不需要再去别处找附件；
+    markdown 字段是同一份内容的人读版，方便直接贴进 Issue。
+    """
+    ctx = rec.get("context") or {}
+    return {
+        "schema": "replay-radio-feedback",
+        "schema_version": 1,
+        "id": rec["id"],
+        "created_at": rec["at"],
+        "created_at_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(rec["at"])),
+        "app": "ReplayRadio",
+        "version": str(ctx.get("version") or ""),
+        "build": str(ctx.get("build") or ""),
+        "kind": rec["kind"],
+        "report": {
+            "summary": rec.get("summary") or "",
+            "steps": rec.get("steps") or "",
+            "trigger": rec.get("trigger") or "",
+            "actual": rec.get("actual") or "",
+            "expected": rec.get("expected") or "",
+        },
+        "environment": ctx,
+        "logs": {"source": "log.txt", "lines": rec.get("logs") or []},
+        "images": rec.get("images") or [],
+        "markdown": _feedback_md(rec),
+    }
+
+
+def _feedback_write(doc):
+    """写 `<编号>.json`。先写 .part 再替换，避免用户恰好在这时打开看到半个文件。"""
+    os.makedirs(FEEDBACK_DIR, exist_ok=True)
+    path = os.path.join(FEEDBACK_DIR, doc["id"] + ".json")
+    tmp = path + ".part"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+def _feedback_summary(doc):
+    """给推送通道看的纯文本：一条消息就能读懂「什么问题、怎么复现、什么环境」。"""
+    rep = doc.get("report") or {}
+    c = doc.get("environment") or {}
+    bits = ["[%s] %s" % (doc.get("kind"), rep.get("summary") or "(无概述)")]
+    for label, key in (("复现", "steps"), ("触发", "trigger"),
+                       ("异常", "actual"), ("期望", "expected")):
+        v = (rep.get(key) or "").strip()
+        if v:
+            bits.append(label + ": " + v.replace("\n", " / ")[:300])
+    env = " · ".join(x for x in (
+        ("v" + str(doc.get("version") or "")).strip("v"),
+        str(doc.get("build") or ""),
+        str(c.get("view") or ""),
+        str(c.get("station") or ""),
+        str(c.get("screen") or ""),
+        str(c.get("platform") or "")) if x)
+    if env:
+        bits.append("环境: " + env)
+    errs = c.get("errors") or []
+    if errs:
+        bits.append("最近报错: " + " | ".join(str(e)[:120] for e in errs[:3]))
+    bits.append("截图: %d 张 · 文档 %s.json · 编号 %s"
+                % (len(doc.get("images") or []), doc.get("id"), doc.get("id")))
+    return "\n".join(bits)[:3500]
+
+
+def _feedback_upload(doc):
+    """把**这个单一文档**发到配置的收集地址。
+
+    · ntfy.sh：先发可读摘要（推送里能直接看），再把整份 JSON 作为**一个附件**上传；
+    · 其他 HTTPS 地址：直接 POST 这份 JSON 的原始字节。
+    无论哪条通道，接收方拿到的都是同一个自包含文件，不用再拼 md / 图片。
+    """
+    t = _feedback_target()
+    url = t["url"]
+    host = _feedback_host(url)
+    is_ntfy = host.endswith("ntfy.sh")
+    raw = json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8")
+    name = "FB-%s.json" % doc.get("id")
+    out = {"ok": False, "target": host, "at": int(time.time()),
+           "document": name, "bytes": len(raw)}
+    try:
+        if is_ntfy:
+            req = urllib.request.Request(
+                url, data=_feedback_summary(doc).encode("utf-8"), method="POST",
+                headers={"User-Agent": UA, "Content-Type": "text/plain; charset=utf-8",
+                         "Title": "ReplayRadio feedback", "Tags": "speech_balloon",
+                         "Priority": "default"})
+            with urlopen(req, 15) as r:
+                out["status"] = getattr(r, "status", 200)
+            out["ok"] = 200 <= int(out.get("status") or 0) < 300
+            req2 = urllib.request.Request(url, data=raw, method="PUT", headers={
+                "User-Agent": UA, "Filename": name,
+                "Title": "ReplayRadio feedback document", "Tags": "page_facing_up"})
+            with urlopen(req2, 25) as r2:
+                out["doc_status"] = getattr(r2, "status", 200)
+            out["ok"] = bool(out["ok"]) and 200 <= int(out.get("doc_status") or 0) < 300
+        else:
+            req = urllib.request.Request(
+                url, data=raw,
+                headers={"Content-Type": "application/json; charset=utf-8",
+                         "User-Agent": UA, "X-Feedback-Id": str(doc.get("id") or "")})
+            with urlopen(req, 25) as r:
+                out["status"] = getattr(r, "status", 200)
+            out["ok"] = 200 <= int(out.get("status") or 0) < 300
+    except Exception as e:
+        out["error"] = str(e)[:160]
+    return out
+
+
+def _feedback_migrate_legacy():
+    """把 v1.9.27 及更早的「jsonl + md + attach」并成一条一个 JSON。
+
+    旧文件不删，整批移到 `legacy/`（可逆、可回溯）；新文档写完才移动，
+    中途失败最多留下旧文件，不会丢反馈。
+    """
+    try:
+        names = os.listdir(FEEDBACK_DIR)
+    except OSError:
+        return
+    olds = [n for n in names if n.startswith("feedback-") and n.endswith(".jsonl")]
+    if not olds and not any(n in names for n in ("attach", "upload-state.json")):
+        return
+    made = 0
+    for n in olds:
+        try:
+            fh = open(os.path.join(FEEDBACK_DIR, n), encoding="utf-8")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = _feedback_norm(json.loads(line))
+                except ValueError:
+                    continue
+                if not rec["id"]:
+                    continue
+                dst = os.path.join(FEEDBACK_DIR, rec["id"] + ".json")
+                if os.path.exists(dst):
+                    continue
+                # 旧记录的图片只存了路径：读回来嵌进文档，再丢掉路径字段
+                fixed = []
+                for im in rec["images"]:
+                    if not isinstance(im, dict):
+                        continue
+                    item = dict(im)
+                    if not item.get("data") and item.get("path"):
+                        try:
+                            with open(os.path.join(ROOT, str(item["path"]).replace("/", os.sep)),
+                                      "rb") as f:
+                                blob = f.read()
+                            item["data"] = "data:%s;base64,%s" % (
+                                item.get("type") or "image/jpeg",
+                                base64.b64encode(blob).decode("ascii"))
+                            item["size"] = len(blob)
+                        except OSError:
+                            pass
+                    item.pop("path", None)
+                    fixed.append(item)
+                rec["images"] = fixed
+                try:
+                    _feedback_write(_feedback_document(rec))
+                    made += 1
+                except OSError:
+                    pass
+    legacy = os.path.join(FEEDBACK_DIR, "legacy")
+    try:
+        os.makedirs(legacy, exist_ok=True)
+    except OSError:
+        return
+    for n in names:
+        if n == "legacy":
+            continue
+        if not (n.startswith("feedback-") and n.endswith(".jsonl")) \
+                and not n.endswith(".md") and n not in ("attach", "upload-state.json"):
+            continue
+        try:
+            shutil.move(os.path.join(FEEDBACK_DIR, n), os.path.join(legacy, n))
+        except Exception:
+            pass
+    print("[feedback] 旧反馈已合并为单文档：新增 %d 个 JSON，旧文件在 data/feedback/legacy/" % made)
+
+
+def _feedback_find(fid):
+    """按编号取回文档（一键上传 / 打开文件夹用）。旧的 jsonl 会顺手迁移。"""
+    if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", str(fid or "")):
+        return None
+    path = os.path.join(FEEDBACK_DIR, str(fid) + ".json")
+    if not os.path.exists(path):
+        _feedback_migrate_legacy()
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def _feedback_reveal(fid=""):
-    """在资源管理器里定位到反馈文件（Windows）；其他平台只回路径。"""
-    path = ""
-    if fid:
-        rec = _feedback_find(fid)
-        if rec:
-            path = os.path.join(FEEDBACK_DIR, "%s.md" % rec["id"])
-    if not path or not os.path.exists(path):
+    """在资源管理器里定位到这份反馈文档（Windows）；其他平台只回路径。"""
+    path = os.path.join(FEEDBACK_DIR, (str(fid) + ".json") if fid else "")
+    if not fid or not os.path.exists(path):
         path = FEEDBACK_DIR
     try:
         os.makedirs(FEEDBACK_DIR, exist_ok=True)
@@ -1694,12 +1779,14 @@ def _feedback_reveal(fid=""):
 
 
 def api_feedback_conf():
+    _feedback_migrate_legacy()
     t = _feedback_target()
     return 200, {"upload": t["upload"], "target": _feedback_host(t["url"]),
                  "url": t["url"] if t["upload"] else ""}
 
 
 def api_feedback(obj):
+    _feedback_migrate_legacy()      # 提交前先并一次旧文件，避免新旧格式混在目录里
     kind = str(obj.get("kind") or "other")
     if kind not in FEEDBACK_KINDS:
         kind = "other"
@@ -1723,42 +1810,30 @@ def api_feedback(obj):
         "context": ctx,
         # 有诊断信息才带日志：用户明确关掉诊断时不该偷偷收集日志
         "logs": _feedback_log_tail() if ctx else [],
-        "images": [],
+        "images": _feedback_images(obj.get("images")),
     }
-    rec["images"] = _feedback_images(fid, obj.get("images"))
-    # 把截图字节读回来给上传用（落盘后再读，避免同一份数据在内存里留两份）
-    blobs = []
-    for im in rec["images"]:
-        try:
-            with open(os.path.join(ROOT, im["path"].replace("/", os.sep)), "rb") as f:
-                blobs.append(dict(im, _blob=f.read()))
-        except OSError:
-            pass
-    path = os.path.join(FEEDBACK_DIR, "feedback-%s.jsonl" % time.strftime("%Y%m"))
+    doc = _feedback_document(rec)
     try:
-        os.makedirs(FEEDBACK_DIR, exist_ok=True)
-        with open(path, "a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        with open(os.path.join(FEEDBACK_DIR, fid + ".md"), "w",
-                  encoding="utf-8", newline="\n") as f:
-            f.write(_feedback_md(rec))
+        path = _feedback_write(doc)
     except OSError as e:
         return 500, {"error": "写入本机失败：%s" % str(e)[:80]}
     out = {"ok": True, "id": fid,
            "stored": os.path.relpath(path, ROOT).replace("\\", "/"),
-           "md": "data/feedback/%s.md" % fid,
            "dir": "data/feedback",
-           "images": len(rec["images"])}
+           "images": len(doc["images"])}
     t = _feedback_target()
     want = obj.get("upload")
     do_up = t["upload"] if not isinstance(want, bool) else want
     if do_up:
-        res = _feedback_upload(rec, blobs)
+        res = _feedback_upload(doc)
         out["upload"] = res
-        st = _feedback_state_load()
-        st[fid] = {"at": res.get("at"), "ok": bool(res.get("ok")),
-                   "target": res.get("target"), "error": res.get("error", "")}
-        _feedback_state_save(st)
+        doc["upload"] = {"at": res.get("at"), "ok": bool(res.get("ok")),
+                         "target": res.get("target"), "document": res.get("document"),
+                         "error": res.get("error", "")}
+        try:
+            _feedback_write(doc)
+        except OSError:
+            pass
         if not res.get("ok"):
             out["warn"] = "已保存到本机，但上传失败：%s" % (res.get("error") or "对方未接受")
     else:
@@ -1768,24 +1843,20 @@ def api_feedback(obj):
 
 
 def api_feedback_upload(obj):
-    """一键（重新）上传：按编号找回已保存的记录再发一次。"""
-    rec = _feedback_find(obj.get("id"))
-    if not rec:
+    """一键（重新）上传：按编号取回文档，原样再发一次。"""
+    doc = _feedback_find(obj.get("id"))
+    if not doc:
         return 404, {"error": "找不到这条反馈（编号不对或文件已被移走）"}
-    blobs = []
-    for im in rec.get("images") or []:
-        try:
-            with open(os.path.join(ROOT, str(im.get("path")).replace("/", os.sep)), "rb") as f:
-                blobs.append(dict(im, _blob=f.read()))
-        except OSError:
-            pass
-    res = _feedback_upload(rec, blobs)
-    st = _feedback_state_load()
-    st[rec["id"]] = {"at": res.get("at"), "ok": bool(res.get("ok")),
-                     "target": res.get("target"), "error": res.get("error", "")}
-    _feedback_state_save(st)
+    res = _feedback_upload(doc)
+    doc["upload"] = {"at": res.get("at"), "ok": bool(res.get("ok")),
+                     "target": res.get("target"), "document": res.get("document"),
+                     "error": res.get("error", "")}
+    try:
+        _feedback_write(doc)
+    except OSError:
+        pass
     return (200 if res.get("ok") else 502), {"ok": bool(res.get("ok")),
-                                             "id": rec["id"], **res}
+                                             "id": doc.get("id"), **res}
 
 
 def api_feedback_reveal(obj):

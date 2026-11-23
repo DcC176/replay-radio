@@ -10140,7 +10140,7 @@
         sub.textContent = '直播中' + (d.title ? ' · ' + d.title : '');
         sub.classList.add('on');
       } else {
-        sub.textContent = '未开播' + (cur.room ? ' · 房间 ' + cur.room : '');
+        sub.textContent = '未开播';      // 房间号对用户没用，选择结果也不依赖它
         sub.classList.remove('on');
       }
       sub.title = d.living ? (d.title || '直播中') : '当前未开播';
