@@ -1,10 +1,10 @@
 {
-  "version": "1.9.26",
-  "name": "ReplayRadio-v1.9.26.exe",
-  "size": 56219428,
-  "sha256": "51c560f9b06c2c873acf23af9bae6b6bee51f4f8dce3ff5d240c3a1d251f8187",
-  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.26/ReplayRadio-v1.9.26.exe",
-  "published": "2026-11-23T14:29:22Z",
-  "notes": "直播间表情面板（B站原生+房间专属）+ 反馈与错误上报（默认只存本机）",
+  "version": "1.9.27",
+  "name": "ReplayRadio-v1.9.27.exe",
+  "size": 56234420,
+  "sha256": "99437a938c28e7b6798057bbfb7c7d4b91a1db380117fc4dc92a9d7cda5f4567",
+  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.27/ReplayRadio-v1.9.27.exe",
+  "published": "2026-11-23T15:02:55Z",
+  "notes": "选择器显示当前主播与状态 + 默认 7 个灯 + 反馈结构化/截图/自动上传",
   "_note": "软件内更新检查的兜底数据源。发版时随 site/index.html 的 VERSION 一起改，发布到 gh-pages 后生效。"
 }
