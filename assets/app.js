@@ -776,7 +776,7 @@
        左栏「N 个常去」 = 按 liver 聚合（互动次数 + 打赏额 + 粉丝牌）
        右栏「主播卡 + 粉丝/互动/打赏/上舰 + 筛选 + 互动流」 */
   var ddPState = { page: 1, hasMore: false, kind: "", order: "time_desc", kw: "", liver: "",
-                   loaded: false, view: "list", side: "money", desc: true,
+                   loaded: false, view: "list", desc: true,
                    rows: [], board: [] };
   /* uid → {face, uname}。头像基本不变，后端落了盘缓存，这里只是内存副本。 */
   var ddFaces = {};
@@ -831,38 +831,32 @@
       }).catch(function () { /* 取不到就一直是首字母块，不影响功能 */ });
   }
 
-  /* ---------------- 左栏：主播榜 ---------------- */
-
-  function ddBoardRows() {
-    var key = ddPState.side === 'count' ? 'n' : 'money';
-    var rows = (ddPState.board || []).slice();
+  /* ---------------- 左栏：两张独立的主播榜 ----------------
+     消费榜按 ¥ 金额、弹幕榜按纯弹幕条数（后端 msg_n）。两者口径互斥：
+     一个只在榜里出现于自己有数据的那张，绝不把 0 元改写成「N 条」混排。 */
+  function ddBoardRows(key) {
+    var rows = (ddPState.board || []).filter(function (r) { return (r[key] || 0) > 0; });
     rows.sort(function (a, b) {
       var d = (b[key] || 0) - (a[key] || 0);
-      if (!d) d = (b.n || 0) - (a.n || 0);
       return ddPState.desc ? d : -d;
     });
     return rows;
   }
 
-  function ddRenderBoard() {
-    var box = document.getElementById('ddp-board');
+  function ddPaintBoard(box, key, unit, pctKey) {
     if (!box) return;
-    var rows = ddBoardRows();
-    ddTxt('ddp-board-n', (ddPState.board || []).length + ' 个主播榜');
-    if (!rows.length) { box.innerHTML = '<p class="dl-empty">还没有互动记录</p>'; return; }
-    var useCount = ddPState.side === 'count';
-    var max = 1;
-    rows.forEach(function (r) { max = Math.max(max, useCount ? (r.n || 0) : (r.money || 0)); });
+    var rows = ddBoardRows(key);
+    if (!rows.length) {
+      box.innerHTML = '<p class="dl-empty">'
+        + (key === 'money' ? '没有消费记录' : '没有弹幕记录') + '</p>';
+      return;
+    }
+    var max = Math.max.apply(null, rows.map(function (r) { return r[key] || 0; })) || 1;
+    var pctTotal = rows.reduce(function (s, r) { return s + (r[pctKey] || 0); }, 0) || 1;
     box.innerHTML = rows.map(function (r, i) {
-      var cur = useCount ? (r.n || 0) : (r.money || 0);
-      // 没打过赏的主播在「按金额」排序下金额是 0 —— 那种行改显示次数，别写成 0.0 元
-      var showCount = useCount || !(r.money > 0);
-      var val = showCount ? ((r.n || 0) + ' 条') : ('¥' + (r.money || 0).toFixed(1));
-      var bar = showCount ? (r.n || 0) : (r.money || 0);
-      var w = Math.max(2, Math.round(bar * 100 / (showCount && !useCount ? Math.max(1, rows[0].n || 1) : max)));
+      var val = key === 'money' ? ('¥' + r.money.toFixed(1)) : ((r.msg_n || 0) + ' 条');
+      var w = Math.max(2, Math.round((r[key] || 0) * 100 / max));
       var on = ddPState.liver && ddPState.liver === r.name;
-      /* 粉丝牌不放正文：左栏只有 300px，牌子会把名字挤成省略号
-         （vtb.cat 那一栏也只显示名字 + 金额）。改成挂在 title 上，鼠标停一下能看到。 */
       var tip = r.name + (r.medal ? (' · ' + (r.medal_name || '粉丝牌') + ' ' + r.medal + ' 级') : '');
       return '<div class="ddp-row' + (on ? ' on' : '') + '" data-name="' + esc(r.name) + '"'
         + ' data-room="' + esc(r.room || '') + '" title="' + esc(tip) + '" style="--i:' + i + '">'
@@ -871,10 +865,21 @@
         + '<span class="nm">' + esc(r.name) + '</span>'
         + '<span class="mt">' + val + '</span>'
         + '<span class="bar"><span style="--w:' + w + '%"></span></span>'
-        + '<span class="pct">' + (r.pct != null ? r.pct : 0) + '%</span>'
+        + '<span class="pct" title="占全部' + unit + '的比例">'
+        + Math.round((r[pctKey] || 0) * 100 / pctTotal) + '%</span>'
         + '</div>';
     }).join('');
     bindFaceFallback(box);
+  }
+
+  function ddRenderBoard() {
+    ddTxt('ddp-board-n', (ddPState.board || []).length + ' 位主播');
+    ddPaintBoard(document.getElementById('ddp-board-money'), 'money', '消费', 'pct_money');
+    ddPaintBoard(document.getElementById('ddp-board-msg'), 'msg_n', '弹幕', 'pct_msg');
+    /* 两张榜的人数各自标注：合并后的「N 位主播」不等于任一榜的行数，
+       不写清楚会让人以为有一边漏了人。 */
+    ddTxt('ddp-money-n', ddBoardRows('money').length + ' 位');
+    ddTxt('ddp-msg-n', ddBoardRows('msg_n').length + ' 位');
   }
 
   /* 数字滚动：0 → 目标值（easeOutCubic，约 0.4 秒）。
@@ -1204,14 +1209,7 @@
       });
     });
 
-    /* 左栏：排序依据（金额 ↔ 次数）+ 直降开关 */
-    var ord = document.getElementById('ddp-side-order');
-    if (ord) ord.addEventListener('click', function () {
-      ddPState.side = ddPState.side === 'money' ? 'count' : 'money';
-      ord.textContent = ddPState.side === 'money' ? '按金额' : '按次数';
-      ord.classList.toggle('on', ddPState.side === 'count');
-      ddRenderBoard();
-    });
+    /* 左栏：直降开关（两张榜共用）；点行仍按主播筛选互动流 */
     var desc = document.getElementById('ddp-side-desc');
     if (desc) desc.addEventListener('click', function () {
       ddPState.desc = !ddPState.desc;
@@ -1219,18 +1217,18 @@
       desc.classList.toggle('on', ddPState.desc);
       ddRenderBoard();
     });
-
-    /* 点左榜：把它当作筛选条件（再点一次取消）—— 服务端过滤，分页总数才准 */
-    var board = document.getElementById('ddp-board');
-    if (board) board.addEventListener('click', function (ev) {
-      var row = ev.target.closest && ev.target.closest('.ddp-row');
-      if (!row) return;
-      var name = row.getAttribute('data-name') || '';
-      ddPState.liver = (ddPState.liver === name) ? '' : name;
-      ddRenderBoard();
-      ddPState.loaded = true;
-      ddpQuery(1);
-    });
+    Array.prototype.forEach.call(
+      document.querySelectorAll('#ddp-board-money, #ddp-board-msg'), function (board) {
+        board.addEventListener('click', function (ev) {
+          var row = ev.target.closest && ev.target.closest('.ddp-row');
+          if (!row) return;
+          var name = row.getAttribute('data-name') || '';
+          ddPState.liver = (ddPState.liver === name) ? '' : name;
+          ddRenderBoard();
+          ddPState.loaded = true;
+          ddpQuery(1);
+        });
+      });
   }
 
   /* 旧的弹幕/词云查询逻辑已由上面的看播档案取代；
@@ -1531,6 +1529,89 @@
         });
       });
     }, true);
+  }
+
+  /* 顶栏高度写回 --topbar-h：两行布局的高度是内容算出来的（站名换行、标签
+     两行都会变），写死一个 94px 迟早对不上，而消费它的地方（直播间宽度预算、
+     固定面板的 top）全靠这个变量。实测高度直接写回，任何分辨率都自洽。 */
+  var topbarRAF = 0;
+  function syncTopbarHeight() {
+    var tb = document.querySelector('.topbar');
+    if (!tb) return;
+    var h = Math.round(tb.getBoundingClientRect().height);
+    if (h > 0) document.documentElement.style.setProperty('--topbar-h', h + 'px');
+  }
+  function queueTopbarSync() {
+    if (topbarRAF) return;
+    topbarRAF = requestAnimationFrame(function () {
+      topbarRAF = 0;
+      syncTopbarHeight();
+    });
+  }
+
+  /* 窄屏「更多」菜单：B 站空间 / 界面语言 / 深浅色。
+     宽屏这三个都是独立按钮（CSS 隐藏 .tb-more），所以这里只管窄屏。 */
+  function bindTopbarMore() {
+    var btn = document.getElementById('tb-more');
+    var menu = document.getElementById('tb-menu');
+    if (!btn || !menu) return;
+
+    function close() {
+      menu.hidden = true;
+      btn.setAttribute('aria-expanded', 'false');
+    }
+    function open() {
+      var sel = document.getElementById('lang');
+      var it = menu.querySelector('[data-act="lang"]');
+      if (it && sel) {
+        it.textContent = '界面语言：' + (sel.value === 'zh-Hant' ? '繁體中文' : '简体中文');
+      }
+      /* 固定定位：只跟按钮的右下角对齐，不受 flex order / 堆叠顺序影响 */
+      var r = btn.getBoundingClientRect();
+      menu.style.top = Math.round(r.bottom + 8) + 'px';
+      menu.style.right = Math.max(10, Math.round(window.innerWidth - r.right)) + 'px';
+      menu.hidden = false;
+      btn.setAttribute('aria-expanded', 'true');
+    }
+    btn.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      if (menu.hidden) open(); else close();
+    });
+    document.addEventListener('click', function (ev) {
+      if (menu.hidden) return;
+      if (menu.contains(ev.target) || btn.contains(ev.target)) return;
+      close();
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && !menu.hidden) close();
+    });
+    /* 滚走或改变窗口大小后按钮已不在原处，菜单不能悬空停着 */
+    window.addEventListener('scroll', function () {
+      if (!menu.hidden) close();
+    }, { passive: true });
+    window.addEventListener('resize', function () {
+      if (!menu.hidden) close();
+    });
+    menu.addEventListener('click', function (ev) {
+      var it = ev.target.closest ? ev.target.closest('[data-act]') : null;
+      if (!it) return;
+      var act = it.getAttribute('data-act');
+      if (act === 'space') {
+        var a = document.getElementById('tb-space');
+        var href = a && a.getAttribute('href');
+        if (href && href !== '#') window.open(href, '_blank', 'noopener');
+      } else if (act === 'lang') {
+        var sel = document.getElementById('lang');
+        if (sel) {
+          sel.value = sel.value === 'zh-Hant' ? 'zh-Hans' : 'zh-Hant';
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      } else if (act === 'theme') {
+        var t = document.getElementById('theme-toggle');
+        if (t) t.click();
+      }
+      close();
+    });
   }
 
   function bindThemeToggle() {
@@ -2824,8 +2905,45 @@
         '<p>新回放进入频道只需重跑采集脚本：</p>',
         '<p><code>python tools/collect.py</code></p>',
         '<p>加 <code>--refresh</code> 可忽略缓存全部重新采集。建议每日一次。</p>'
+      ].join('')),
+
+      block('版本与更新', [
+        '<p>当前版本 <b id="about-ver">—</b>。启动时会自动检查新版本，'
+          + '检查到<b>只弹提示</b>，不会自动下载或安装。</p>',
+        '<p id="about-upd-pref" style="margin-top:8px">更新提示：开启。</p>',
+        '<div class="qp-btns" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">',
+        '<button class="btn small primary" id="btn-about-check" type="button">检查更新</button>',
+        '<button class="btn small ghost" id="btn-about-reset" type="button" hidden>恢复更新提示</button>',
+        '<a class="btn small ghost" href="https://github.com/DcC176/replay-radio/releases/latest"'
+          + ' target="_blank" rel="noopener">打开下载页</a>',
+        '</div>',
+        '<p id="about-upd-state" style="margin-top:8px;color:var(--muted)"></p>'
       ].join(''))
     ].join('');
+    bindAboutUpdate();
+  }
+
+  /* 「关于」页里的更新入口：与设置页共用 updCheck / updRenderPrefs，
+     这样偏好只有一份、两处显示永远一致。 */
+  function bindAboutUpdate() {
+    var b = document.getElementById('btn-about-check');
+    if (b) b.addEventListener('click', function () {
+      var e = document.getElementById('about-upd-state');
+      if (e) e.textContent = '正在检查更新…';
+      updCheck(true).then(function (r) {
+        if (!e) return;
+        if (!r) { e.textContent = '检查失败：网络不可达，可打开下载页手动更新。'; return; }
+        if (r.available) e.textContent = '发现新版本 v' + r.latest + '，已弹出提示卡。';
+        else e.textContent = '已是最新版本（当前 v' + (r.current || '—') + '）。';
+      });
+    });
+    var reset = document.getElementById('btn-about-reset');
+    if (reset) reset.addEventListener('click', function () { updSnooze(0); updRenderPrefs(); });
+    fetch('/api/ping').then(function (r) { return r.json(); }).then(function (d) {
+      var v = document.getElementById('about-ver');
+      if (v && d && d.version) v.textContent = 'v' + d.version;
+    }).catch(function () { /* 服务不在：留着破折号 */ });
+    updRenderPrefs();
   }
 
   /* ---------------------------------------------------------- 直播间 */
@@ -4311,10 +4429,21 @@
     var pill = document.getElementById('tb-pill');
     var tab = nav && nav.querySelector('.tab.active');
     if (!nav || !pill || !tab) return;
+    /* 放得下就居中，放不下就左对齐滚动（居中 + overflow 会把首尾标签藏进死区） */
+    nav.classList.toggle('fit', nav.scrollWidth <= nav.clientWidth + 1);
     if (instant) pill.classList.remove('ready');
     pill.style.width = tab.offsetWidth + 'px';
     pill.style.height = tab.offsetHeight + 'px';
     pill.style.transform = 'translateX(' + tab.offsetLeft + 'px)';
+    /* 标签条在窄屏/两行布局下是可横向滚动的：切页后必须把当前标签带回视口，
+       否则「设置」这类靠后的页签永远停在屏幕外，看起来像没切过去。 */
+    if (nav.scrollWidth > nav.clientWidth + 1) {
+      var l = tab.offsetLeft, r = l + tab.offsetWidth;
+      if (l < nav.scrollLeft) nav.scrollLeft = Math.max(0, l - 8);
+      else if (r > nav.scrollLeft + nav.clientWidth) {
+        nav.scrollLeft = r - nav.clientWidth + 8;
+      }
+    }
     if (instant) {
       void pill.offsetWidth;
       pill.classList.add('ready');
@@ -8504,15 +8633,228 @@
   /* 空态分流：有人就走正常流程，没人就停在引导页上。
      pageSetup 放在这里而不是 initMain 里 —— 服务靠页面心跳判断「网页是不是全关了」，
      引导页停留期间也得照常报到，否则会被判定成页面已关闭。 */
+
+  /* ---------------------------------------------------------- 版本更新
+     启动只检查、只提示；偏好存本机浏览器。所有下载/替换都必须由用户点
+     「立即更新」触发。snooze: 0=未抑制 / 时间戳=到点前不弹 / -1=永久不弹。 */
+  var UPD_KEY = 'xl_update_snooze';
+  var updInfo = null;
+  var updBusy = false;
+
+  function updSnooze(v) {
+    try {
+      if (v === undefined) return Number(localStorage.getItem(UPD_KEY) || 0);
+      if (v) localStorage.setItem(UPD_KEY, String(v));
+      else localStorage.removeItem(UPD_KEY);
+    } catch (e) { /* 隐私模式：不存偏好，本次会话仍生效 */ }
+    return 0;
+  }
+  function updSuppressed() {
+    var v = updSnooze();
+    return v === -1 || (v > 0 && Date.now() < v);
+  }
+  /* 提示偏好：开启 / 已暂停（到点自动恢复）/ 已关闭。设置页要能看见并恢复，
+     否则点了「永久不再提示」就再也找不到回来的路。 */
+  function updRenderPrefs() {
+    var el0 = document.getElementById('update-pref');
+    var row = document.getElementById('update-pref-row');
+    var v = updSnooze();
+    var txt;
+    if (v === -1) txt = '更新提示：已关闭（启动时不再提示；手动「检查更新」照常出结果）。';
+    else if (v > 0 && Date.now() < v) {
+      var d = new Date(v);
+      txt = '更新提示：已暂停，' + (d.getMonth() + 1) + ' 月 ' + d.getDate() + ' 日 '
+        + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
+        + ' 之后恢复。';
+    } else txt = '更新提示：开启（启动时检查到新版会弹提示）。';
+    if (el0) el0.textContent = txt;
+    if (row) row.hidden = !(v === -1 || v > 0);
+    var a = document.getElementById('about-upd-pref');
+    var ar = document.getElementById('about-upd-reset');
+    if (a) a.textContent = txt;
+    if (ar) ar.hidden = !(v === -1 || v > 0);
+  }
+
+  /* 设置页一打开就该看见「当前版本是多少」，而不是一条破折号等用户点检查。
+     走 /api/ping（纯本地、不问 B 站），不触发任何网络检查。 */
+  function updFillVersion() {
+    fetch('/api/ping').then(function (r) { return r.json(); }).then(function (d) {
+      var v = d && d.version;
+      var e = document.getElementById('update-state');
+      if (v && e && e.textContent.indexOf('当前版本：—') === 0) {
+        e.textContent = '当前版本：v' + v + '。可手动检查是否有新版。';
+      }
+      var av = document.getElementById('about-ver');
+      if (v && av) av.textContent = 'v' + v;
+    }).catch(function () { /* 服务不在时保持占位文案 */ });
+  }
+
+  /* 红点挂在「关于」标签上：那里是软件版本与更新入口。绝对定位，不占顶栏宽度。
+     用户选了「24 小时内 / 永久不再提示」就不再挂红点 —— 那是另一种形式的提示。 */
+  function updMarkNew(d) {
+    var tab = document.querySelector('.tb-tabs .tab[data-view="about"]');
+    if (!tab) return;
+    var on = !!(d && d.available) && !updSuppressed();
+    tab.classList.toggle('has-new', on);
+    tab.title = on ? ('发现新版本 v' + d.latest + '（在「关于」页可立即更新）') : '';
+  }
+
+  function updSetState(t) {
+    var e = document.getElementById('update-state');
+    if (e) e.textContent = t;
+  }
+  function updProgress(t) {
+    var e = document.getElementById('update-progress');
+    if (!e) return;
+    e.hidden = !t;
+    e.textContent = t || '';
+  }
+  function updHide() {
+    var m = document.getElementById('upd-mask');
+    if (m) m.hidden = true;
+  }
+  function updShow(d, force) {
+    /* force=true 只用于用户主动点「检查更新 / 更新」：
+       「稍后」「24 小时内」「永久」抑制的是启动时的**自动弹出**，不拦手动请求。 */
+    if ((!force && updSuppressed()) || updBusy) return;
+    updInfo = d;
+    var m = document.getElementById('upd-mask');
+    if (!m) return;
+    var v = document.getElementById('upd-ver');
+    if (v) v.textContent = 'v' + d.latest;
+    var n = document.getElementById('upd-note');
+    if (n) n.textContent = '当前 v' + d.current + ' → v' + d.latest
+      + '。' + (d.notes ? d.notes.split('\n')[0].slice(0, 80) : '有新版本可用。');
+    var s = document.getElementById('upd-state');
+    if (s) s.textContent = '';
+    m.hidden = false;
+  }
+
+  function updCheck(manual) {
+    if (updBusy) return Promise.resolve(null);
+    updBusy = true;
+    if (manual) updSetState('正在检查更新…');
+    return fetch('/api/update/check').then(function (r) { return r.json(); }).then(function (d) {
+      updBusy = false;
+      if (!d || !d.ok) {
+        if (manual) updSetState('检查失败：' + ((d && d.error) || '网络不可达'));
+        return null;
+      }
+      updMarkNew(d);
+      if (d.available) {
+        updSetState('发现新版本 v' + d.latest + '。');
+        if (manual) updShow(d, true);
+        else updShow(d, false);
+      } else if (manual) {
+        /* 用 current 而不是 GitHub 上的 latest：本地试装包可能比已发布版本还新，
+           那时说「已是最新（v 旧版本号）」会让人以为检查错了。 */
+        updSetState('已是最新版本（当前 v' + (d.current || d.latest) + '）。');
+      }
+      return d;
+    }).catch(function () {
+      updBusy = false;
+      if (manual) updSetState('检查失败：网络不可达');
+      return null;
+    });
+  }
+
+  function updDownload() {
+    if (!updInfo || updBusy) return;
+    updBusy = true;
+    var s = document.getElementById('upd-state');
+    if (s) s.textContent = '正在下载 v' + updInfo.latest + '…';
+    fetch('/api/update/download', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({version: updInfo.latest, url: updInfo.url,
+                            size: updInfo.size, sha256: updInfo.sha256})
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.ok) {
+        updBusy = false;
+        if (s) s.textContent = '下载失败：' + (d.error || '未知错误')
+          + '。可打开下载页手动更新。';
+        return;
+      }
+      var t0 = Date.now();
+      var timer = setInterval(function () {
+        fetch('/api/update/status').then(function (r) { return r.json(); }).then(function (st) {
+          if (st.stage === 'downloading') {
+            if (s) s.textContent = '正在下载 v' + updInfo.latest + '… ' + (st.pct || 0) + '%';
+          } else if (st.stage === 'done') {
+            clearInterval(timer);
+            if (s) s.textContent = '下载完成，正在替换并重启…';
+            fetch('/api/update/apply', {method: 'POST'}).then(function (r) { return r.json(); })
+              .then(function (a) {
+                if (!a.ok) {
+                  updBusy = false;
+                  if (s) s.textContent = '无法自动替换：' + (a.error || '未知错误')
+                    + '。请打开下载页手动更新。';
+                }
+              }).catch(function () {
+                updBusy = false;
+                if (s) s.textContent = '替换失败，请打开下载页手动更新。';
+              });
+          } else if (st.stage === 'error' || st.stage === 'applying') {
+            clearInterval(timer);
+            updBusy = false;
+            if (s) s.textContent = st.stage === 'error'
+              ? ('下载失败：' + (st.error || '未知错误') + '。请打开下载页手动更新。')
+              : '正在替换并重启…';
+          }
+          if (Date.now() - t0 > 600000) {
+            clearInterval(timer);
+            updBusy = false;
+            if (s) s.textContent = '下载超时，请打开下载页手动更新。';
+          }
+        }).catch(function () { /* 服务可能在替换时退出，忽略 */ });
+      }, 1000);
+    }).catch(function () {
+      updBusy = false;
+      if (s) s.textContent = '下载失败：网络不可达。可打开下载页手动更新。';
+    });
+  }
+
+  function bindUpdate() {
+    var check = document.getElementById('btn-update-check');
+    if (check) check.addEventListener('click', function () { updCheck(true); });
+    var reset = document.getElementById('btn-update-reset');
+    if (reset) reset.addEventListener('click', function () {
+      updSnooze(0);
+      updRenderPrefs();
+      updSetState('已恢复启动时的更新提示。');
+    });
+    updRenderPrefs();
+    updFillVersion();
+    var go = document.getElementById('upd-go');
+    if (go) go.addEventListener('click', updDownload);
+    [[('upd-later'), 0], [('upd-24h'), 24 * 3600 * 1000], [('upd-never'), -1]]
+      .forEach(function (pair) {
+        var b = document.getElementById(pair[0]);
+        if (!b) return;
+        b.addEventListener('click', function () {
+          if (pair[1]) updSnooze(pair[1] === -1 ? -1 : Date.now() + pair[1]);
+          updHide();
+          updRenderPrefs();
+          updMarkNew(updInfo);
+        });
+      });
+    /* 启动静默检查：延迟 3 秒避开首屏的网络高峰；检查失败完全静默 */
+    setTimeout(function () { updCheck(false); }, 3000);
+  }
+
   function init() {
     pageSetup();
     bindThemeToggle();           // 顶栏那颗按钮在两种模式下都要能用（含空态引导页）
+    bindTopbarMore();            // 窄屏「更多」菜单（B 站空间 / 语言 / 深浅色）
+    syncTopbarHeight();
+    window.addEventListener('resize', queueTopbarSync);
+    window.addEventListener('orientationchange', queueTopbarSync);
     bindChipFlip();              // 标签切换的「共享布局」过渡（全局捕获，只需绑一次）
     bindWeiboBind();             // 设置页「微博」卡片：填 UID/链接，一键绑到某位主播
     bindBanAlert();              // 右上角 B 站限流提示（带倒计时）
     bindDD();                    // DD 板块：关键词查询 + 词云
     bindDDLive();                // 直播数据：日历翻月 + 点日期看场次
     bindDDSub();                 // DD 内部三个子页面
+    bindUpdate();                // 更新：启动静默检查 + 手动按钮 + 提示偏好
     fetchStations().then(function (list) {
       var picked = false;
       try { picked = sessionStorage.getItem(PICK_KEY) === '1'; } catch (e) { /* 隐私模式 */ }

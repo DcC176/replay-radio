@@ -22,6 +22,7 @@
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,7 @@ OUT = os.path.join(ROOT, "发布")
 # 这些 build_* 目录纯属缓存（不进包、不进版本库），可以随时手动删除。
 BUILD = os.path.join(ROOT, "build_%s" % time.strftime("%Y%m%d_%H%M%S"))
 
-APP_VERSION = "1.9.21"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.9.23"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
@@ -238,8 +239,24 @@ def _write_text(path, text):
         f.write(text)
 
 
+def check_versions():
+    """serve.py 里的 APP_VERSION 决定「检查更新」的当前版本，必须与本文件一致。
+
+    两处各写一份是刻意的（后端不 import 构建脚本），代价是可能忘同步 ——
+    忘了就会出现「界面显示有新版本，装完还是同一个版本」。所以在打包前直接拦住。
+    """
+    p = os.path.join(ROOT, "tools", "serve.py")
+    m = re.search(r'^APP_VERSION = "(\d+(?:\.\d+)+)"', open(p, encoding="utf-8").read(), re.M)
+    if not m:
+        raise SystemExit("serve.py 里找不到 APP_VERSION，无法校验版本号")
+    if m.group(1) != APP_VERSION:
+        raise SystemExit("版本号不一致：build_exe.py=%s，serve.py=%s。"
+                         "请把两处改成同一个版本再打包。" % (APP_VERSION, m.group(1)))
+
+
 def build_exe():
     """打包成单文件、无控制台窗口的 EXE，网页文件与说明一并内置"""
+    check_versions()
     os.makedirs(BUILD, exist_ok=True)
 
     # 版本标记：EXE 内一份、释放目录一份，比对决定要不要重新释放

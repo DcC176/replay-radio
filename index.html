@@ -274,8 +274,26 @@ window.__BOOT_T0 = Date.now();
         <option value="zh-Hant">繁體中文</option>
       </select>
     </label>
+    <!-- 窄屏折叠菜单：把「B 站空间 / 语言 / 深浅色」收进来，保证核心操作（切页、
+         主播灯、登录）在 700px 级别的窗口里仍然完整可点。宽屏时按钮隐藏。 -->
+    <button class="ghost-btn tb-more" id="tb-more" type="button"
+            aria-haspopup="menu" aria-expanded="false" title="更多">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <circle cx="5.5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/>
+        <circle cx="18.5" cy="12" r="1.6"/>
+      </svg>
+    </button>
   </div>
 </header>
+
+<!-- 窄屏折叠菜单：放在 header 外面 + 固定定位。放在 .tb-right 里时，两行布局下
+     标签条（flex order:3）会按绘制顺序把它盖住，elementFromPoint 命中的是标签，
+     菜单点不动（实测）。固定定位只跟着按钮的坐标走，不受任何 flex 排布影响。 -->
+<div class="tb-menu" id="tb-menu" role="menu" aria-label="更多操作" hidden>
+  <button class="tb-menu-i" type="button" role="menuitem" data-act="space">打开主播 B 站空间</button>
+  <button class="tb-menu-i" type="button" role="menuitem" data-act="lang">界面语言：简体中文</button>
+  <button class="tb-menu-i" type="button" role="menuitem" data-act="theme">切换深色 / 浅色</button>
+</div>
 
   <!-- 全局登录弹窗（v1.9.16）。原来它只在播放器里（绝对定位、覆盖播放器），
        录播姬 / DD 这类把播放器缩到 1px 的板块根本点不到 —— 改成 fixed 遮罩 + 居中卡片，
@@ -642,16 +660,26 @@ window.__BOOT_T0 = Date.now();
 
       <div class="dd-panel" id="ddp-feed">
       <div class="ddp-grid">
-        <!-- 左：常去的主播榜（对应 vtb.cat 的「N 个主播榜」） -->
+        <!-- 左：两张互不相干的主播榜 —— 消费按金额、弹幕按纯弹幕条数，口径不再混排 -->
         <aside class="ddp-side">
           <div class="ddp-side-h">
-            <b id="ddp-board-n">— 个主播榜</b>
+            <b id="ddp-board-n">— 位主播</b>
             <span class="ddp-side-ctrl">
-              <button class="ddp-mini" id="ddp-side-order" type="button" title="切换排序依据">排序</button>
               <button class="ddp-mini on" id="ddp-side-desc" type="button" title="降序 / 升序">直降</button>
             </span>
           </div>
-          <div class="ddp-board" id="ddp-board"><p class="dl-empty">载入中…</p></div>
+          <div class="ddp-board-wrap">
+            <section class="ddp-board-sec">
+              <h3 class="ddp-board-h"><span>消费榜</span><em>礼物 · SuperChat 金额（¥）</em>
+                <b class="ddp-board-n" id="ddp-money-n"></b></h3>
+              <div class="ddp-board" id="ddp-board-money"><p class="dl-empty">载入中…</p></div>
+            </section>
+            <section class="ddp-board-sec">
+              <h3 class="ddp-board-h"><span>弹幕榜</span><em>纯弹幕条数（不含礼物 / SC / 上舰）</em>
+                <b class="ddp-board-n" id="ddp-msg-n"></b></h3>
+              <div class="ddp-board" id="ddp-board-msg"><p class="dl-empty">载入中…</p></div>
+            </section>
+          </div>
         </aside>
 
         <!-- 右：主播卡 + 统计带 + 可视化 + 筛选 + 互动流 -->
@@ -669,10 +697,14 @@ window.__BOOT_T0 = Date.now();
           </div>
 
           <div class="ddp-stats">
-            <div class="ddp-stat s-msg"><span>弹幕</span><b id="ddp-danmu">—</b></div>
-            <div class="ddp-stat s-act"><span>互动</span><b id="ddp-actions">—</b></div>
-            <div class="ddp-stat s-spend"><span>消费</span><b id="ddp-spend">—</b></div>
-            <div class="ddp-stat s-medal"><span>勋章</span><b id="ddp-medals">—</b></div>
+            <div class="ddp-stat s-msg" title="最近若干页样本里的纯弹幕条数，不含礼物 / SC / 上舰">
+              <span>弹幕<em>样本内</em></span><b id="ddp-danmu">—</b></div>
+            <div class="ddp-stat s-act" title="账号的全部互动记录条数（弹幕 + 礼物 + SC + 上舰），含未取回的更早记录">
+              <span>互动<em>全部记录</em></span><b id="ddp-actions">—</b></div>
+            <div class="ddp-stat s-spend" title="礼物与 SuperChat 的金额合计（¥），不含上舰">
+              <span>消费<em>¥ 礼物+SC</em></span><b id="ddp-spend">—</b></div>
+            <div class="ddp-stat s-medal" title="在这个主播那里的粉丝牌种类数，不是互动次数">
+              <span>勋章<em>种类</em></span><b id="ddp-medals">—</b></div>
           </div>
           <p class="ddp-subline"><span>粉丝 <b id="ddp-follower">—</b></span>
             <span>上舰 <b id="ddp-guards">—</b></span>
@@ -1158,6 +1190,25 @@ window.__BOOT_T0 = Date.now();
       </div>
 
       <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">更新</div>
+        <p class="live-note" id="update-state" style="margin:0 0 8px">当前版本：—。可手动检查是否有新版。</p>
+        <div class="qp-btns" style="margin-top:2px">
+          <button class="btn small primary" id="btn-update-check" type="button">检查更新</button>
+          <a class="btn small ghost" id="btn-update-manual"
+             href="https://github.com/DcC176/replay-radio/releases/latest"
+             target="_blank" rel="noopener">打开下载页</a>
+        </div>
+        <p class="live-note" id="update-progress" hidden style="margin-top:8px"></p>
+        <p class="live-note" id="update-pref" style="margin-top:8px">更新提示：开启。</p>
+        <div class="qp-btns" id="update-pref-row" style="margin-top:6px" hidden>
+          <button class="btn small ghost" id="btn-update-reset" type="button">恢复更新提示</button>
+        </div>
+        <p class="live-note" style="margin-top:8px">启动时会自动检查，但<b>只提示不下载</b>；
+          只有你点「立即更新」才会下载并替换 EXE。无新版、检查失败或点「稍后」都不会改动任何文件。
+          「24 小时内不再提示 / 永久不再提示」只作用于启动时的自动提示，手动点「检查更新」照样出结果。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
         <div class="live-card-h">关于</div>
         <p class="live-note" style="margin:0">当前版本构建：<b id="app-build">读取中…</b>
           ／ 运行中的后端：<b id="app-build-hint">—</b></p>
@@ -1283,6 +1334,23 @@ window.__BOOT_T0 = Date.now();
       </div>
     </section>
 
+  </div>
+
+  <!-- 新版本提示：只由检查结果触发，绝不自动下载/安装 -->
+  <div class="upd-mask" id="upd-mask" hidden>
+    <div class="upd-card" role="dialog" aria-modal="true" aria-label="发现新版本">
+      <div class="upd-h">发现新版本 <b id="upd-ver">—</b></div>
+      <p class="upd-note" id="upd-note">有新版本可用。</p>
+      <p class="upd-state" id="upd-state"></p>
+      <div class="upd-btns">
+        <button class="btn small primary" id="upd-go" type="button">立即更新</button>
+        <button class="btn small ghost" id="upd-later" type="button">稍后</button>
+        <button class="btn small ghost" id="upd-24h" type="button">24 小时内不再提示</button>
+        <button class="btn small ghost" id="upd-never" type="button">永久不再提示</button>
+      </div>
+      <p class="upd-tip">「立即更新」会下载新 EXE 并在当前程序退出后自动替换、重启；
+        下载失败或程序装在 Program Files 时会给出手动下载链接，不会强制更新。</p>
+    </div>
   </div>
 
   <aside class="col-right">

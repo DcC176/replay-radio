@@ -1090,6 +1090,7 @@ STATIONLESS_OK = (
     "/api/stations/following", "/api/stations/bulk",
     "/api/stations/main",
     "/api/ping", "/api/status", "/api/img", "/api/quit",
+    "/api/update/check", "/api/update/status", "/api/update/download", "/api/update/apply",
     "/api/clip/cover", "/api/clip/cover/preview",
     "/api/clip/cover/choose",  # 本地封面预览/确认，与主播无关
     "/api/page/alive", "/api/page/bye",
@@ -1160,6 +1161,223 @@ def urlopen(req, timeout):
         raise
     except Exception:
         return urllib.request.urlopen(req, timeout=timeout)
+
+
+# ---------------------------------------------------------------- 版本更新
+# 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
+# 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
+APP_VERSION = "1.9.23"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+UPDATE_REPO = "DcC176/replay-radio"
+UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
+UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
+UPDATE_TIMEOUT = 8         # 检查很短；下载单独给更长超时
+UPDATE_DIR = os.path.join(APPDIR, "updates")   # 下载的 EXE 与更新脚本都放这里
+UPDATE_JOB = {"running": False, "stage": "", "pct": 0, "error": "",
+              "path": "", "version": ""}
+UPDATE_LOCK = threading.Lock()
+
+
+def _ver_tuple(s):
+    """'1.9.21' → (1, 9, 21)，用于比较；非数字段归零。"""
+    out = []
+    for p in str(s or "").lstrip("vV").split(".")[:4]:
+        m = re.match(r"\d+", p.strip())
+        out.append(int(m.group()) if m else 0)
+    while len(out) < 3:
+        out.append(0)
+    return tuple(out)
+
+
+def _update_fetch_json(url, timeout=UPDATE_TIMEOUT):
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA, "Accept": "application/vnd.github+json"})
+    with urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def api_update_check():
+    """GET /api/update/check —— 有新版才返回 available=true；不下载任何东西。"""
+    cur = APP_VERSION
+    data = None
+    src = ""
+    try:
+        d = _update_fetch_json(UPDATE_API)
+        rel = d.get("tag_name") or ""
+        exe = next((a for a in (d.get("assets") or [])
+                    if str(a.get("name") or "").lower().endswith(".exe")), None)
+        if rel and exe:
+            data = {"version": rel.lstrip("vV"),
+                    "url": exe.get("browser_download_url") or "",
+                    "name": exe.get("name") or "",
+                    "size": int(exe.get("size") or 0),
+                    "sha256": str((exe.get("digest") or "").replace("sha256:", "")),
+                    "notes": (d.get("body") or "")[:600],
+                    "published": d.get("published_at") or ""}
+            src = "github"
+    except Exception:
+        pass
+    if not data:
+        try:
+            d = _update_fetch_json(UPDATE_SITE + "?t=%d" % int(time.time()))
+            if d.get("version"):
+                data = {"version": str(d["version"]).lstrip("vV"),
+                        "url": d.get("url") or "", "name": d.get("name") or "",
+                        "size": int(d.get("size") or 0),
+                        "sha256": str(d.get("sha256") or ""),
+                        "notes": str(d.get("notes") or "")[:600],
+                        "published": str(d.get("published") or "")}
+                src = "site"
+        except Exception:
+            pass
+    if not data:
+        return 200, {"ok": True, "available": False, "current": cur,
+                     "checked": int(time.time()), "error": "检查失败（网络不可达）",
+                     "fallback": "https://github.com/%s/releases/latest" % UPDATE_REPO}
+    new = _ver_tuple(data["version"])
+    return 200, {"ok": True, "current": cur, "latest": data["version"],
+                 "available": new > _ver_tuple(cur), "source": src,
+                 "checked": int(time.time()), **data}
+
+
+def _update_download(info):
+    """后台下载新 EXE；校验字节数与 sha256（上游给出时才校验）。"""
+    global UPDATE_JOB
+    target = os.path.join(
+        UPDATE_DIR, "ReplayRadio-v%s.exe" % re.sub(r"[^0-9A-Za-z.]", "", info["version"]))
+    try:
+        os.makedirs(UPDATE_DIR, exist_ok=True)
+        url = info.get("url") or ""
+        if not url.startswith("https://github.com/"):
+            raise RuntimeError("下载地址不合法")
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        total = int(info.get("size") or 0)
+        got = 0
+        with urlopen(req, timeout=120) as r, open(target + ".part", "wb") as f:
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                with UPDATE_LOCK:
+                    UPDATE_JOB["pct"] = min(99, int(got * 100 / total)) if total else 0
+        if total and got != total:
+            raise RuntimeError("下载不完整（%d/%d 字节）" % (got, total))
+        if info.get("sha256"):
+            h = hashlib.sha256()
+            with open(target + ".part", "rb") as f:
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    h.update(block)
+            if h.hexdigest().lower() != info["sha256"].lower():
+                raise RuntimeError("校验失败（SHA-256 不匹配）")
+        os.replace(target + ".part", target)
+        with UPDATE_LOCK:
+            # running 必须一起清掉：否则一次成功下载之后，再点「重试」会被判成
+            # 「正在下载中」而永远 409。
+            UPDATE_JOB.update(stage="done", pct=100, path=target,
+                              version=info["version"], running=False)
+    except Exception as e:
+        with UPDATE_LOCK:
+            UPDATE_JOB.update(stage="error", error=str(e)[:300], running=False)
+        # 不删半成品：本机的删除会被劫持到回收站（fail-closed），删失败还会拖住线程。
+        # 残留的 .part 下次下载直接覆盖，且不会被当成安装包（apply 只认 .exe）。
+
+
+def api_update_download(obj):
+    """POST /api/update/download {'version','url','size','sha256'} —— 仅用户确认后调用。"""
+    with UPDATE_LOCK:
+        if UPDATE_JOB["running"]:
+            return 409, {"error": "正在下载中"}
+        info = {"version": str(obj.get("version") or "").strip(),
+                "url": str(obj.get("url") or "").strip(),
+                "size": int(obj.get("size") or 0),
+                "sha256": str(obj.get("sha256") or "").strip()}
+    if not re.fullmatch(r"\d+(\.\d+){1,3}", info["version"]) or not info["url"]:
+        return 400, {"error": "版本信息不完整"}
+    # 地址校验放在请求线程里做：不合法就立刻 400，不要先起线程再在后台失败
+    if not info["url"].startswith("https://github.com/"):
+        return 400, {"error": "下载地址不合法"}
+    if _ver_tuple(info["version"]) <= _ver_tuple(APP_VERSION):
+        return 400, {"error": "没有新版可下载"}
+    with UPDATE_LOCK:
+        UPDATE_JOB.update(running=True, stage="downloading", pct=0, error="",
+                          path="", version=info["version"])
+    threading.Thread(target=_update_download, args=(info,), daemon=True).start()
+    return 200, {"ok": True}
+
+
+def api_update_status():
+    with UPDATE_LOCK:
+        d = dict(UPDATE_JOB)
+    return 200, d
+
+
+def _update_apply_script(old_exe, new_exe, pid):
+    """生成「等旧进程退出 → 备份 → 覆盖 → 重启」的更新脚本。
+
+    ⚠️ 变量不能叫 `$pid`：在 PowerShell 里那是只读的自动变量，赋值会抛
+       「Cannot overwrite variable PID」，脚本第一行就挂 —— 替换永远不会发生。
+    ⚠️ 覆盖要重试：进程刚退出时 EXE 可能还被句柄占着几百毫秒。
+    """
+    def ps(v):
+        return str(v).replace("'", "''")
+    return (
+        "$ErrorActionPreference='Stop'\n"
+        "$old='%s'\n$new='%s'\n$targetPid=%d\n"
+        "for($i=0;$i -lt 180;$i++){"
+        "if(-not (Get-Process -Id $targetPid -ErrorAction SilentlyContinue)){break};"
+        "Start-Sleep -Seconds 1}\n"
+        "if(Get-Process -Id $targetPid -ErrorAction SilentlyContinue){exit 1}\n"
+        "for($i=0;$i -lt 20;$i++){\n"
+        "  try{\n"
+        "    Copy-Item -LiteralPath $new -Destination ($old + '.old') -Force\n"
+        "    Copy-Item -LiteralPath $new -Destination $old -Force\n"
+        "    break\n"
+        "  }catch{Start-Sleep -Milliseconds 500}\n"
+        "}\n"
+        "Start-Process -FilePath $old\n"
+        % (ps(old_exe), ps(new_exe), int(pid))
+    )
+
+
+def api_update_apply():
+    """POST /api/update/apply —— 写更新脚本并安全退出，由脚本替换 + 重启。
+
+    ⚠️ 脚本必须在**当前进程退出之后**才能覆盖 EXE（Windows 不允许覆盖运行中的文件），
+       所以用 -ExecutionPolicy Bypass + 独立进程启动，脚本自己轮询等 PID 消失。
+       路径用单引号字面量，避免中文/空格被破坏。
+    """
+    global UPDATE_JOB
+    with UPDATE_LOCK:
+        d = dict(UPDATE_JOB)
+    if d["stage"] != "done" or not d["path"] or not os.path.exists(d["path"]):
+        return 400, {"error": "没有已下载并校验通过的安装包"}
+    if not getattr(sys, "frozen", False):
+        return 400, {"error": "源码运行模式不能自替换，请手动替换 EXE"}
+    exe = os.path.abspath(sys.argv[0])
+    if not exe.lower().endswith(".exe"):
+        return 400, {"error": "当前不是 EXE 启动"}
+    low = os.path.dirname(exe).lower().rstrip("\\/")
+    if low.startswith((r"c:\program files", r"c:\program files (x86)")):
+        return 400, {"error": "程序在 Program Files 下，权限不足，请手动替换"}
+    if _rc_busy() or _seg_busy():
+        return 409, {"error": "还有录制或分段任务在跑，完成后再更新"}
+    script = os.path.join(UPDATE_DIR, "apply.ps1")
+    body = _update_apply_script(exe, d["path"], os.getpid())
+    try:
+        with open(script, "w", encoding="utf-8-sig") as f:
+            f.write(body)
+        creation = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                          "-File", script], creationflags=creation,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True)
+    except Exception as e:
+        return 500, {"error": "启动更新脚本失败：%s" % str(e)[:150]}
+    with UPDATE_LOCK:
+        UPDATE_JOB["stage"] = "applying"
+    threading.Thread(target=rc_quit_async, args=("更新应用",), daemon=True).start()
+    return 200, {"ok": True}
 
 
 # B 站风控：请求太密会回 412（响应体 code=-412「request was banned」），持续几十分钟。
@@ -5830,9 +6048,12 @@ def api_dd_profile(query):
         if not name:
             continue
         rec = livers.setdefault(lid or name, {"name": name, "id": lid, "n": 0,
-                                              "money": 0.0, "medal": 0,
+                                              "msg_n": 0, "money": 0.0, "medal": 0,
                                               "medal_name": "", "room": ""})
         rec["n"] += 1
+        # 弹幕榜只数纯弹幕（action_name=msg）—— 与消费榜口径互斥，不再混排
+        if an == "msg":
+            rec["msg_n"] += 1
         rec["money"] += money
         rec["medal"] = max(rec["medal"], int(x.get("medal_level") or 0))
         if not rec["medal_name"]:
@@ -5840,10 +6061,22 @@ def api_dd_profile(query):
         if not rec["room"]:
             rec["room"] = str(x.get("live_room") or "")
 
-    board = sorted(livers.values(), key=lambda r: (-r["money"], -r["n"]))[:30]
-    total = sum(r["n"] for r in board) or 1
+    # 两个榜各自取前 30 再合并去重：只打赏不弹幕、只弹幕不打赏的人都要能在自己的榜里出现。
+    by_money = sorted(livers.values(), key=lambda r: (-r["money"], -r["msg_n"]))[:30]
+    by_msg = sorted(livers.values(), key=lambda r: (-r["msg_n"], -r["money"]))[:30]
+    board, seen = [], set()
+    for r in by_money + by_msg:
+        k = r["id"] or r["name"]
+        if k in seen:
+            continue
+        seen.add(k)
+        board.append(r)
+    money_total = sum(r["money"] for r in board) or 1.0
+    msg_total = sum(r["msg_n"] for r in board) or 1
     for r in board:
-        r["pct"] = round(r["n"] * 100.0 / total, 1)
+        r["pct"] = round(r["money"] * 100.0 / money_total, 1)   # 兼容旧字段
+        r["pct_money"] = r["pct"]
+        r["pct_msg"] = round(r["msg_n"] * 100.0 / msg_total, 1)
         r["money"] = round(r["money"], 1)
     # 「最近出没」：样本里最新那条的时间（created_at 带时区，字符串比较即可）
     last_at = ""
@@ -5883,7 +6116,7 @@ def api_dd_profile(query):
                            "spend": round(spend, 1),       # 已抓样本里的打赏额
                            "guards": kinds["guard"],       # 上舰次数
                            "medals": medals,               # 粉丝牌种类
-                           "livers": len(board)},          # 常去的主播数
+                           "livers": len(livers)},         # 常去的主播数（未截断）
                  "kinds": kinds,
                  "mix": mix,                 # 互斥的互动构成（环形图用）
                  "hours": hours,             # 24 小时出没分布（柱状图用）
@@ -8644,6 +8877,10 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/status":
             code, obj = api_status("refresh" in q)
             return self._json(code, obj)
+        if parsed.path == "/api/update/check":
+            return self._json(*api_update_check())
+        if parsed.path == "/api/update/status":
+            return self._json(*api_update_status())
         if parsed.path == "/api/ping":
             # 只回答「我是谁」。给启动时的实例探测用 —— 不能复用 /api/status，
             # 那个要问 B 站接口，慢的时候会把本服务误判成「别的程序」。
@@ -8654,7 +8891,8 @@ class Handler(SimpleHTTPRequestHandler):
             # 不知道是网络坏了还是被限流、还要等多久。
             _left = max(0, int(max(_BAN["until"], _BAN_LIVE["until"]) - time.time()))
             return self._json(200, {"app": APP_TAG, "lyrics": True,
-                                    "build": read_build_stamp(), "ban_left": _left})
+                                    "build": read_build_stamp(), "ban_left": _left,
+                                    "version": APP_VERSION})
         if parsed.path == "/api/quit":
             # 供「停止」脚本调用。服务只绑 127.0.0.1，外部访问不到。
             # ⚠️ 现在要先给正在录的 ffmpeg 写 q 收尾（否则最后几秒丢），
@@ -8849,6 +9087,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(400, {"error": "请求体不是合法 JSON"})
         if not isinstance(obj, dict):
             return self._json(400, {"error": "请求体必须是 JSON 对象"})
+
+        if parsed.path == "/api/update/download":
+            return self._json(*api_update_download(obj))
+        if parsed.path == "/api/update/apply":
+            return self._json(*api_update_apply())
 
         if parsed.path == "/api/playlist/import":
             return self._json(*api_playlist_import(obj))

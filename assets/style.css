@@ -244,9 +244,12 @@ body { min-height: 100vh; }
   position: sticky;
   top: 0;
   z-index: 20;
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  /* 弹性而不是 grid：顶栏宽度的下限由三块内容相加决定（站名 + 10 个标签 +
+     右侧按钮组），一旦视口小于这个和，grid 会把整行撑出横向滚动条。
+     弹性布局 + 标签条 min-width:0/overflow 才能保证「永远不溢出屏幕」。 */
+  display: flex;
   align-items: center;
+  gap: 14px;
   height: var(--topbar-h);
   padding: 0 22px;
   /* 去掉磨砂玻璃后必须是实色：半透明 + 无模糊会让滚动内容透上来、糊成一片 */
@@ -254,12 +257,30 @@ body { min-height: 100vh; }
   border-bottom: 1px solid var(--line);
 }
 
-.tb-left { display: flex; align-items: center; gap: 7px; font-size: 13px; white-space: nowrap; }
-.tb-brand { color: var(--muted-2); }
-.tb-sep { color: var(--muted-2); }
-.tb-cur { color: var(--text-2); }
+.tb-left {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 13px; white-space: nowrap;
+  flex: 0 1 auto; min-width: 0;
+}
+.tb-brand { color: var(--muted-2); flex: 0 0 auto; }
+.tb-sep { color: var(--muted-2); flex: 0 0 auto; }
+/* 站名可以省略号收尾（全名在板块卡片里），绝不换行把顶栏顶高 */
+.tb-cur { color: var(--text-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-.tb-tabs { display: flex; align-items: center; gap: 4px; position: relative; }
+.tb-tabs {
+  display: flex; align-items: center; gap: 4px; position: relative;
+  /* 空间不足时标签条自己横向滚动，而不是把顶栏撑破 */
+  flex: 1 1 auto; min-width: 0;
+  overflow-x: auto; overflow-y: hidden;
+  padding: 2px 0;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.tb-tabs::-webkit-scrollbar { display: none; }
+.tb-tabs .tab { flex: 0 0 auto; }
+/* 放得下时居中（与原来 grid 里居中的观感一致），放不下就退回左对齐 + 滚动：
+   居中的滚动容器会把两端内容藏到不可滚动的死区。 */
+.tb-tabs.fit { justify-content: center; }
 
 /* 激活标签的红色胶囊做成**会滑动**的独立元素。
    原先是每个标签各自切背景色，看起来是「旧的灭、新的亮」两个动作；
@@ -302,7 +323,34 @@ body { min-height: 100vh; }
   .tb-pill.ready { transition: none; }
 }
 
-.tb-right { display: flex; justify-content: flex-end; gap: 8px; white-space: nowrap; }
+.tb-right {
+  display: flex; justify-content: flex-end; gap: 8px; white-space: nowrap;
+  flex: 0 0 auto; position: relative;
+  /* 必须抬一层：两行布局里 .tb-tabs 是 order:3 的 flex 项，会按 order 排在后面绘制，
+     把 .tb-right 里绝对定位的「更多」菜单盖住（实测点菜单命中的是标签条）。 */
+  z-index: 3;
+}
+
+/* 窄屏折叠菜单：按钮默认隐藏，≤900px 才出现。
+   ⚠️ 必须带 .ghost-btn 提高优先级 —— 它下面的 `.ghost-btn{display:inline-flex}`
+   同权重且更靠后，会把这条 display:none 盖掉（实测 1280 宽时多出一颗「⋯」）。 */
+.ghost-btn.tb-more { display: none; }
+.tb-menu {
+  position: fixed; top: 0; right: 14px; z-index: 300;
+  min-width: 196px; padding: 6px;
+  border: 1px solid var(--line-2); border-radius: 11px;
+  background: var(--panel);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .34);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.tb-menu[hidden] { display: none; }
+.tb-menu-i {
+  appearance: none; border: 0; border-radius: 7px;
+  padding: 8px 10px; background: none; color: var(--text-2);
+  font: inherit; font-size: 12.5px; text-align: left; white-space: nowrap;
+  cursor: pointer;
+}
+.tb-menu-i:hover { background: rgba(var(--ink), .08); color: var(--text); }
 
 /* 1440 这类宽度：右侧按钮的文案会把顶栏撑出 43px 的横向滚动条（实测右边缘
    1473 > 视口 1430），每个板块都会多出一条横向滚动。把「主播B站空间」的文案
@@ -347,6 +395,15 @@ body { min-height: 100vh; }
   background-size: 8px 5px;
 }
 .lang-wrap select option { background: var(--panel-2); color: #e8e8ec; }
+
+/* 发现新版时在「关于」标签右上角点一颗红点：绝对定位，不占顶栏宽度
+   （顶栏是 grid 1fr auto 1fr，多一个按钮会把 7 位主播时的灯条顶出横向滚动）。 */
+.tab.has-new::after {
+  content: "";
+  position: absolute; top: 5px; right: 7px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--red);
+}
 
 /* ---------------------------------------------------------------- 布局 */
 
@@ -1741,6 +1798,8 @@ body.view-multi .pv-ratewrap { display: none; }
 .sc-del:hover { background: rgba(var(--ink), .12); color: var(--text); }
 .sc-empty { padding: 8px 2px; color: var(--muted-2); font-size: 12px; }
 .qp-btns .btn { text-decoration: none; display: inline-flex; align-items: center; }
+/* display:inline-flex 会盖掉 [hidden]，显隐必须显式声明（同权重要放在后面） */
+.qp-btns .btn[hidden] { display: none; }
 
 .mark-panel code,
 .chap-empty code {
@@ -2435,47 +2494,74 @@ body.theater .chapters-panel { display: none; }
   .list td.col-dm, .list th.col-dm, .list td.col-dur, .list th.col-dur { display: none; }
 }
 
-/* 单行顶栏的容量 = 站名(~215) + 标签条(~523) + 右侧按钮组(~396) + 内边距(44)。
-   顶部加了「主播切换器」之后右侧长了约 155px，于是单行顶栏实际需要约 1120px；
-   而它当时还沿用内容网格的 960px 界限 —— 1024 这类窗口因此被压爆：
-   站名折成 4 行、「主播B站空间」竖排，整块撑破 52px 顶栏压到内容上（有截图）。
-   所以把「顶栏两行」与「内容单列」拆成两个断点： */
-@media (max-width: 1400px) {
-  /* 标签收紧一点，把单行顶栏的下限压到 ~1120 */
-  .tab { padding: 6px 11px; }
+/* ---- 顶栏的分级降级（宽 → 窄）----------------------------------------
+   单行容量实测（7 位主播灯条，最挤的情形）：
+     站名 ~215 + 10 个标签 ~600 + 右侧 ~590 + 内边距 44 ≈ 1450。
+   以前单行一直撑到 1160 才换两行，1280~1400 这段必然互相挤压（标签顶到
+   「目前无限流」、右组跑出屏幕）。现在：
+     ① 单行只在 ≥1400 出现，右侧先收文案；
+     ② <1400 变两行：上行站名 + 操作，下行整条标签；
+     ③ <1100 收掉限流文案与登录名（保留圆点 / 头像，仍可点）；
+     ④ <900 把「B 站空间 / 语言」折进「更多」菜单；
+     ⑤ <700 只留当前主播名（隐藏品牌前缀），灯条收紧。 */
+
+/* 1600 以下先收右侧文案（「主播B站空间」留图标） */
+@media (max-width: 1600px) {
+  .tb-right .gbtxt { display: none; }
+  .tb-right .ghost-btn { padding: 6px 9px; }
 }
 
-@media (max-width: 1160px) {
-  /* 顶栏变两行：52（上排）+ 约 42（标签条）= 实测 94px。
-     更新这个值 = 更新顶栏真实高度，消费它的地方（直播间那栏）才会跟着对。 */
-  :root { --topbar-h: 94px; }
-
-  /* 上排「站名 + 右侧按钮」，下排整行给标签条。
-     标签条是页面唯一的切页入口，任何宽度下都不能藏起来（历史上被 display:none 过，
-     窄窗口因此完全无法导航）。 */
+/* 1400 以下：两行。上行「站名 + 操作」，下行整条标签（可横向滚动）。 */
+@media (max-width: 1400px) {
   .topbar {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: 52px auto;
+    flex-wrap: wrap;
     height: auto;
-    padding: 0 14px;
+    padding: 6px 14px 0;
+    row-gap: 0;
+    column-gap: 10px;
   }
-  .tb-left { grid-column: 1; grid-row: 1; min-width: 0; }
-  .tb-right { grid-column: 2; grid-row: 1; }
+  .tb-left { order: 1; flex: 1 1 auto; }
+  .tb-right { order: 2; margin-left: auto; }
   .tb-tabs {
-    display: flex;
-    grid-column: 1 / -1;
-    grid-row: 2;
-    overflow-x: auto;
-    overflow-y: hidden;
-    /* 负外边距让滚动区贴到屏幕边缘，同时首个标签与内容左对齐 */
+    order: 3;
+    flex: 1 0 100%;
+    /* 负外边距让滚动区贴到屏幕边缘，首个标签仍与内容左对齐 */
     margin: 0 -14px;
-    padding: 2px 14px 8px;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
+    padding: 2px 14px 6px;
   }
-  .tb-tabs::-webkit-scrollbar { display: none; }
-  /* 必须禁掉收缩：否则 flex 会把标签压到能塞下为止，而不是溢出后滚动 */
-  .tb-tabs .tab { flex: 0 0 auto; }
+  .tab { padding: 5px 12px; }
+}
+
+/* 1100 以下：限流只留圆点、登录只留头像 —— 都还带 title，鼠标停上去有完整信息 */
+@media (max-width: 1100px) {
+  .ban-txt { display: none; }
+  .ban-alert { padding: 5px 7px; }
+  .tb-login-txt { display: none; }
+  .tb-login { padding: 4px 6px; }
+  .tb-left { font-size: 12.5px; }
+}
+
+/* 900 以下：次要操作折进「更多」菜单（B 站空间 / 界面语言 / 深浅色） */
+@media (max-width: 900px) {
+  .ghost-btn.tb-more { display: inline-flex; }
+  #tb-space, .lang-wrap { display: none; }
+}
+
+/* 700 以下：只留当前主播名，灯条收紧，标签再小一档 */
+@media (max-width: 700px) {
+  .tb-brand, .tb-sep { display: none; }
+  .topbar { padding: 4px 10px 0; }
+  .tb-tabs { margin: 0 -10px; padding: 2px 10px 4px; }
+  .station-lamps { gap: 5px; padding: 4px 8px; }
+  .tab { padding: 5px 10px; font-size: 12.5px; }
+}
+
+/* 矮视口（笔记本 1366×768 去掉浏览器 chrome 后约 640）：顶栏整体压扁，
+   把高度还给内容。两行的形态不变，避免按钮被截断。 */
+@media (max-height: 720px) {
+  .topbar { padding-top: 2px; }
+  .tab { padding-top: 4px; padding-bottom: 4px; }
+  .tb-tabs { padding-bottom: 4px; }
 }
 
 /* 这里只负责「内容网格」的界限：960px 以下才换成单列。
@@ -5509,8 +5595,18 @@ body.view-dd .views { grid-column: 1 / -1; }
 }
 .ddp-side-h b { font-size: 12.5px; }
 .ddp-side-h .sub { margin: 0; font-size: var(--fs-fine); }
-/* vtb.cat 左栏头上那三颗小按钮（排序 / 直降） */
+/* 左栏头上的直降按钮 */
 .ddp-side-ctrl { margin-left: auto; display: flex; gap: 6px; }
+/* 两张榜各自有标题与口径说明，避免金额与条数混读 */
+.ddp-board-wrap { max-height: 620px; overflow-y: auto; }
+.ddp-board-sec + .ddp-board-sec { border-top: 2px solid var(--line-2); }
+.ddp-board-h {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  margin: 0; padding: 9px 12px 6px;
+  background: var(--panel-2); border-bottom: 1px solid var(--line);
+}
+.ddp-board-h span { font-size: var(--fs-sub); font-weight: 500; color: var(--text); }
+.ddp-board-h em { font-size: var(--fs-fine); font-style: normal; color: var(--muted-2); }
 .ddp-mini {
   appearance: none; border: 1px solid var(--line-2); background: var(--panel-2);
   color: var(--muted); font: inherit; font-size: var(--fs-fine); padding: 3px 9px;
@@ -5519,7 +5615,6 @@ body.view-dd .views { grid-column: 1 / -1; }
 .ddp-mini:hover { color: var(--text); border-color: var(--muted-2); }
 .ddp-mini.on { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
 
-.ddp-board { max-height: 620px; overflow-y: auto; }
 .ddp-row {
   /* 两行：上面「序号 头像 名字 金额 占比」，下面一条**整行宽**的占比细条。
      原来 5 个元素挤在一行，左栏才 220px，细条被压到 20 多像素、等于没有。 */
@@ -5593,7 +5688,10 @@ body.view-dd .views { grid-column: 1 / -1; }
 .ddp-stat.s-act { --band: #b794f4; }
 .ddp-stat.s-spend { --band: #f0a04b; }
 .ddp-stat.s-medal { --band: #68d391; }
-.ddp-stat span { font-size: var(--fs-fine); color: var(--muted-2); }
+.ddp-stat span { font-size: var(--fs-fine); color: var(--muted-2); display: flex; align-items: baseline; gap: 5px; }
+/* 口径写在标签后面：弹幕是「样本内」、互动是「全部记录」、消费带 ¥，避免两个数被当成同一件事 */
+.ddp-stat span em { font-style: normal; font-size: 10.5px; color: var(--muted-2); opacity: .78; }
+.ddp-board-n { margin-left: auto; font-size: 10.5px; font-weight: 400; color: var(--muted-2); font-variant-numeric: tabular-nums; }
 .ddp-stat b { font-size: 16px; font-weight: 600; letter-spacing: .2px; }
 .ddp-subline {
   display: flex; gap: 16px; margin: 8px 2px 0;
@@ -5784,7 +5882,7 @@ body.view-dd .views { grid-column: 1 / -1; }
 @media (max-width: 900px) {
 
   .ddp-grid { grid-template-columns: minmax(0, 1fr); }
-  .ddp-board { max-height: 260px; }
+  .ddp-board-wrap { max-height: 420px; }
   .ddp-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -6354,3 +6452,22 @@ body.view-dd .views { grid-column: 1 / -1; }
   .rc-file .tm { display: none; }
   .rc-bar .rc-actions { margin-left: 0; }
 }
+
+/* ---- 版本更新：设置页状态 + 启动提示卡 ---- */
+.upd-mask {
+  position: fixed; inset: 0; z-index: 900; display: flex;
+  align-items: center; justify-content: center; padding: 20px;
+  background: rgba(0, 0, 0, .55);
+}
+.upd-mask[hidden] { display: none; }
+.upd-card {
+  width: min(460px, 100%); padding: 20px 22px;
+  border: 1px solid var(--line-2); border-radius: 14px;
+  background: var(--panel); box-shadow: 0 18px 48px rgba(0, 0, 0, .35);
+}
+.upd-h { font-size: var(--fs-h2); font-weight: 500; color: var(--text); }
+.upd-h b { color: var(--red); }
+.upd-note { margin: 10px 0 0; font-size: var(--fs-body); color: var(--text); line-height: 1.6; }
+.upd-state { margin: 8px 0 0; font-size: var(--fs-fine); color: var(--red); min-height: 1em; }
+.upd-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.upd-tip { margin: 14px 0 0; font-size: var(--fs-fine); color: var(--muted-2); line-height: 1.6; }
