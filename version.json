@@ -1,10 +1,10 @@
 {
-  "version": "1.9.23",
-  "name": "ReplayRadio-v1.9.23.exe",
-  "size": 56199092,
-  "sha256": "a919ef16178fd48bf3379462eeb899e8a50e61eefbd3f1622d2520c60bf08083",
-  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.23/ReplayRadio-v1.9.23.exe",
-  "published": "2026-11-23T06:55:00Z",
-  "notes": "软件内加入版本更新入口与提示偏好；DD 消费榜与弹幕榜分开；顶栏响应式",
+  "version": "1.9.24",
+  "name": "ReplayRadio-v1.9.24.exe",
+  "size": 56199954,
+  "sha256": "ce91a16bc5554c2836707668f5c866d0557bd6bb5c9b27195cba53a380cef056",
+  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.24/ReplayRadio-v1.9.24.exe",
+  "published": "2026-11-23T08:53:29Z",
+  "notes": "修复「关注的直播」显示已下播主播与无限刷新",
   "_note": "软件内更新检查的兜底数据源。发版时随 site/index.html 的 VERSION 一起改，发布到 gh-pages 后生效。"
 }
