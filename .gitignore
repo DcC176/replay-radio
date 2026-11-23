@@ -100,6 +100,9 @@ data/stations.json.bak_*
 # playlists.json / song_tags.json：导入的歌单 + 手动补的歌名分类。
 # 三者都由 build_exe.py 的 DATA_EXCLUDE_FILES 排除出包，这里同步排除出库。
 data/follow_cache.json
+# 用户自己提交的反馈（含诊断信息），以及可选的 webhook 配置
+data/feedback/
+data/feedback.json
 data/playlists.json
 data/song_tags.json
 # buvid 持久化 cookie（v1.0.69 起写入，本机专属、不进仓库）

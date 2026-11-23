@@ -36,7 +36,7 @@ OUT = os.path.join(ROOT, "发布")
 # 这些 build_* 目录纯属缓存（不进包、不进版本库），可以随时手动删除。
 BUILD = os.path.join(ROOT, "build_%s" % time.strftime("%Y%m%d_%H%M%S"))
 
-APP_VERSION = "1.9.25"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.9.26"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
@@ -88,7 +88,8 @@ def ensure_pyinstaller():
 # data/ 下**不该进分发包**的东西：全是运行时数据，体积可到几十上百 MB，
 # 而且每位用户各一份、可重算。`--add-data` 不读 .gitignore，所以必须显式剔除
 # （实测漏剔除时 EXE 从 54MB 涨到 80MB：chu2u 的两个临时 chunk.wav 就占 32MB）。
-DATA_EXCLUDE_DIRS = {"stations", "fans"}     # 各主播的清单缓存/分段结果/音频中间产物；fans = 开发者自己的粉丝数历史
+# feedback = 用户自己提交的反馈与诊断信息，绝不能跟着包发给别人
+DATA_EXCLUDE_DIRS = {"stations", "fans", "feedback"}   # 各主播的清单缓存/分段结果/音频中间产物；fans = 开发者自己的粉丝数历史
 DATA_EXCLUDE_SUFFIX = (".bak", ".bak_test")
 
 # data/ 顶层那些**运行时会写**的文件：一律不许把开发机上的内容打进包。
@@ -132,7 +133,9 @@ DATA_EXCLUDE_FILES = {"seg_state.json", ".main_data_owner", "follow_cache.json",
                       # 录播姬的房间列表与输出目录：开发机上一定试加过别人的房间，
                       # 跟着包发出去就是「打开就看到别人的房间」。文件缺失时后端会用
                       # 默认设置（空列表 + ~/Videos/噼里啪啦/录播），所以不进包正合适。
-                      "recorder.json"}
+                      "recorder.json",
+                      # 反馈上报的 webhook 配置（开发者自己的地址，不该发给用户）
+                      "feedback.json"}
 # 归位标记的**变体**（本地测试会把它重命名成 .main_data_owner.stash 再挪回来）同样
 # 不能进包：包里只要出现「已经搬过家」的痕迹，真主站的历史分段就永远归不了位。
 DATA_EXCLUDE_PREFIX = (".main_data_owner",)

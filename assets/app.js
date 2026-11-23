@@ -5,6 +5,25 @@
 (function () {
   'use strict';
 
+  /* ---------- 前端错误采集（只留在内存里，随反馈一起提交） ----------
+     只收「消息 + 文件基名 + 行号」，不收完整 URL、不带请求体。
+     反馈提交时最多带最近 5 条。 */
+  window.__ERR = window.__ERR || [];
+  function __pushErr(txt) {
+    try {
+      window.__ERR.push(String(txt).slice(0, 300));
+      while (window.__ERR.length > 20) window.__ERR.shift();
+    } catch (e) { /* 忽略 */ }
+  }
+  window.addEventListener('error', function (e) {
+    var f = String((e && e.filename) || '').split('/').pop();
+    __pushErr((e && e.message ? e.message : 'script error') + (f ? ' @' + f + ':' + (e.lineno || 0) : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    __pushErr('未处理的 Promise：' + ((r && (r.message || r)) || 'unknown'));
+  });
+
   var CFG = {
     epoch: Date.parse('2026-09-25T00:00:00+08:00') / 1000,
     seed: 20260925,
@@ -3124,7 +3143,168 @@
     applyPlayer(true);
   }
 
+  /* ---------------- 直播间表情面板 ----------------
+     数据来自 /api/live/emoticons（后端代取 GetEmoticons + 本地可替换包）。
+     点表情 = 直接发送：B 站表情弹幕必须走 dm_type=1 的专用参数，
+     当普通文字插进输入框再发送只会变成一串文字。 */
+  var EMO = { packs: [], active: 0, loaded: false, busy: false, err: '' };
+
+  function emojiPanelEl() { return document.getElementById('emoji-panel'); }
+
+  function emojiRender() {
+    var p = emojiPanelEl();
+    if (!p) return;
+    if (!EMO.packs.length) {
+      p.innerHTML = '<div class="ep-empty">' + esc(EMO.err || '正在读取表情…') + '</div>';
+      return;
+    }
+    var pk = EMO.packs[EMO.active] || EMO.packs[0];
+    var tabs = EMO.packs.map(function (x, i) {
+      return '<button class="ep-tab' + (i === EMO.active ? ' on' : '') + '"'
+        + ' data-ep-tab="' + i + '" type="button" role="tab"'
+        + ' aria-selected="' + (i === EMO.active ? 'true' : 'false') + '">'
+        + esc(x.name || ('表情 ' + (i + 1))) + '</button>';
+    }).join('');
+    var grid = pk.items.map(function (it) {
+      var lock = (it.need_level > 0 || it.need_gift > 0);
+      var need = lock ? (it.unlock || '需粉丝团') + (it.need_level ? ' ' + it.need_level + ' 级' : '') : '';
+      return '<button class="ep-item' + (lock ? ' locked' : '') + '" type="button"'
+        + ' data-ep-u="' + esc(it.u) + '" data-ep-name="' + esc(it.name || '') + '"'
+        + ' data-ep-url="' + esc(it.url) + '" data-ep-w="' + (it.w || 0) + '"'
+        + ' data-ep-h="' + (it.h || 0) + '" data-ep-bulge="' + (it.bulge || 0) + '"'
+        + ' data-ep-need="' + esc(need) + '"'
+        + ' title="' + esc((it.name || it.u) + (need ? '（' + need + '）' : '') + ' · 点击发送') + '">'
+        + '<img src="' + esc(dynImg(it.url)) + '" alt="' + esc(it.name || '') + '" loading="lazy">' 
+        + (lock ? '<i class="ep-lock">' + esc(it.unlock || '锁') + '</i>' : '')
+        + '</button>';
+    }).join('');
+    p.innerHTML = '<div class="ep-tabs" role="tablist">' + tabs + '</div>'
+      + '<div class="ep-body"><div class="ep-grid">' + grid + '</div></div>'
+      + '<div class="ep-foot"><img class="ep-prev" alt="" hidden>'
+      + '<span class="ep-meta"><b>悬停预览</b><span>点击表情直接发到当前直播间</span></span>'
+      + '<span class="ep-state"></span></div>';
+  }
+
+  function emojiPreview(item) {
+    var p = emojiPanelEl();
+    if (!p) return;
+    var img = p.querySelector('.ep-prev');
+    var meta = p.querySelector('.ep-meta');
+    if (!item) {
+      if (img) img.hidden = true;
+      if (meta) meta.innerHTML = '<b>悬停预览</b><span>点击表情直接发到当前直播间</span>';
+      return;
+    }
+    if (img) { img.src = dynImg(item.getAttribute('data-ep-url')); img.hidden = false; }
+    var need = item.getAttribute('data-ep-need');
+    if (meta) {
+      meta.innerHTML = '<b>' + esc(item.getAttribute('data-ep-name') || '表情') + '</b>'
+        + '<span>' + (need ? esc(need) + ' · 点击尝试发送' : '点击发送') + '</span>';
+    }
+  }
+
+  function emojiLoad(force) {
+    EMO.loaded = false;
+    EMO.err = '';
+    emojiRender();
+    fetch('/api/live/emoticons' + (force ? '?refresh=1' : ''))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        EMO.loaded = true;
+        EMO.packs = ((d && d.packs) || []).filter(function (x) { return x.items && x.items.length; });
+        EMO.active = 0;
+        EMO.err = (d && d.error) || (EMO.packs.length ? '' : '没有取到表情，点这里重试');
+        emojiRender();
+      })
+      .catch(function () {
+        EMO.loaded = true;
+        EMO.err = '表情加载失败，点这里重试';
+        emojiRender();
+      });
+  }
+
+  function emojiClose() {
+    var p = emojiPanelEl();
+    var b = document.getElementById('live-emoji');
+    if (p) p.hidden = true;
+    if (b) b.setAttribute('aria-expanded', 'false');
+  }
+
+  function emojiToggle() {
+    var p = emojiPanelEl();
+    var b = document.getElementById('live-emoji');
+    if (!p || !b) return;
+    if (!p.hidden) { emojiClose(); return; }
+    var r = b.getBoundingClientRect();
+    var w = Math.min(468, window.innerWidth - 20);
+    p.hidden = false;
+    p.style.width = w + 'px';
+    p.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+    p.style.top = '0px';
+    var h = p.getBoundingClientRect().height || 320;
+    p.style.top = Math.max(8, r.top - h - 8) + 'px';
+    b.setAttribute('aria-expanded', 'true');
+    if (!EMO.loaded) emojiLoad(false);
+  }
+
+  function emojiSend(item) {
+    if (EMO.busy || !item) return;
+    var p = emojiPanelEl();
+    var stEl = p && p.querySelector('.ep-state');
+    var need = item.getAttribute('data-ep-need');
+    EMO.busy = true;
+    if (stEl) stEl.textContent = '发送中…';
+    postJSON('/api/live/send', { emoticon: {
+      unique: item.getAttribute('data-ep-u'),
+      url: item.getAttribute('data-ep-url'),
+      w: +item.getAttribute('data-ep-w') || 0,
+      h: +item.getAttribute('data-ep-h') || 0,
+      bulge: +item.getAttribute('data-ep-bulge') || 0
+    } }).then(function (d) {
+      var ok = d && !d.error && d.code === 0;
+      var msg = ok ? '已发送 ✓'
+        : ((d && d.error) || ('B 站返回：' + ((d && d.message) || (d && d.code))));
+      if (stEl) stEl.textContent = need ? (msg + '（' + need + '）') : msg;
+      if (el.liveResult) el.liveResult.textContent = ok ? '已发送表情' : msg;
+    }).catch(function () {
+      if (stEl) stEl.textContent = '发送失败';
+    }).then(function () { EMO.busy = false; });
+  }
+
+  function bindLiveEmoji() {
+    var b = document.getElementById('live-emoji');
+    var p = emojiPanelEl();
+    if (!b || !p || b.getAttribute('data-bound') === '1') return;
+    b.setAttribute('data-bound', '1');
+    b.addEventListener('click', function (e) { e.stopPropagation(); emojiToggle(); });
+    p.addEventListener('click', function (e) {
+      var t = e.target.closest ? e.target.closest('[data-ep-tab]') : null;
+      if (t) { EMO.active = +t.getAttribute('data-ep-tab') || 0; emojiRender(); return; }
+      var it = e.target.closest ? e.target.closest('.ep-item') : null;
+      if (it) { emojiSend(it); return; }
+      if (e.target.closest && e.target.closest('.ep-empty')) emojiLoad(true);
+    });
+    p.addEventListener('mouseover', function (e) {
+      var it = e.target.closest ? e.target.closest('.ep-item') : null;
+      if (it) emojiPreview(it);
+    });
+    p.addEventListener('mouseleave', function () { emojiPreview(null); });
+    document.addEventListener('click', function (e) {
+      if (p.hidden) return;
+      /* ⚠️ 点分类会就地重建 innerHTML，事件冒到这里时 target 已经脱离文档，
+         `p.contains(target)` 变成 false —— 于是「点分类」被当成「点外部」把面板关了。
+         用 isConnected 先挡掉这种已经失效的 target。 */
+      if (!e.target || e.target.isConnected === false) return;
+      if (p.contains(e.target) || b.contains(e.target)) return;
+      emojiClose();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') emojiClose();
+    });
+  }
+
   function bindLive() {
+    bindLiveEmoji();          // 表情面板（点上一次绑定，内部自己做委托）
     // 独轮车平时收着，点按钮才展开（浮层）；收起时按钮上会显示运行进度
     function showWheel(on) { el.wheelPop.hidden = !on; }
     el.wheelToggle.addEventListener('click', function () { showWheel(el.wheelPop.hidden); });
@@ -3307,7 +3487,7 @@
     chatLine(null, null, text, true);
   }
 
-  function chatLine(uid, uname, text, sys) {
+  function chatLine(uid, uname, text, sys, em) {
     var box = el.liveChat;
     if (!box) return;
     var div = document.createElement('div');
@@ -3319,7 +3499,19 @@
       u.textContent = uname + '：';
       div.appendChild(u);
     }
-    div.appendChild(document.createTextNode(text));
+    /* 表情弹幕：B 站把图放在 info[0][13]，服务端已经过滤成 hdslb 的 https 地址。
+       有图就只画图（文字就是表情名，再画一遍是重复）。 */
+    if (em && em.url) {
+      var im = document.createElement('img');
+      im.className = 'chat-em';
+      im.src = dynImg(em.url);      // 直连图床在部分网络会失败，统一走本机代理
+      im.alt = text || '表情';
+      im.title = text || '';
+      im.loading = 'lazy';
+      div.appendChild(im);
+    } else {
+      div.appendChild(document.createTextNode(text));
+    }
     var stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
     box.appendChild(div);
     while (box.children.length > 80) box.removeChild(box.firstChild);
@@ -3336,7 +3528,7 @@
     chatEs.onmessage = function (ev) {
       var j;
       try { j = JSON.parse(ev.data); } catch (e) { return; }
-      if (j.type === 'danmaku') chatLine(j.uid, j.uname, j.text);
+      if (j.type === 'danmaku') chatLine(j.uid, j.uname, j.text, false, j.emoticon);
       else if (j.type === 'popularity')
         el.liveChatState.textContent = '已连接 · 人气 ' + fmtNum(j.value);
       else if (j.type === 'state') chatSys(j.text);
@@ -3465,6 +3657,7 @@
     keysBound = true;
     bindDefaultView();
     bindLampMode();
+    bindFeedback();
 
     // 主播管理：填 UID → 检测 → 选来源 → 保存 / 删除
     var stProbeBtn = document.getElementById('st-probe');
@@ -4097,6 +4290,7 @@
     bindSettings();
     syncDefaultViewUI();        // 幂等：已经填过就直接返回（见 syncDefaultViewUI 里的守卫）
     syncLampModeUI();
+    syncFeedbackUI();
     renderStationsCard();
     el.keysList.innerHTML = KEY_ACTIONS.map(function (a) {
       var c = keyMap[a.id];
@@ -4472,6 +4666,7 @@
   function setView(name) {
     if (VIEWS.indexOf(name) < 0) name = 'live';
     closeLampPanel();          // 切页时浮层不要悬在半空（它挂在 header 外，不会随内容消失）
+    if (typeof emojiClose === 'function') emojiClose();
     var prev = state.view;
     /* 播放器只有一个：歌单要借走时间轴，直播间 / 监控室要抢走 <video>。
        去这几个页面之前先把录播看到的位置记下来（state.view 此刻还是旧值，
@@ -8833,6 +9028,121 @@
     });
   }
 
+  /* ---------------- 反馈与错误上报 ----------------
+     默认只写本机 data/feedback/feedback-YYYYMM.jsonl，不上传；
+     data/feedback.json 里配了 webhook 才会额外 POST 一份。
+     诊断信息只取白名单字段（版本/页面/UA/最近报错），不碰 SESSDATA、Cookie、完整路径。 */
+  var FB = { busy: false, meta: {} };
+
+  function fbContext() {
+    return {
+      app: 'replay-radio',
+      version: FB.meta.version || '',
+      build: FB.meta.build || '',
+      view: state.view || '',
+      station: ST_NAME || '',
+      ua: navigator.userAgent,
+      platform: navigator.platform || '',
+      screen: screen.width + 'x' + screen.height + ' @' + (window.devicePixelRatio || 1) + 'x',
+      errors: (window.__ERR || []).slice(-5).map(function (x) { return String(x).slice(0, 200); })
+    };
+  }
+
+  function fbPayload() {
+    var kindEl = document.getElementById('fb-kind');
+    var textEl = document.getElementById('fb-text');
+    var ctxEl = document.getElementById('fb-ctx');
+    return {
+      kind: (kindEl && kindEl.value) || 'bug',
+      text: ((textEl && textEl.value) || '').trim(),
+      context: (ctxEl && ctxEl.checked) ? fbContext() : {}
+    };
+  }
+
+  function fbPreview() {
+    var pre = document.getElementById('fb-preview');
+    var p = fbPayload();
+    if (pre) {
+      pre.textContent = JSON.stringify(
+        { kind: p.kind, text: p.text, context: p.context }, null, 2);
+    }
+    var gh = document.getElementById('fb-gh');
+    if (gh) {
+      var title = '[反馈] ' + (p.kind === 'bug' ? '问题' : p.kind === 'idea' ? '建议' : '其他');
+      var body = (p.text || '（没有填写描述）') + '\n\n```json\n'
+        + JSON.stringify(p.context, null, 2) + '\n```';
+      gh.href = 'https://github.com/DcC176/replay-radio/issues/new?title='
+        + encodeURIComponent(title) + '&body=' + encodeURIComponent(body.slice(0, 6000));
+    }
+  }
+
+  function fbCopy() {
+    var out = document.getElementById('fb-result');
+    var p = fbPayload();
+    var txt = '【' + (p.kind === 'bug' ? '问题 / 错误' : p.kind === 'idea' ? '功能建议' : '其他')
+      + '】\n' + (p.text || '') + '\n\n--- 诊断信息 ---\n'
+      + JSON.stringify(p.context, null, 2);
+    function done(ok) {
+      if (out) out.textContent = ok ? '已复制到剪贴板' : '复制失败，请手动选中预览里的内容';
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).then(function () { done(true); },
+        function () { done(false); });
+      return;
+    }
+    done(false);
+  }
+
+  function fbSubmit() {
+    if (FB.busy) return;
+    var out = document.getElementById('fb-result');
+    var p = fbPayload();
+    if (p.text.length < 4) {
+      if (out) out.textContent = '请至少写 4 个字，说明发生了什么';
+      return;
+    }
+    FB.busy = true;
+    if (out) out.textContent = '正在提交…';
+    postJSON('/api/feedback', p).then(function (d) {
+      if (!d || d.error) {
+        if (out) out.textContent = '提交失败：' + ((d && d.error) || '未知原因');
+        return;
+      }
+      if (out) {
+        out.textContent = '已提交 · 编号 ' + d.id + ' · 保存在 ' + d.stored
+          + (d.delivered ? ' · 已上报' : '') + (d.warn ? '（' + d.warn + '）' : '');
+      }
+      var t = document.getElementById('fb-text');
+      if (t) t.value = '';
+      fbPreview();
+    }).catch(function () {
+      if (out) out.textContent = '提交失败：没有连上本机服务';
+    }).then(function () { FB.busy = false; });
+  }
+
+  function bindFeedback() {
+    var sub = document.getElementById('fb-submit');
+    if (!sub || sub.getAttribute('data-bound') === '1') return;
+    sub.setAttribute('data-bound', '1');
+    ['fb-kind', 'fb-text', 'fb-ctx'].forEach(function (id) {
+      var e = document.getElementById(id);
+      if (!e) return;
+      e.addEventListener('input', fbPreview);
+      e.addEventListener('change', fbPreview);
+    });
+    sub.addEventListener('click', fbSubmit);
+    var cp = document.getElementById('fb-copy');
+    if (cp) cp.addEventListener('click', fbCopy);
+  }
+
+  function syncFeedbackUI() {
+    fbPreview();
+    fetch('/api/ping').then(function (r) { return r.json(); }).then(function (d) {
+      FB.meta = { version: (d && d.version) || '', build: (d && d.build) || '' };
+      fbPreview();
+    }).catch(function () { /* 服务不在：版本留空 */ });
+  }
+
   function bindUpdate() {
     var check = document.getElementById('btn-update-check');
     if (check) check.addEventListener('click', function () { updCheck(true); });
@@ -9733,6 +10043,7 @@
     });
     document.addEventListener('click', function (e) {
       if (!lampPanelIsOpen()) return;
+      if (!e.target || e.target.isConnected === false) return;   // 同上：重渲染后的旧节点
       if (p.contains(e.target) || dock.contains(e.target)) return;
       closeLampPanel();
     });

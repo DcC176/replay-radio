@@ -295,6 +295,9 @@ window.__BOOT_T0 = Date.now();
      放在顶栏里会被标签条按绘制顺序盖住（同「更多」菜单）。 -->
 <div class="lamp-panel" id="lamp-panel" hidden></div>
 
+<!-- 直播间表情面板：固定定位、贴着输入框弹出，不占卡片宽度 -->
+<div class="emoji-panel" id="emoji-panel" role="dialog" aria-label="表情" hidden></div>
+
 <div class="tb-menu" id="tb-menu" role="menu" aria-label="更多操作" hidden>
   <button class="tb-menu-i" type="button" role="menuitem" data-act="space">打开主播 B 站空间</button>
   <button class="tb-menu-i" type="button" role="menuitem" data-act="lang">界面语言：简体中文</button>
@@ -527,6 +530,9 @@ window.__BOOT_T0 = Date.now();
           <button class="btn small primary" id="live-jct-save">保存</button>
         </div>
         <div class="live-send">
+          <button class="live-emoji-btn" id="live-emoji" type="button"
+                  aria-label="表情" aria-haspopup="dialog" aria-expanded="false"
+                  title="表情">☺</button>
           <input id="live-msg" maxlength="30" placeholder="发条弹幕，30 字内"
                  title="最多 30 字">
           <button class="btn small primary" id="live-send">发送</button>
@@ -1222,6 +1228,37 @@ window.__BOOT_T0 = Date.now();
         <p class="live-note" style="margin-top:8px">启动时会自动检查，但<b>只提示不下载</b>；
           只有你点「立即更新」才会下载并替换 EXE。无新版、检查失败或点「稍后」都不会改动任何文件。
           「24 小时内不再提示 / 永久不再提示」只作用于启动时的自动提示，手动点「检查更新」照样出结果。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">反馈与错误上报</div>
+        <label class="seg-auto">类型
+          <select id="fb-kind" title="反馈类型">
+            <option value="bug">问题 / 错误</option>
+            <option value="idea">功能建议</option>
+            <option value="other">其他</option>
+          </select>
+        </label>
+        <textarea id="fb-text" class="fb-text" rows="4" maxlength="4000"
+                  placeholder="发生了什么？怎么复现？期望的结果是什么？"></textarea>
+        <label class="seg-auto" style="margin-top:8px">
+          <input type="checkbox" id="fb-ctx" checked> 附带诊断信息（版本、当前页面、最近报错）
+        </label>
+        <details class="fb-details" style="margin-top:8px">
+          <summary>看看会提交什么</summary>
+          <pre id="fb-preview" class="fb-preview"></pre>
+        </details>
+        <div class="qp-btns" style="margin-top:10px">
+          <button class="btn small primary" id="fb-submit" type="button">提交反馈</button>
+          <button class="btn small ghost" id="fb-copy" type="button">复制内容</button>
+          <a class="btn small ghost" id="fb-gh"
+             href="https://github.com/DcC176/replay-radio/issues/new"
+             target="_blank" rel="noopener">去 GitHub 提 Issue</a>
+        </div>
+        <p class="live-note" id="fb-result" style="margin-top:8px"></p>
+        <p class="live-note">默认只保存到本机 <code>data/feedback/</code>（JSONL），不上传任何服务器；
+          不含登录凭据、Cookie 与完整文件路径。只有在 <code>data/feedback.json</code> 里配了
+          <code>webhook</code> 时才会额外上报一份。</p>
       </div>
 
       <div class="live-card" style="margin-top:18px">

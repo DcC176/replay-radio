@@ -1096,6 +1096,7 @@ STATIONLESS_OK = (
     "/api/page/alive", "/api/page/bye",
     "/api/protocol/register", "/api/protocol/unregister",
     "/api/following/live",     # 只依赖登录态，与有没有注册主播无关
+    "/api/feedback", "/api/feedback/conf",   # 反馈是本机功能，与主播无关
     "/api/live/ws",            # 同上：房间号由 URL 带，跟注册表无关
     # 歌单：导入的是任意 B 站投稿，与注册表里有没有主播无关（首批用户就是先导歌单）
     "/api/playlists", "/api/playlist",
@@ -1166,7 +1167,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.25"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.26"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
@@ -1378,6 +1379,90 @@ def api_update_apply():
         UPDATE_JOB["stage"] = "applying"
     threading.Thread(target=rc_quit_async, args=("更新应用",), daemon=True).start()
     return 200, {"ok": True}
+
+
+# ---------------------------------------------------------------- 反馈 / 错误上报
+# 方案取舍（成本 / 可行性 / 隐私）：
+#   · GitHub Issues：零后端，但要求用户有 GH 账号、内容公开、还要能贴日志 →
+#     门槛高、隐私风险最大，只做成「引导用户自己去提」的次要入口；
+#   · 在线表单/腾讯文档：要账号、要维护表格、还要配 CORS 或中转 → 成本不低；
+#   · 本机 JSONL + 可选 webhook：零依赖、离线可用、默认不出网 → 选它。
+# 默认只写 `data/feedback/feedback-YYYYMM.jsonl`；`data/feedback.json` 里配了
+# `{"webhook": "https://..."}` 才会额外 POST 一份（企业微信/飞书/Slack 的机器人地址都能接）。
+FEEDBACK_DIR = os.path.join(ROOT, "data", "feedback")
+FEEDBACK_CONF = os.path.join(ROOT, "data", "feedback.json")
+FEEDBACK_KINDS = ("bug", "idea", "other")
+FEEDBACK_MAX = 4000
+# 只收这些诊断字段：**不碰** SESSDATA / Cookie / 完整路径。多收一个字段就多一分隐私风险。
+FEEDBACK_FIELDS = ("app", "version", "build", "view", "station", "ua",
+                   "platform", "screen", "errors")
+
+
+def _feedback_conf():
+    try:
+        with open(FEEDBACK_CONF, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _feedback_context(ctx):
+    out = {}
+    if not isinstance(ctx, dict):
+        return out
+    for k in FEEDBACK_FIELDS:
+        v = ctx.get(k)
+        if v in (None, ""):
+            continue
+        if isinstance(v, list):
+            out[k] = [str(x)[:200] for x in v[:5]]
+        else:
+            out[k] = str(v)[:300]
+    return out
+
+
+def api_feedback_conf():
+    hook = str(_feedback_conf().get("webhook") or "").strip()
+    return 200, {"webhook": hook.startswith("https://")}
+
+
+def api_feedback(obj):
+    kind = str(obj.get("kind") or "other")
+    if kind not in FEEDBACK_KINDS:
+        kind = "other"
+    text = str(obj.get("text") or "").strip()
+    if len(text) < 4:
+        return 400, {"error": "请至少写 4 个字，说明发生了什么"}
+    if len(text) > FEEDBACK_MAX:
+        return 400, {"error": "最多 %d 字（当前 %d 字）" % (FEEDBACK_MAX, len(text))}
+    rec = {
+        "id": time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex(),
+        "at": int(time.time()),
+        "kind": kind,
+        "text": text,
+        "context": _feedback_context(obj.get("context")),
+    }
+    path = os.path.join(FEEDBACK_DIR, "feedback-%s.jsonl" % time.strftime("%Y%m"))
+    try:
+        os.makedirs(FEEDBACK_DIR, exist_ok=True)
+        with open(path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:
+        return 500, {"error": "写入本机失败：%s" % str(e)[:80]}
+    out = {"ok": True, "id": rec["id"],
+           "stored": os.path.relpath(path, ROOT).replace("\\", "/")}
+    hook = str(_feedback_conf().get("webhook") or "").strip()
+    if hook.startswith("https://"):
+        try:
+            req = urllib.request.Request(
+                hook, data=json.dumps(rec, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json", "User-Agent": UA})
+            with urlopen(req, 10) as r:
+                out["delivered"] = getattr(r, "status", 200)
+        except Exception as e:
+            out["warn"] = "已保存到本机，但上报失败：%s" % str(e)[:80]
+    return 200, out
 
 
 # B 站风控：请求太密会回 412（响应体 code=-412「request was banned」），持续几十分钟。
@@ -4446,14 +4531,178 @@ def _danmaku_ready():
     return bool(sess and jct)
 
 
-def _send_danmaku(msg):
-    """发一条弹幕，返回 (B 站 code, message)。code=0 才是成功。"""
+# ---------------------------------------------------------------- 直播间表情
+# B 站直播的表情分三类：通用（official_*）/ UP 主大表情 / 房间专属（room_*）。
+# 面板数据来自 GetEmoticons；发送**不能**走普通文字通道（发出去只会变成一串文字），
+# 要用 dm_type=1 + msg=emoticon_unique + emoticonOptions（url/宽高）。
+# 本地还支持一个可替换的表情包清单（assets/emoticons/packs.json），
+# 接口取不到/离线时至少还有它。
+LIVE_EMOTE_API = "https://api.live.bilibili.com/xlive/web-ucenter/v2/emoticon/GetEmoticons"
+LIVE_EMOTE_TTL = 600
+LIVE_EMOTE = {}
+LIVE_EMOTE_LOCK = threading.Lock()
+LOCAL_EMOTE_FILE = os.path.join(ROOT, "assets", "emoticons", "packs.json")
+
+
+def _emote_item(e):
+    url = str(e.get("url") or "").strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    url = url.replace("http://", "https://")
+    return {
+        "u": str(e.get("emoticon_unique") or ""),
+        "name": str(e.get("emoji") or e.get("descript") or ""),
+        "url": url,
+        "w": int(e.get("width") or 0),
+        "h": int(e.get("height") or 0),
+        "bulge": int(e.get("bulge_display") or 0),
+        "perm": int(e.get("perm") or 0),
+        "need_level": int(e.get("unlock_need_level") or 0),
+        "need_gift": int(e.get("unlock_need_gift") or 0),
+        "unlock": str(e.get("unlock_show_text") or ""),
+    }
+
+
+def _local_emote_packs():
+    """可替换的本地表情包（读不到就当没有，不影响功能）。
+
+    文件格式：
+      {"packs":[{"id":"my","name":"我的表情","emoticons":[
+          {"unique":"my_1","name":"开心","url":"happy.png","width":120,"height":120}]}]}
+    `url` 写相对路径时按 assets/emoticons/ 解析；也可以直接写 http(s) 地址。
+    """
+    try:
+        with open(LOCAL_EMOTE_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return []
+    packs = []
+    for p in (d.get("packs") or []):
+        items = []
+        for e in (p.get("emoticons") or []):
+            u = str(e.get("unique") or "").strip()
+            if not u:
+                continue
+            url = str(e.get("url") or "").strip()
+            if url and not url.startswith(("http://", "https://", "/")):
+                url = "/assets/emoticons/" + url.lstrip("./")
+            items.append({"u": u, "name": str(e.get("name") or ""), "url": url,
+                          "w": int(e.get("width") or 0), "h": int(e.get("height") or 0),
+                          "bulge": 0, "perm": 1, "need_level": 0, "need_gift": 0,
+                          "unlock": ""})
+        if items:
+            packs.append({"id": str(p.get("id") or p.get("name") or "local"),
+                          "name": str(p.get("name") or "本地表情"), "type": 0,
+                          "items": items})
+    return packs
+
+
+def _live_emote_fetch(room):
+    """从 B 站取当前直播间的表情包（需要登录态才会有房间专属那一包）。"""
+    hdrs = {
+        "User-Agent": UA,
+        "Referer": "https://live.bilibili.com/%s" % room,
+        "Accept": "application/json, text/plain, */*",
+    }
+    sess = load_credentials()[0]
+    if sess:
+        hdrs["Cookie"] = "SESSDATA=%s" % sess
+    url = "%s?platform=pc&room_id=%s" % (LIVE_EMOTE_API, urllib.parse.quote(str(room)))
+    with cached_get(url, hdrs, timeout=15) as r:
+        status = getattr(r, "status", 200)
+        body = r.read()
+    if status >= 400:
+        raise RuntimeError("HTTP %d" % status)
+    d = json.loads(body.decode("utf-8", "replace"))
+    if d.get("code") != 0:
+        raise RuntimeError("code=%s %s" % (d.get("code"), d.get("message")))
+    packs = []
+    for p in ((d.get("data") or {}).get("data") or []):
+        items = [_emote_item(e) for e in (p.get("emoticons") or [])]
+        items = [x for x in items if x["u"] and x["url"]]
+        if items:
+            packs.append({"id": str(p.get("pkg_id") or ""),
+                          "name": str(p.get("pkg_name") or ""),
+                          "type": int(p.get("pkg_type") or 0), "items": items})
+    return packs
+
+
+def live_emote_packs(force=False):
+    """当前直播间的表情包（10 分钟缓存；失败时 30 秒后允许重试）。
+
+    ⚠️ 失败不抛给前端：至少把本地包给出去，面板不该整块空掉。
+    """
+    room = cur_room()
+    now = time.time()
+    with LIVE_EMOTE_LOCK:
+        hit = LIVE_EMOTE.get(room)
+        if hit and not force:
+            ttl = LIVE_EMOTE_TTL if hit["remote"] else 30
+            if now - hit["at"] < ttl:
+                return hit
+    remote, err = [], ""
+    try:
+        remote = _live_emote_fetch(room)
+    except Exception as e:
+        err = str(e)[:120]
+    packs = remote + _local_emote_packs()
+    out = {"at": now, "packs": packs, "remote": bool(remote), "error": err}
+    with LIVE_EMOTE_LOCK:
+        LIVE_EMOTE[room] = out
+    return out
+
+
+def api_live_emoticons(force=False):
+    d = live_emote_packs(force)
+    body = {"room": cur_room(), "packs": d["packs"],
+            "source": "bili" if d["remote"] else ("local" if d["packs"] else "none")}
+    if d["error"]:
+        body["error"] = d["error"]
+    return 200, body
+
+
+def _live_emote_find(unique):
+    """按 emoticon_unique 找表情（发之前必须校验：不能把任意 url 塞给 B 站）。"""
+    u = str(unique or "").strip()
+    if not u:
+        return None
+    for p in live_emote_packs()["packs"]:
+        for it in p["items"]:
+            if it["u"] != u:
+                continue
+            # 只有 B 站自己的图能作为表情素材发给 B 站
+            if not re.match(r"^https://[\w.-]*hdslb\.com/", it["url"] or ""):
+                return None
+            return it
+    return None
+
+
+def _send_danmaku(msg, emote=None):
+    """发一条弹幕，返回 (B 站 code, message)。code=0 才是成功。
+
+    emote 不为空时走**表情通道**：B 站把大表情/房间表情当独立类型，
+    普通文字通道发出去只会显示成一串文字（实测「不能用 [表情名] 兜底」）。
+    """
     _, jct = load_credentials()
-    body = urllib.parse.urlencode({
+    fields = {
         "bubble": "0", "msg": msg, "color": "16777215", "mode": "1",
         "fontsize": "25", "roomid": cur_room(), "rnd": str(int(time.time())),
         "csrf": jct, "csrf_token": jct,
-    }).encode("utf-8")
+    }
+    if emote:
+        fields.update({
+            "dm_type": "1",
+            "msg": emote["u"],
+            "emoticonOptions": json.dumps({
+                "bulge_display": int(emote.get("bulge") or 0),
+                "emoticon_unique": emote["u"],
+                "height": int(emote.get("h") or 40),
+                "width": int(emote.get("w") or 40),
+                "in_player_area": 1,
+                "url": emote["url"],
+            }, ensure_ascii=False),
+        })
+    body = urllib.parse.urlencode(fields).encode("utf-8")
     sess = load_credentials()[0]
     req = urllib.request.Request("https://api.live.bilibili.com/msg/send", data=body, headers={
         "User-Agent": UA,
@@ -4471,6 +4720,20 @@ def _send_danmaku(msg):
 
 
 def api_live_send(obj):
+    em = obj.get("emoticon")
+    if em is not None:
+        if not isinstance(em, dict):
+            return 400, {"error": "表情参数不合法"}
+        item = _live_emote_find(em.get("unique"))
+        if not item:
+            return 404, {"error": "这个表情不在当前直播间的表情包里（可能已下架或没有权限）"}
+        if int(item.get("perm") or 0) != 1:
+            return 403, {"error": "这个表情当前不可发送"}
+        if not _danmaku_ready():
+            return 403, {"error": "发弹幕需要登录，并粘贴 bili_jct（直播间页右侧有入口）"}
+        code, message = _send_danmaku("", item)
+        return (200 if code == 0 else 502), {"code": code, "message": message,
+                                             "emoticon": item["u"]}
     msg = str(obj.get("msg") or "").strip()
     if not msg:
         return 400, {"error": "弹幕内容不能为空"}
@@ -7154,8 +7417,23 @@ def _chat_parse_nested(sid, payload):
                 if cmd.startswith("DANMU_MSG") and j.get("info"):
                     info = j["info"]
                     who = info[2] or []
-                    _chat_broadcast(sid, {"type": "danmaku", "uid": who[0] or 0,
-                                          "uname": who[1] or "", "text": info[1] or ""})
+                    payload = {"type": "danmaku", "uid": who[0] or 0,
+                               "uname": who[1] or "", "text": info[1] or ""}
+                    # info[0][13] 是表情弹幕的元数据（{} 表示普通弹幕）。
+                    # 只放行 hdslb 的图，别把任意 url 交给前端去加载。
+                    try:
+                        raw = info[0][13] if len(info[0]) > 13 else None
+                        if isinstance(raw, dict) and raw.get("emoticon_unique"):
+                            u = str(raw.get("url") or "").replace("http://", "https://")
+                            if u.startswith("https://") and "hdslb.com" in u:
+                                payload["emoticon"] = {
+                                    "unique": str(raw.get("emoticon_unique")),
+                                    "url": u,
+                                    "w": int(raw.get("width") or 0),
+                                    "h": int(raw.get("height") or 0)}
+                    except Exception:
+                        pass
+                    _chat_broadcast(sid, payload)
             except Exception:
                 pass
         off += ln
@@ -9113,6 +9391,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*page_alive(q.get("cid", [""])[0] or "anon"))
         if parsed.path == "/api/live/wheel":
             return self._json(*api_live_wheel_status())
+        if parsed.path == "/api/live/emoticons":
+            return self._json(*api_live_emoticons("refresh" in q))
+        if parsed.path == "/api/feedback/conf":
+            return self._json(*api_feedback_conf())
         if parsed.path == "/api/live/playinfo":
             return self._json(*api_live_playinfo(q))
         if parsed.path == "/api/live/resolve":
@@ -9255,6 +9537,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(400, {"error": "本机没找到 ffmpeg，无法做分段"})
             queued = segments_enqueue(bvid, _find_program(bvid))
             return self._json(200, {"ok": True, "queued": queued})
+        if parsed.path == "/api/feedback":
+            return self._json(*api_feedback(obj))
         if parsed.path == "/api/live/send":
             return self._json(*api_live_send(obj))
         if parsed.path == "/api/live/wheel/start":
