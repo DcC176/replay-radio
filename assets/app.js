@@ -674,6 +674,23 @@
      因为它必须在**每次**进入设置页时都跑一遍 —— 之前把填充塞在这里，
      靠 bindSettings() 的「只绑一次」守卫顺带执行，结果只要有一次抢在前面
      （元素还没就绪 / 标签还没渲染），下拉就永远空着（打包版实测踩到）。 */
+  /* 主播选择方式（外观卡里）：只影响顶栏那颗选择器，不需要重载页面 */
+  function syncLampModeUI() {
+    var sel = document.getElementById('set-lamp-mode');
+    if (sel) sel.value = lampMode();
+  }
+
+  function bindLampMode() {
+    var sel = document.getElementById('set-lamp-mode');
+    if (!sel || sel.getAttribute('data-bound') === '1') return;
+    sel.setAttribute('data-bound', '1');
+    sel.addEventListener('change', function () {
+      store.set(LAMP_MODE_KEY, sel.value);
+      closeLampPanel();
+      renderLamps(false);
+    });
+  }
+
   function bindDefaultView() {
     var sel = document.getElementById('set-default-view');
     if (!sel) return;
@@ -3447,6 +3464,7 @@
     if (keysBound) return;
     keysBound = true;
     bindDefaultView();
+    bindLampMode();
 
     // 主播管理：填 UID → 检测 → 选来源 → 保存 / 删除
     var stProbeBtn = document.getElementById('st-probe');
@@ -4078,6 +4096,7 @@
   function renderSettings() {
     bindSettings();
     syncDefaultViewUI();        // 幂等：已经填过就直接返回（见 syncDefaultViewUI 里的守卫）
+    syncLampModeUI();
     renderStationsCard();
     el.keysList.innerHTML = KEY_ACTIONS.map(function (a) {
       var c = keyMap[a.id];
@@ -4452,6 +4471,7 @@
 
   function setView(name) {
     if (VIEWS.indexOf(name) < 0) name = 'live';
+    closeLampPanel();          // 切页时浮层不要悬在半空（它挂在 header 外，不会随内容消失）
     var prev = state.view;
     /* 播放器只有一个：歌单要借走时间轴，直播间 / 监控室要抢走 <video>。
        去这几个页面之前先把录播看到的位置记下来（state.view 此刻还是旧值，
@@ -9514,28 +9534,213 @@
     return out;
   }
 
+  /* 主播选择：三种形态，都靠一个**固定定位**的浮层展开，不占顶栏宽度。
+       · hover（默认）：≤8 位直接排灯；超过 8 位只留前 3 个 + 「+N」，悬停展开完整灯条
+       · select：顶栏一个「主播 N/M」按钮，点开纵向名单
+       · popover：顶栏显示已选的主播点 + 计数，悬停展开带头像/名字的卡片墙
+     ⚠️ 浮层必须挂在 header 外面并且 position:fixed —— 放在顶栏里会被标签条按绘制
+        顺序盖住（同一个坑在「更多」菜单上踩过）。 */
+  var LAMP_MODE_KEY = 'xl_lamp_mode';
+  /* 7 位时整条灯已经 200px。实测 1500 宽的顶栏在 7 位时溢出 27px，
+     所以阈值定在 6：≤6 直接排灯，≥7 收起成「3 个灯 + N」。 */
+  var LAMP_COLLAPSE_AT = 6;
+  var LAMP_INLINE_KEEP = 3;        // 收起时顶栏仍保留几个灯
+  var lampHoverTimer = 0;
+
+  function lampMode() {
+    var m = store.get(LAMP_MODE_KEY, 'hover');
+    return (m === 'select' || m === 'popover') ? m : 'hover';
+  }
+
+  function lampCollapsed() {
+    var m = lampMode();
+    if (m === 'select' || m === 'popover') return true;
+    return (STATIONS || []).length > LAMP_COLLAPSE_AT;
+  }
+
+  function lampBtn(s, on) {
+    var name = (s.short || s.name) + (s.main ? '（主站）' : '');
+    var hint = on
+      ? ' · 左键取消混合 · 右键只看这一位'
+      : ' · 左键加入混合 · 右键只看这一位';
+    var accent = s.accent || '#8a8a95';
+    return '<button type="button" class="lamp' + (on ? ' on' : '') + '"'
+      + ' data-id="' + esc(s.id) + '"'
+      + ' style="--lc:' + esc(accent) + ';--lcd:' + esc(dimHex(accent, 0.26)) + '"'
+      + ' aria-pressed="' + (on ? 'true' : 'false') + '"'
+      + ' aria-label="' + esc(name + hint) + '"'
+      + ' title="' + esc(name + hint) + '"></button>';
+  }
+
   function renderLamps(live) {
     var box = document.getElementById('station-lamps');
     if (!box) return;
-    box.innerHTML = STATIONS.map(function (s) {
-      var on = ST_SET.indexOf(s.id) >= 0;
-      var name = (s.short || s.name) + (s.main ? '（主站）' : '');
-      var hint = on
-        ? ' · 左键取消混合 · 右键只看这一位'
-        : ' · 左键加入混合 · 右键只看这一位';
-      var accent = s.accent || '#8a8a95';
-      return '<button type="button" class="lamp' + (on ? ' on' : '') + '"'
-        + ' data-id="' + esc(s.id) + '"'
-        + ' style="--lc:' + esc(accent) + ';--lcd:' + esc(dimHex(accent, 0.26)) + '"'
-        + ' aria-pressed="' + (on ? 'true' : 'false') + '"'
-        + ' aria-label="' + esc(name + hint) + '"'
-        + ' title="' + esc(name + hint) + '"></button>';
-    }).join('');
+    var list = STATIONS || [];
+    var mode = lampMode();
+    if (!lampCollapsed()) {
+      box.innerHTML = list.map(function (s) {
+        return lampBtn(s, ST_SET.indexOf(s.id) >= 0);
+      }).join('');
+    } else if (mode === 'hover') {
+      var rest = list.length - LAMP_INLINE_KEEP;
+      box.innerHTML = list.slice(0, LAMP_INLINE_KEEP).map(function (s) {
+        return lampBtn(s, ST_SET.indexOf(s.id) >= 0);
+      }).join('')
+        + '<button type="button" class="lamp-more" data-lamp-open="1"'
+        + ' aria-haspopup="true" aria-expanded="false"'
+        + ' title="还有 ' + rest + ' 位主播：悬停或点击查看全部">+' + rest + '</button>';
+    } else {
+      var onN = list.filter(function (s) { return ST_SET.indexOf(s.id) >= 0; }).length;
+      /* 下拉选单里已经有全名，触发按钮就不用再点色点；二级窗口才需要色点占位 */
+      var dots = mode === 'select' ? '' : ST_SET.slice(0, 3).map(function (id) {
+        var s = findStation(id);
+        return '<i class="lt-dot" style="--lc:' + esc((s && s.accent) || '#8a8a95') + '"></i>';
+      }).join('');
+      box.innerHTML = '<button type="button" class="lamp-trigger" data-lamp-open="1"'
+        + ' aria-haspopup="true" aria-expanded="false"'
+        + ' title="选择要观看的主播（可多选）">' + dots
+        + '<b>' + (mode === 'select' ? '主播 ' : '') + onN + '/' + list.length + '</b>'
+        + '<span class="lt-caret" aria-hidden="true">▾</span></button>';
+    }
+    /* select / popover 收起态只有一颗按钮：别让它套在「灯条外壳」里 */
+    box.classList.toggle('is-plain', lampCollapsed() && mode !== 'hover');
     // 主位在播时给它的灯加一圈绿边（原来的小圆点就是这个作用）
     if (live) {
       var b = box.querySelector('[data-id="' + ST + '"]');
       if (b) b.classList.add('living');
     }
+    if (lampPanelIsOpen()) renderLampPanel();   // 开着的时候跟上选择状态
+  }
+
+  function lampPanelEl() { return document.getElementById('lamp-panel'); }
+  function lampPanelIsOpen() {
+    var p = lampPanelEl();
+    return !!(p && !p.hidden);
+  }
+
+  function renderLampPanel() {
+    var p = lampPanelEl();
+    if (!p) return;
+    var list = STATIONS || [];
+    var mode = lampMode();
+    if (!list.length || !lampCollapsed()) { p.hidden = true; return; }
+    var title = '<div class="lp-title">点亮谁就看谁（可多选，右键只看这一位）</div>';
+    var body;
+    if (mode === 'select') {
+      body = title + '<div class="lp-list">' + list.map(function (s) {
+        var on = ST_SET.indexOf(s.id) >= 0;
+        return '<button type="button" class="lp-row' + (on ? ' on' : '') + '"'
+          + ' data-id="' + esc(s.id) + '" role="menuitemcheckbox"'
+          + ' aria-checked="' + (on ? 'true' : 'false') + '">'
+          + '<i class="lp-dot" style="--lc:' + esc(s.accent || '#8a8a95') + '"></i>'
+          + '<span class="lp-name">' + esc(s.name || s.id) + '</span>'
+          + (s.main ? '<span class="lp-badge">主站</span>' : '')
+          + '<span class="lp-check" aria-hidden="true">' + (on ? '✓' : '') + '</span>'
+          + '</button>';
+      }).join('') + '</div>';
+    } else if (mode === 'popover') {
+      body = title + '<div class="lp-cards">' + list.map(function (s) {
+        var on = ST_SET.indexOf(s.id) >= 0;
+        return '<button type="button" class="lp-card' + (on ? ' on' : '') + '"'
+          + ' data-id="' + esc(s.id) + '" aria-pressed="' + (on ? 'true' : 'false') + '">'
+          + '<span class="lp-ava">' + faceHtml(s.face, 'lp-ava-img', s.name || s.id) + '</span>'
+          + '<b>' + esc(s.short || s.name || s.id) + '</b>'
+          + (s.main ? '<em>主站</em>' : '')
+          + '<i class="lp-check" aria-hidden="true">' + (on ? '✓' : '') + '</i></button>';
+      }).join('') + '</div>';
+    } else {
+      body = title + '<div class="lp-lamps">' + list.map(function (s) {
+        return lampBtn(s, ST_SET.indexOf(s.id) >= 0);
+      }).join('') + '</div>';
+    }
+    p.className = 'lamp-panel'
+      + (mode === 'select' ? ' is-list' : mode === 'popover' ? ' is-cards' : '');
+    p.innerHTML = body;
+    bindFaceFallback(p);
+  }
+
+  function openLampPanel() {
+    var p = lampPanelEl();
+    var dock = document.getElementById('lamp-dock');
+    if (!p || !dock || !lampCollapsed()) return;
+    renderLampPanel();
+    var r = dock.getBoundingClientRect();
+    var bar = document.querySelector('.topbar');
+    /* 灯条是垂直居中的，它的底边比顶栏底边还高几个像素 —— 直接贴 r.bottom
+       会压住顶栏那 1~2px 的边框。取两者的较大值，保证浮层整体在顶栏下方。 */
+    var floor = bar ? bar.getBoundingClientRect().bottom : r.bottom;
+    p.hidden = false;
+    p.style.top = Math.round(Math.max(r.bottom, floor) + 8) + 'px';
+    p.style.right = Math.max(10, Math.round(window.innerWidth - r.right)) + 'px';
+    var btn = dock.querySelector('[data-lamp-open]');
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+  }
+
+  function closeLampPanel() {
+    var p = lampPanelEl();
+    var dock = document.getElementById('lamp-dock');
+    if (!p || p.hidden) return;
+    p.hidden = true;
+    var btn = dock && dock.querySelector('[data-lamp-open]');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+
+  /* 悬停展开 / 移开收起：两条延迟都要有 ——
+     立刻收起会让「从 +N 移到面板」这一小段空隙把面板关掉。 */
+  function bindLampPanel() {
+    var dock = document.getElementById('lamp-dock');
+    var p = lampPanelEl();
+    if (!dock || !p || dock.getAttribute('data-lamp-bound') === '1') return;
+    dock.setAttribute('data-lamp-bound', '1');
+    dock.addEventListener('mouseenter', function () {
+      if (!lampCollapsed()) return;
+      clearTimeout(lampHoverTimer);
+      lampHoverTimer = setTimeout(openLampPanel, 120);
+    });
+    dock.addEventListener('mouseleave', function () {
+      clearTimeout(lampHoverTimer);
+      lampHoverTimer = setTimeout(function () {
+        if (p.matches(':hover')) return;        // 鼠标已经移到面板上
+        closeLampPanel();
+      }, 200);
+    });
+    p.addEventListener('mouseenter', function () { clearTimeout(lampHoverTimer); });
+    p.addEventListener('mouseleave', function () {
+      clearTimeout(lampHoverTimer);
+      lampHoverTimer = setTimeout(closeLampPanel, 160);
+    });
+    /* 点 +N / 触发器 = 固定打开（触屏没有 hover）；点 .lamp 仍走原来的开关逻辑 */
+    dock.addEventListener('click', function (e) {
+      var t = e.target.closest ? e.target.closest('[data-lamp-open]') : null;
+      if (!t) return;
+      e.stopPropagation();
+      if (lampPanelIsOpen()) closeLampPanel(); else openLampPanel();
+    });
+    /* 面板里点谁就切谁（三种形态共用） */
+    p.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-id]') : null;
+      if (!b) return;
+      toggleStation(b.getAttribute('data-id'));
+    });
+    p.addEventListener('contextmenu', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-id]') : null;
+      if (!b) return;
+      e.preventDefault();
+      var id = b.getAttribute('data-id');
+      if (ST_SET.length === 1 && ST_SET[0] === id) return;
+      ST_SET = [id];
+      applyStationSet();
+    });
+    document.addEventListener('click', function (e) {
+      if (!lampPanelIsOpen()) return;
+      if (p.contains(e.target) || dock.contains(e.target)) return;
+      closeLampPanel();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeLampPanel();
+    });
+    window.addEventListener('scroll', closeLampPanel, { passive: true });
+    window.addEventListener('resize', closeLampPanel);
   }
 
   function toggleStation(id) {
@@ -9614,6 +9819,7 @@
       }
       renderLamps();
       renderMixedNote();
+      bindLampPanel();
       box.addEventListener('click', function (e) {
         var b = e.target && e.target.closest ? e.target.closest('.lamp') : null;
         if (b) toggleStation(b.getAttribute('data-id'));       // 左键：加入 / 退出混合

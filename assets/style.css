@@ -3623,6 +3623,94 @@ body.view-broadcast #btn-quality { display: none; }
               inset 0 -2px 6px rgba(0, 0, 0, .55),
               0 2px 8px rgba(0, 0, 0, .35);
 }
+/* ---- 主播选择：收起态 / 浮层（v1.9.25） ----
+   超过 8 位时顶栏只留 3 个灯 + 「+N」；三种形态的完整列表都在固定定位的浮层里，
+   不占顶栏宽度、不挤压其它按钮。 */
+.lamp-dock { display: inline-flex; align-items: center; flex: none; }
+.station-lamps.is-plain {
+  border: 0; background: none; box-shadow: none; padding: 0;
+}
+.lamp-more {
+  appearance: none; margin-left: 2px; padding: 2px 7px;
+  border: 1px dashed var(--line-2); border-radius: 999px;
+  background: none; color: var(--muted);
+  font: inherit; font-size: 11px; line-height: 16px;
+  cursor: pointer; white-space: nowrap;
+}
+.lamp-more:hover { color: var(--text); border-color: var(--red); }
+.lamp-trigger {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: rgba(var(--ink), .04);
+  color: var(--text-2); font: inherit; font-size: 12px;
+  cursor: pointer; white-space: nowrap;
+}
+.lamp-trigger:hover { border-color: var(--line-2); color: var(--text); }
+.lamp-trigger b { font-weight: 500; font-variant-numeric: tabular-nums; }
+.lt-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--lc, #8a8a95); flex: none;
+}
+.lt-caret { font-size: 10px; color: var(--muted); }
+.lamp-panel {
+  position: fixed; top: 0; right: 14px; z-index: 300;
+  width: min(92vw, 420px); max-height: 62vh; overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--line-2); border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .38);
+}
+.lamp-panel[hidden] { display: none; }
+.lamp-panel.is-list { width: min(92vw, 268px); }
+.lamp-panel.is-cards { width: min(92vw, 380px); }
+.lp-title { margin: 0 2px 8px; font-size: 11.5px; color: var(--muted-2); }
+.lp-lamps { display: flex; flex-wrap: wrap; gap: 10px; padding: 2px; }
+.lamp-panel .lamp { width: 18px; height: 18px; }
+.lp-list { display: flex; flex-direction: column; gap: 2px; }
+.lp-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 8px; border: 0; border-radius: 8px;
+  background: none; color: var(--text-2);
+  font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.lp-row:hover { background: rgba(var(--ink), .08); color: var(--text); }
+.lp-row.on { color: var(--text); }
+.lp-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--lc, #8a8a95); flex: none;
+}
+.lp-name {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lp-badge {
+  flex: none; padding: 0 4px;
+  font-size: 10px; color: var(--muted-2);
+  border: 1px solid var(--line); border-radius: 5px;
+}
+.lp-check { flex: none; width: 14px; text-align: center; color: var(--red); font-size: 12px; }
+.lp-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.lp-card {
+  position: relative; display: flex; align-items: center; gap: 8px;
+  min-width: 0; padding: 8px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel-2); color: var(--text-2);
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+}
+.lp-card:hover { border-color: var(--line-2); color: var(--text); }
+.lp-card.on { border-color: var(--red); color: var(--text); }
+.lp-ava {
+  flex: none; width: 28px; height: 28px; border-radius: 50%;
+  overflow: hidden; display: grid; place-items: center; background: var(--panel);
+}
+.lp-ava-img { width: 100%; height: 100%; object-fit: cover; }
+.lp-card b {
+  min-width: 0; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lp-card em { flex: none; font-style: normal; font-size: 10px; color: var(--muted-2); }
+.lp-card .lp-check { position: absolute; right: 6px; top: 5px; width: auto; }
+
 .lamp {
   width: 14px;
   height: 14px;
@@ -4003,7 +4091,9 @@ body.view-multi .col-right { display: none; }
 .ms-btns .ms-btn { opacity: .92; }
 .ms-btns .ms-btn:hover { opacity: 1; }
 .ms-name {
-  font-weight: 600; flex: 0 0 auto;
+  /* 可收缩：名字是这里唯一「可以变短」的东西。原来 flex:0 0 auto，
+     格子一窄它就把右边的功能键顶出格子的 overflow:hidden（缩放 100% 以上必现）。 */
+  font-weight: 600; flex: 0 1 auto; min-width: 0;
   max-width: 60%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -4032,6 +4122,31 @@ body.view-multi .col-right { display: none; }
 }
 .ms-btn:hover { background: rgba(var(--ink), .16); }
 .ms-btn.on { background: var(--red); border-color: var(--red); color: var(--on-red); }
+/* ---- 格子功能栏按「格子实际宽度」逐级让位（v1.9.25） ----
+   浏览器缩放 >100% 时，1440 的窗口只剩 1150 个 CSS px，多路时每格可能只有 200 出头；
+   原来那一排「色标 + 名字 + 状态 + 画质 + 音量 + 4 个按钮」宽 400+ px，
+   超出部分被 .ms-cell 的 overflow:hidden 直接裁掉 —— 表现就是「功能键被挤没了、点不到」。
+   让位顺序：色标 → 状态文字 → 音量条 → 画质收窄 → 名字收窄。
+   独奏 / 全屏 / 聚焦 / 原直播间 四个键**任何宽度都不隐藏**。 */
+@container (max-width: 440px) {
+  .ms-bar { gap: 6px; padding: 6px 8px; }
+  .ms-tag { display: none; }
+}
+@container (max-width: 370px) {
+  .ms-state { display: none; }
+  .ms-vol { width: 46px; }
+}
+@container (max-width: 310px) {
+  .ms-vol { display: none; }
+  .ms-btns { gap: 4px; }
+  .ms-btn { padding: 3px 7px; }
+  .ms-qn { max-width: 64px; }
+}
+@container (max-width: 250px) {
+  .ms-name { max-width: 34%; }
+  .ms-qn { max-width: 54px; font-size: 10px; }
+  .ms-bar { padding: 5px 6px; gap: 5px; }
+}
 /* 底栏的「打开原直播间」是个 <a>：外观走 .ms-btn，去掉下划线并垂直居中 */
 .ms-bar a.ms-btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
 

@@ -242,8 +242,10 @@ window.__BOOT_T0 = Date.now();
     </div>
     <!-- 四色灯：点亮谁就看谁，可以同时点亮多人（混合播放几人的内容）。
          主站默认点亮，不允许全部熄灭。 -->
-    <div class="station-lamps" id="station-lamps" role="group"
-         title="点亮谁就看谁的内容，可同时点亮多位（混合播放）"></div>
+    <div class="lamp-dock" id="lamp-dock">
+      <div class="station-lamps" id="station-lamps" role="group"
+           title="点亮谁就看谁的内容，可同时点亮多位（混合播放）"></div>
+    </div>
     <!-- B 站账号：未登录显示入口，已登录显示头像 + 名字（点开是账号状态窗口）。
          播放器内那枚「登录」在录播姬/DD 这类把播放器缩到 1px 的板块点不到，所以这里必须有。 -->
     <button class="ghost-btn tb-login" id="tb-login" type="button" title="登录 B 站">
@@ -289,6 +291,10 @@ window.__BOOT_T0 = Date.now();
 <!-- 窄屏折叠菜单：放在 header 外面 + 固定定位。放在 .tb-right 里时，两行布局下
      标签条（flex order:3）会按绘制顺序把它盖住，elementFromPoint 命中的是标签，
      菜单点不动（实测）。固定定位只跟着按钮的坐标走，不受任何 flex 排布影响。 -->
+<!-- 顶栏主播选择面板（固定定位，挂在 header 外）：三种形态共用这一个容器。
+     放在顶栏里会被标签条按绘制顺序盖住（同「更多」菜单）。 -->
+<div class="lamp-panel" id="lamp-panel" hidden></div>
+
 <div class="tb-menu" id="tb-menu" role="menu" aria-label="更多操作" hidden>
   <button class="tb-menu-i" type="button" role="menuitem" data-act="space">打开主播 B 站空间</button>
   <button class="tb-menu-i" type="button" role="menuitem" data-act="lang">界面语言：简体中文</button>
@@ -1132,6 +1138,16 @@ window.__BOOT_T0 = Date.now();
         <label class="seg-auto">
           <input type="checkbox" id="theme-light"> 浅色模式（不勾就是默认的黑红配色）
         </label>
+        <label class="seg-auto" style="margin-top:10px">主播选择方式
+          <select id="set-lamp-mode" title="顶栏那一排主播灯怎么显示">
+            <option value="hover">收起悬浮展开（默认）</option>
+            <option value="select">下拉式选单</option>
+            <option value="popover">悬浮二级窗口</option>
+          </select>
+        </label>
+        <p class="live-note"><b>收起悬浮展开</b>：主播超过 8 位时顶栏只留前三个灯和一个「+N」，
+          鼠标移上去弹出完整灯条；<b>下拉式选单</b>：点开一个纵向名单，按名字选；
+          <b>悬浮二级窗口</b>：悬停弹出带主播名的卡片墙。三种都不会挤压顶栏其它按钮。</p>
         <p class="live-note">浅色下主色会压深一档，主播各自的板块色也按亮度压深，
           免得小字在白底上发飘。选择只记在本机浏览器里。</p>
       </div>

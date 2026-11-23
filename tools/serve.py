@@ -1166,7 +1166,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.24"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.25"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
@@ -4701,7 +4701,12 @@ def _fill_live_stream(out, room, qn):
 #    再往上只会把风控窗口撑长（代价比省下的几百毫秒大得多）。
 FOLLOWING_API = "https://api.bilibili.com/x/relation/followings"
 FOLLOW_PAGE = 50                 # 每页条数（接口上限）
-FOLLOW_PAGE_MAX = 60             # 最多翻 60 页 = 3000 个关注（防呆上限）
+# 防跑飞上限，不是业务上限：实际页数由第一页返回的 total 决定。
+# 60 页（3000）曾经是硬截断，4837 个关注里有 1837 人从来没被查过 ——
+# 在播人数天生少算一截，还查不出原因（只在日志里写「3000 人」）。
+# 400 页 = 20000 个关注，正常账号远远够用。
+FOLLOW_PAGE_MAX = 400
+FOLLOW_PAGE_RETRY = 2            # 单页失败重试次数（0.6s / 1.2s 退避）
 # 开播状态一次带多少个 uid。对照实验（2026-10-13，同一批 150 个 uid）：
 # 3×50 与 1×150 返回的条目、在播集合**完全一致** → 放大批次不丢人，
 # 但请求数从 32 降到 11（1588 个关注）。⚠️ 别只看「返回条数 < 请求条数」就
@@ -4750,22 +4755,52 @@ def _follow_json(url, referer):
 
 
 def _follow_page(uid, pn):
-    """翻一页，返回 uid 列表；取不到返回 None（由调用方判断是整体失败还是留旧数据）。"""
-    try:
-        d = _follow_json("%s?vmid=%s&pn=%d&ps=%d" % (FOLLOWING_API, uid, pn, FOLLOW_PAGE),
-                         REFERER)
-    except Exception as e:
-        print("[follow] 第 %d 页取失败：%s" % (pn, e))
-        return None
-    if d.get("code") != 0:
-        print("[follow] 第 %d 页 code=%s %s" % (pn, d.get("code"), d.get("message")))
-        return None
-    return [str(u.get("mid")) for u in ((d.get("data") or {}).get("list") or [])
-            if u.get("mid")]
+    """翻一页，返回 uid 列表；取不到返回 None。
+
+    单页失败先退避重试（网络抖动 / 瞬时 412）。`code != 0` 不重试 ——
+    那是账号级风控或参数错，重试只会把风控窗口撑长。
+    """
+    for attempt in range(FOLLOW_PAGE_RETRY + 1):
+        try:
+            d = _follow_json("%s?vmid=%s&pn=%d&ps=%d" % (FOLLOWING_API, uid, pn, FOLLOW_PAGE),
+                             REFERER)
+        except Exception as e:
+            print("[follow] 第 %d 页取失败（第 %d 次）：%s" % (pn, attempt + 1, e))
+            d = None
+        if d is not None:
+            if d.get("code") != 0:
+                print("[follow] 第 %d 页 code=%s %s" % (pn, d.get("code"), d.get("message")))
+                return None
+            return [str(u.get("mid")) for u in ((d.get("data") or {}).get("list") or [])
+                    if u.get("mid")]
+        if attempt < FOLLOW_PAGE_RETRY:
+            time.sleep(0.6 * (attempt + 1))
+    return None
+
+
+def _dedupe_uids(uids):
+    """按出现顺序去重。
+
+    翻页期间关注关系会变（用户自己取消/新增关注），同一个人可能出现在两页里；
+    不去重会让他在「在播名单」里出现两次，左栏就会重复。
+    """
+    seen = set()
+    out = []
+    for u in uids:
+        u = str(u or "").strip()
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+    return out
 
 
 def _following_uids():
-    """关注的全部 uid（半小时缓存；翻页并发跑）。"""
+    """关注的全部 uid（半小时缓存；翻页并发跑）。
+
+    页数由第一页的 `total` 决定，不再写死上限；单页失败会重试，
+    仍失败则整体抛错（缺页 = 名单不完整，宁可沿用旧数据）。
+    """
     now = time.time()
     if FOLLOW_CACHE["uids"] and now - FOLLOW_CACHE["uids_at"] < FOLLOW_UIDS_TTL:
         return FOLLOW_CACHE["uids"]
@@ -4776,9 +4811,15 @@ def _following_uids():
     if first.get("code") != 0:
         raise RuntimeError("关注列表 code=%s %s" % (first.get("code"), first.get("message")))
     data = first.get("data") or {}
+    total = int(data.get("total") or 0)
     out = [str(u.get("mid")) for u in (data.get("list") or []) if u.get("mid")]
-    pages = min(max(1, (int(data.get("total") or 0) + FOLLOW_PAGE - 1) // FOLLOW_PAGE),
-                FOLLOW_PAGE_MAX)
+    pages = min(max(1, (total + FOLLOW_PAGE - 1) // FOLLOW_PAGE), FOLLOW_PAGE_MAX)
+    if total <= 0:
+        # 0 个关注是合法状态，不是错误
+        FOLLOW_CACHE["uids"] = []
+        FOLLOW_CACHE["uids_at"] = now
+        print("[follow] 关注名单为空")
+        return []
     if pages > 1:
         todo = list(range(2, pages + 1))
         with concurrent.futures.ThreadPoolExecutor(
@@ -4791,10 +4832,14 @@ def _following_uids():
             raise RuntimeError("关注列表有 %d/%d 页取失败（%s…）"
                                % (len(failed), pages, ", ".join(str(p) for p in failed[:5])))
         for g in got:
-            out.extend(g)
+            out.extend(g or [])
+    raw_n = len(out)
+    out = _dedupe_uids(out)
     FOLLOW_CACHE["uids"] = out
     FOLLOW_CACHE["uids_at"] = now
-    print("[follow] 关注名单 %d 人（%d 页，并发 %d）" % (len(out), pages, FOLLOW_WORKERS))
+    print("[follow] 关注名单 %d 人（total=%d、%d 页、并发 %d%s）"
+          % (len(out), total, pages, FOLLOW_WORKERS,
+             "、去重 %d 条" % (raw_n - len(out)) if raw_n != len(out) else ""))
     return out
 
 
