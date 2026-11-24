@@ -1168,7 +1168,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.28"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.29"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
@@ -7421,6 +7421,120 @@ def _close_live_stream(stream, proc):
             pass
 
 
+class _FlvTimeline:
+    """把 FLV 媒体时间戳改成「从 0 开始、跨断点连续」。
+
+    背景（2026-11-24 实测 + issue 报告）：部分房间的媒体 tag 直接带绝对 PTS
+    （HLS→ffmpeg 兜底时 video 首帧 6,308,366 ms；直连 FLV 也抓到尾随 7,125,199 ms 的跳变）。
+    mpegts.js 以第一个时间戳为基准，遇到这种前跳会判成时间轴断裂：轻则数据被塞进
+    播不到的区间（currentTime 不再前进，看门狗报「画面已停止」），重则直接抛错
+    （「连接中断」）。监控室多路同时中招，就是「全都用不了」。
+
+    这里只改 tag 头的 4 字节时间戳，负载原样转发；音视频各自的基准只在
+    「首个媒体帧」和「断点」时调整，正常流的 A/V 相对关系不变。
+    """
+    MAX_STEP = 5000      # 同一轨相邻 tag 正常不会超过 5 秒
+    FIX_STEP = 40        # 断点后补的一小步，让时间轴继续前进
+
+    def __init__(self, label=""):
+        self.label = label
+        self.buf = b""
+        self.header_done = False
+        self.passthrough = False
+        self.base = None
+        self.offset = {}       # tag 类型 -> (raw - out)
+        self.last_raw = {}
+        self.last_out = {}
+        self.warned = False
+
+    def _fix(self, typ, tag):
+        ts = int.from_bytes(tag[4:7], "big") | (tag[7] << 24)
+        size = len(tag) - 15
+        # 配置帧没有实际播放时间：AVC sequence header / AAC sequence header
+        config = False
+        if typ == 9 and size >= 1 and tag[11] == 0:
+            config = True
+        elif typ == 8 and size >= 2 and (tag[11] >> 4) == 10 and tag[12] == 0:
+            config = True
+        if config:
+            out = self.last_out.get(typ, 0)
+        elif self.base is None:
+            self.base = ts
+            self.offset[typ] = ts
+            out = 0
+        elif typ not in self.offset:
+            # 另一条轨的第一个媒体帧：和基准差得远就按「两轨基准不一致」处理
+            if abs(ts - self.base) > self.MAX_STEP:
+                self.offset[typ] = ts
+                out = 0
+                self._warn(typ, ts, out, "音视频基准不一致")
+            else:
+                self.offset[typ] = self.base
+                out = ts - self.base
+        else:
+            delta = ts - self.last_raw.get(typ, ts)
+            if abs(delta) > self.MAX_STEP:
+                out = self.last_out.get(typ, 0) + self.FIX_STEP
+                self.offset[typ] = ts - out
+                self._warn(typ, ts, out, "时间戳跳变 %d ms" % delta)
+            else:
+                out = ts - self.offset[typ]
+                if out < 0:
+                    out = self.last_out.get(typ, 0) + 1
+        self.last_raw[typ] = ts
+        self.last_out[typ] = out
+        out &= 0xFFFFFFFF
+        tag[4:7] = (out & 0xFFFFFF).to_bytes(3, "big")
+        tag[7] = (out >> 24) & 0xFF
+
+    def _warn(self, typ, ts, out, why):
+        if self.warned:
+            return
+        self.warned = True
+        print("[play] %s 时间戳已归一化：type=%d raw=%d → %d（%s）"
+              % (self.label or "直播流", typ, ts, out, why))
+
+    def feed(self, chunk):
+        if self.passthrough:
+            return chunk
+        self.buf += chunk
+        out = []
+        while True:
+            if not self.header_done:
+                if len(self.buf) < 9:
+                    break
+                if self.buf[:3] != b"FLV":
+                    self.passthrough = True      # 不是 FLV：原样放过，别把流弄坏
+                    out.append(self.buf)
+                    self.buf = b""
+                    break
+                need = int.from_bytes(self.buf[5:9], "big") + 4
+                if len(self.buf) < need:
+                    break
+                out.append(self.buf[:need])
+                self.buf = self.buf[need:]
+                self.header_done = True
+                continue
+            if len(self.buf) < 11:
+                break
+            size = int.from_bytes(self.buf[1:4], "big")
+            total = 11 + size + 4
+            if total > 8 * 1024 * 1024:          # 明显不是正常 tag：放弃改写
+                self.passthrough = True
+                out.append(self.buf)
+                self.buf = b""
+                break
+            if len(self.buf) < total:
+                break
+            tag = bytearray(self.buf[:total])
+            typ = tag[0]
+            if typ in (8, 9):
+                self._fix(typ, tag)
+            out.append(bytes(tag))
+            self.buf = self.buf[total:]
+        return b"".join(out)
+
+
 def api_live_stream(handler, query):
     """转发直播流。直播是持续流，不支持 Range；断开由客户端决定（关页面 / 切走）。
 
@@ -7435,12 +7549,15 @@ def api_live_stream(handler, query):
     handler.send_response(200)
     handler.send_header("Content-Type", "video/x-flv")
     handler.end_headers()
+    tl = _FlvTimeline("room %s/http" % room)
     try:
         while True:
             chunk = stream.read1(WS_CHUNK)
             if not chunk:
                 break
-            handler.wfile.write(chunk)
+            data = tl.feed(chunk)
+            if data:
+                handler.wfile.write(data)
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
         pass                       # 观众关页面 / 切走，属正常断开
     finally:
@@ -7567,6 +7684,7 @@ def api_live_ws(handler, query):
             pass
         print("[play] ws 房间 %s 取流失败：%s" % (room, err))
         return
+    tl = _FlvTimeline("room %s/ws" % room)
     try:
         while True:
             if ws_client_closed(handler):
@@ -7584,7 +7702,9 @@ def api_live_ws(handler, query):
             chunk = stream.read1(WS_CHUNK)
             if not chunk:
                 break
-            handler.wfile.write(ws_frame(chunk))
+            data = tl.feed(chunk)
+            if data:
+                handler.wfile.write(ws_frame(data))
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
         pass                       # 观众关页面 / 取消勾选，属正常断开
     finally:
