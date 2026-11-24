@@ -8860,7 +8860,11 @@
     try {
       if (v === undefined) return Number(localStorage.getItem(UPD_KEY) || 0);
       if (v) localStorage.setItem(UPD_KEY, String(v));
-      else localStorage.removeItem(UPD_KEY);
+      else {
+        localStorage.removeItem(UPD_KEY);
+        // 「恢复更新提示」要连本会话的「稍后」一起清掉，否则点了恢复仍不弹
+        try { sessionStorage.removeItem(UPD_DISMISS_KEY); } catch (e) { /* 隐私模式 */ }
+      }
     } catch (e) { /* 隐私模式：不存偏好，本次会话仍生效 */ }
     return 0;
   }
@@ -8883,7 +8887,10 @@
         + ' 之后恢复。';
     } else txt = '更新提示：开启（启动时检查到新版会弹提示）。';
     if (el0) el0.textContent = txt;
-    if (row) row.hidden = !(v === -1 || v > 0);
+    var never = document.getElementById('btn-update-never');
+    var reset = document.getElementById('btn-update-reset');
+    if (never) never.hidden = (v === -1);
+    if (reset) reset.hidden = !(v === -1 || v > 0);
     var a = document.getElementById('about-upd-pref');
     var ar = document.getElementById('about-upd-reset');
     if (a) a.textContent = txt;
@@ -8928,20 +8935,93 @@
     var m = document.getElementById('upd-mask');
     if (m) m.hidden = true;
   }
+  /* 「稍后」的作用域是**本会话 + 本版本**：sessionStorage 关掉标签页就清，
+     下次启动同一版本仍会提示；手动检查更新不受它影响。 */
+  var UPD_DISMISS_KEY = 'xl_upd_dismissed';
+
+  function updDismissedInSession(v) {
+    try { return !!v && sessionStorage.getItem(UPD_DISMISS_KEY) === String(v); }
+    catch (e) { return false; }
+  }
+  function updDismissInSession(v) {
+    try {
+      if (v) sessionStorage.setItem(UPD_DISMISS_KEY, String(v));
+    } catch (e) { /* 隐私模式：本次页面仍按「不重复弹」处理不了，但不影响其它逻辑 */ }
+  }
+
+  function updFmtDate(s) {
+    var d = new Date(s);
+    if (!s || isNaN(d.getTime())) return String(s || '').slice(0, 16);
+    function p(n) { return String(n).padStart(2, '0'); }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+      + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  /* Release 正文是 Markdown。这里只认标题、列表、**粗体**、`代码`，
+     先 esc 再套标签 —— 不能让上游 HTML 直接进 DOM。 */
+  function updNotesHtml(text) {
+    var out = [], list = [];
+    function flush() {
+      if (list.length) { out.push('<ul>' + list.join('') + '</ul>'); list = []; }
+    }
+    function inline(s) {
+      return esc(s).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>');
+    }
+    String(text).replace(/\r\n?/g, '\n').split('\n').slice(0, 300).forEach(function (raw) {
+      var line = raw.replace(/\s+$/, '');
+      if (!line.trim()) { flush(); return; }
+      var h = line.match(/^\s*#{1,4}\s+(.*)$/);
+      if (h) { flush(); out.push('<p class="upd-h3">' + inline(h[1]) + '</p>'); return; }
+      var li = line.match(/^\s*[-*+]\s+(.*)$/);
+      if (li) { list.push('<li>' + inline(li[1]) + '</li>'); return; }
+      flush();
+      out.push('<p>' + inline(line) + '</p>');
+    });
+    flush();
+    return out.join('');
+  }
+
+  function updRenderAnnounce(d) {
+    var v = document.getElementById('upd-ver');
+    if (v) v.textContent = 'v' + d.latest;
+    var cur = document.getElementById('upd-cur');
+    if (cur) cur.textContent = '当前 v' + (d.current || '—') + ' → v' + d.latest;
+    var pub = document.getElementById('upd-pub');
+    if (pub) {
+      pub.textContent = d.published
+        ? ('发布于 ' + updFmtDate(d.published))
+        : '发布时间未提供';
+    }
+    var notes = document.getElementById('upd-notes');
+    if (notes) {
+      var txt = String(d.notes || '').trim();
+      notes.innerHTML = txt
+        ? updNotesHtml(txt)
+        : '<p class="upd-empty">公告内容加载失败：版本信息已经取到，但更新说明暂时拿不到。'
+          + '可以照常「立即更新」，或打开「查看完整公告」。</p>';
+      notes.scrollTop = 0;
+    }
+  }
+
   function updShow(d, force) {
     /* force=true 只用于用户主动点「检查更新 / 更新」：
        「稍后」「24 小时内」「永久」抑制的是启动时的**自动弹出**，不拦手动请求。 */
-    if ((!force && updSuppressed()) || updBusy) return;
-    updInfo = d;
+    if (!d || !d.available) return;
+    if (updBusy) return;
+    if (!force && (updSuppressed() || updDismissedInSession(d.latest))) return;
     var m = document.getElementById('upd-mask');
     if (!m) return;
-    var v = document.getElementById('upd-ver');
-    if (v) v.textContent = 'v' + d.latest;
-    var n = document.getElementById('upd-note');
-    if (n) n.textContent = '当前 v' + d.current + ' → v' + d.latest
-      + '。' + (d.notes ? d.notes.split('\n')[0].slice(0, 80) : '有新版本可用。');
-    var s = document.getElementById('upd-state');
-    if (s) s.textContent = '';
+    /* 重复触发：同一个版本已经在展示就只刷新内容，不重置状态、也不重复叠层 */
+    if (!m.hidden && updInfo && updInfo.latest === d.latest) {
+      updInfo = d;
+      updRenderAnnounce(d);
+      return;
+    }
+    updInfo = d;
+    updRenderAnnounce(d);
+    var st = document.getElementById('upd-state');
+    if (st) st.textContent = '';
     m.hidden = false;
   }
 
@@ -8960,10 +9040,14 @@
         updSetState('发现新版本 v' + d.latest + '。');
         if (manual) updShow(d, true);
         else updShow(d, false);
-      } else if (manual) {
-        /* 用 current 而不是 GitHub 上的 latest：本地试装包可能比已发布版本还新，
-           那时说「已是最新（v 旧版本号）」会让人以为检查错了。 */
-        updSetState('已是最新版本（当前 v' + (d.current || d.latest) + '）。');
+      } else {
+        // 没有新版：把可能还开着的公告收掉，避免停在过期的提示上
+        updHide();
+        if (manual) {
+          /* 用 current 而不是 GitHub 上的 latest：本地试装包可能比已发布版本还新，
+             那时说「已是最新（v 旧版本号）」会让人以为检查错了。 */
+          updSetState('已是最新版本（当前 v' + (d.current || d.latest) + '）。');
+        }
       }
       return d;
     }).catch(function () {
@@ -9342,16 +9426,23 @@
       updRenderPrefs();
       updSetState('已恢复启动时的更新提示。');
     });
+    var never = document.getElementById('btn-update-never');
+    if (never) never.addEventListener('click', function () {
+      updSnooze(-1);
+      updRenderPrefs();
+      updSetState('已关闭启动时的更新提示；手动「检查更新」仍会给出结果。');
+    });
     updRenderPrefs();
     updFillVersion();
     var go = document.getElementById('upd-go');
     if (go) go.addEventListener('click', updDownload);
-    [[('upd-later'), 0], [('upd-24h'), 24 * 3600 * 1000], [('upd-never'), -1]]
+    [[('upd-later'), 0], [('upd-24h'), 24 * 3600 * 1000]]
       .forEach(function (pair) {
         var b = document.getElementById(pair[0]);
         if (!b) return;
         b.addEventListener('click', function () {
           if (pair[1]) updSnooze(pair[1] === -1 ? -1 : Date.now() + pair[1]);
+          else updDismissInSession(updInfo && updInfo.latest);   // 「稍后」= 本会话不再自动弹
           updHide();
           updRenderPrefs();
           updMarkNew(updInfo);

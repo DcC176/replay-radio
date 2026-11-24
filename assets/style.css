@@ -6619,7 +6619,6 @@ body.view-dd .views { grid-column: 1 / -1; }
 .upd-note { margin: 10px 0 0; font-size: var(--fs-body); color: var(--text); line-height: 1.6; }
 .upd-state { margin: 8px 0 0; font-size: var(--fs-fine); color: var(--red); min-height: 1em; }
 .upd-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
-.upd-tip { margin: 14px 0 0; font-size: var(--fs-fine); color: var(--muted-2); line-height: 1.6; }
 
 /* ---- 直播间表情面板（v1.9.26） ----
    固定在输入框上方弹出：弹幕栏只有 300 出头，面板 468 宽必须浮起来，
@@ -6756,3 +6755,38 @@ body.view-dd .views { grid-column: 1 / -1; }
 }
 .fb-shot-x:hover { background: var(--red); }
 #fb-upload + .live-note { display: inline; }
+
+/* ---- 更新公告弹窗（v1.9.30）：版本 / 发布时间 / 更新内容 / 操作 ---- */
+.upd-card {
+  max-height: calc(100vh - 40px);
+  display: flex; flex-direction: column;
+  width: min(560px, 100%);
+}
+.upd-meta {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin: 8px 0 0; font-size: var(--fs-fine); color: var(--muted);
+}
+.upd-ann {
+  margin-top: 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel-2); overflow: hidden;
+  display: flex; flex-direction: column; min-height: 0;
+}
+.upd-ann-h {
+  flex: none; padding: 7px 12px;
+  font-size: 12px; color: var(--muted-2);
+  border-bottom: 1px solid var(--line);
+}
+.upd-notes {
+  max-height: min(38vh, 280px); overflow: auto;
+  padding: 10px 12px;
+  font-size: 12.5px; line-height: 1.65; color: var(--text-2);
+}
+.upd-notes p { margin: 0 0 6px; }
+.upd-notes ul { margin: 0 0 8px; padding-left: 18px; }
+.upd-notes li { margin: 2px 0; }
+.upd-notes .upd-h3 { margin: 10px 0 6px; color: var(--text); font-weight: 600; }
+.upd-notes code {
+  padding: 0 4px; border-radius: 4px;
+  background: rgba(var(--ink), .09); font-size: 11.5px;
+}
+.upd-notes .upd-empty { color: var(--muted); }

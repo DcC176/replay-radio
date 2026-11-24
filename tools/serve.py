@@ -1168,7 +1168,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.29"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.30"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
@@ -1208,12 +1208,18 @@ def api_update_check():
         exe = next((a for a in (d.get("assets") or [])
                     if str(a.get("name") or "").lower().endswith(".exe")), None)
         if rel and exe:
+            body = str(d.get("body") or "").replace("\r\n", "\n").strip()
             data = {"version": rel.lstrip("vV"),
                     "url": exe.get("browser_download_url") or "",
                     "name": exe.get("name") or "",
                     "size": int(exe.get("size") or 0),
                     "sha256": str((exe.get("digest") or "").replace("sha256:", "")),
-                    "notes": (d.get("body") or "")[:600],
+                    # 弹窗要展示完整公告：600 字经常正好截在关键条目上，放宽到 6000
+                    "notes": body[:6000],
+                    "notes_ok": bool(body),
+                    "title": d.get("name") or rel,
+                    "page": d.get("html_url") or
+                            ("https://github.com/%s/releases/latest" % UPDATE_REPO),
                     "published": d.get("published_at") or ""}
             src = "github"
     except Exception:
@@ -1222,11 +1228,16 @@ def api_update_check():
         try:
             d = _update_fetch_json(UPDATE_SITE + "?t=%d" % int(time.time()))
             if d.get("version"):
+                notes = str(d.get("notes") or "").replace("\r\n", "\n").strip()
                 data = {"version": str(d["version"]).lstrip("vV"),
                         "url": d.get("url") or "", "name": d.get("name") or "",
                         "size": int(d.get("size") or 0),
                         "sha256": str(d.get("sha256") or ""),
-                        "notes": str(d.get("notes") or "")[:600],
+                        "notes": notes[:6000],
+                        "notes_ok": bool(notes),
+                        "title": str(d.get("title") or d["version"]),
+                        "page": str(d.get("page") or
+                                     ("https://github.com/%s/releases/latest" % UPDATE_REPO)),
                         "published": str(d.get("published") or "")}
                 src = "site"
         except Exception:
