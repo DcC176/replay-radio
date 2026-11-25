@@ -501,10 +501,24 @@ window.__BOOT_T0 = Date.now();
             <button class="mchat-x" id="mchat-close" type="button" title="返回主播列表">×</button>
           </div>
           <div class="mchat-list" id="mchat-list"></div>
-          <div class="mchat-send">
-            <input id="mchat-input" maxlength="30" placeholder="发条弹幕，30 字内"
-                   title="最多 30 字">
-            <button class="btn small primary" id="mchat-send" type="button">发送</button>
+          <!-- 发送区与直播间「发弹幕」卡片同一份结构与交互（data-cs-* 由 app.js 绑定） -->
+          <div class="mchat-send" id="mchat-sender">
+            <div class="live-send">
+              <button class="live-emoji-btn" data-cs-emoji type="button"
+                      aria-label="表情" aria-haspopup="dialog" aria-expanded="false"
+                      title="表情">☺</button>
+              <input data-cs-input maxlength="30" placeholder="发条弹幕，30 字内"
+                     title="最多 30 字">
+              <button class="btn small primary" data-cs-send type="button">发送</button>
+              <button class="btn small ghost" data-cs-save type="button"
+                      title="把输入框里的内容存为常用">＋</button>
+            </div>
+            <div class="quick-row" data-cs-quick hidden>
+              <span class="quick-label" data-cs-qlabel>常用</span>
+              <div class="quick-chips" data-cs-chips></div>
+              <button class="quick-edit" data-cs-qedit type="button" hidden>编辑</button>
+            </div>
+            <div class="live-result" data-cs-result></div>
           </div>
           <p class="mchat-note" id="mchat-note"></p>
         </aside>
@@ -518,26 +532,20 @@ window.__BOOT_T0 = Date.now();
 
     <section class="view" id="view-board">
       <div class="board-bar">
-        <span class="board-state" id="board-state">正在检测本机 Danmist…</span>
-        <button class="btn small ghost" id="board-retry" type="button">重新检测</button>
-        <button class="btn small primary" id="board-start" type="button" hidden>启动 Danmist</button>
-        <a class="btn small ghost" id="board-open" target="_blank" rel="noopener"
-           href="http://127.0.0.1:8373/" hidden>新窗口打开 ↗</a>
-      </div>
-      <div class="board-wrap">
-        <iframe id="board-frame" title="Danmist 弹幕板" hidden></iframe>
-        <div class="board-empty" id="board-empty">
-          <b>弹幕板需要本机运行 Danmist</b>
-          <span>Danmist 是一个独立的开源弹幕工作台（MIT）。本页负责探测并嵌入它，
-            不复制它的代码；在 Danmist 里配置好直播间即可看到弹幕、SC 与礼物。</span>
-          <span class="board-actions">
-            <button class="btn small primary" id="board-start2" type="button">尝试启动</button>
-            <a class="btn small ghost" id="board-download" target="_blank" rel="noopener"
-               href="https://github.com/xShadowMoon/Danmist/releases/latest">下载 / 安装</a>
-          </span>
-          <span class="board-hint">默认端口 8373。装好或解压后点「重新检测」；也可以直接在新窗口打开。</span>
+        <div class="board-add">
+          <input id="board-room" type="search" maxlength="200"
+                 placeholder="房间号 / live.bilibili.com/… / b23.tv 短链"
+                 title="输入直播间房间号或链接，回车即可添加">
+          <button class="btn small primary" id="board-add" type="button">添加房间</button>
         </div>
+        <button class="btn small ghost" id="board-pick-btn" type="button"
+                aria-expanded="false">从关注 / 我的板块选</button>
+        <button class="btn small ghost" id="board-clear" type="button">清空</button>
+        <span class="board-state" id="board-state">添加直播间后，这里按房间分列显示实时弹幕</span>
       </div>
+      <!-- 选房间浮层：我的板块 + 关注在播，点一下加到板子上 -->
+      <div class="board-pick" id="board-pick" hidden></div>
+      <div class="board-cols" id="board-cols"></div>
     </section>
 
     <section class="view" id="view-broadcast">
@@ -553,7 +561,10 @@ window.__BOOT_T0 = Date.now();
       </div>
 
       <div class="live-card live-chat-card">
-        <div class="live-card-h">实时弹幕<span class="live-wheel-note" id="live-chat-state"></span></div>
+        <div class="live-card-h">实时弹幕<span class="live-wheel-note" id="live-chat-state"></span>
+          <button class="btn small ghost live-chat-btn" id="live-chat-toggle" type="button"
+                  aria-pressed="true" title="开启 / 关闭实时弹幕（关掉后不再占用一条长连接）">关闭弹幕</button>
+        </div>
         <div class="live-chat" id="live-chat">
           <div class="chat-line chat-sys">连接弹幕服务器…</div>
         </div>
@@ -572,23 +583,24 @@ window.__BOOT_T0 = Date.now();
                  title="扫码登录会自动带上；也可以手动粘贴 Cookie 里的 bili_jct">
           <button class="btn small primary" id="live-jct-save">保存</button>
         </div>
+        <!-- 发送区：与监控室的弹幕面板共用同一份结构 / 交互（data-cs-* 由 app.js 绑定） -->
         <div class="live-send">
-          <button class="live-emoji-btn" id="live-emoji" type="button"
+          <button class="live-emoji-btn" id="live-emoji" data-cs-emoji type="button"
                   aria-label="表情" aria-haspopup="dialog" aria-expanded="false"
                   title="表情">☺</button>
-          <input id="live-msg" maxlength="30" placeholder="发条弹幕，30 字内"
+          <input id="live-msg" data-cs-input maxlength="30" placeholder="发条弹幕，30 字内"
                  title="最多 30 字">
-          <button class="btn small primary" id="live-send">发送</button>
-          <button class="btn small ghost" id="live-msg-save" type="button"
+          <button class="btn small primary" id="live-send" data-cs-send type="button">发送</button>
+          <button class="btn small ghost" id="live-msg-save" data-cs-save type="button"
                   title="把输入框里的内容存为常用">＋</button>
         </div>
         <!-- 常用弹幕：点一下直接发出去，不用再打字。编辑模式下点标签即删除。 -->
-        <div class="quick-row" id="quick-row" hidden>
-          <span class="quick-label" id="quick-label">常用</span>
-          <div class="quick-chips" id="quick-chips"></div>
-          <button class="quick-edit" id="quick-edit" type="button" hidden>编辑</button>
+        <div class="quick-row" id="quick-row" data-cs-quick hidden>
+          <span class="quick-label" id="quick-label" data-cs-qlabel>常用</span>
+          <div class="quick-chips" id="quick-chips" data-cs-chips></div>
+          <button class="quick-edit" id="quick-edit" data-cs-qedit type="button" hidden>编辑</button>
         </div>
-        <div class="live-result" id="live-result"></div>
+        <div class="live-result" id="live-result" data-cs-result></div>
       </div>
 
       <div class="live-wheel-pop" id="wheel-pop" hidden>

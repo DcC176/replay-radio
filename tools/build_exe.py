@@ -36,7 +36,7 @@ OUT = os.path.join(ROOT, "发布")
 # 这些 build_* 目录纯属缓存（不进包、不进版本库），可以随时手动删除。
 BUILD = os.path.join(ROOT, "build_%s" % time.strftime("%Y%m%d_%H%M%S"))
 
-APP_VERSION = "1.9.31"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
+APP_VERSION = "1.9.32"                     # 程序版本号，每版递增（平行版本从 1.0.0 起步）
 PYI_NAME = "ReplayRadio"                  # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
@@ -137,7 +137,9 @@ DATA_EXCLUDE_FILES = {"seg_state.json", ".main_data_owner", "follow_cache.json",
                       # 反馈上报的 webhook 配置（开发者自己的地址，不该发给用户）
                       "feedback.json",
                       # 手动添加的工会成员（开发机上的测试名单，不该跟着包发出去）
-                      "guilds_user.json"}
+                      "guilds_user.json",
+                      # vtbs.moe 主播库的 UID 缓存（近 1 万条，纯缓存，进包只会让包变大）
+                      "vtbs_cache.json"}
 # 归位标记的**变体**（本地测试会把它重命名成 .main_data_owner.stash 再挪回来）同样
 # 不能进包：包里只要出现「已经搬过家」的痕迹，真主站的历史分段就永远归不了位。
 DATA_EXCLUDE_PREFIX = (".main_data_owner",)

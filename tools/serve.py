@@ -1100,7 +1100,7 @@ STATIONLESS_OK = (
     # 监控室的推荐/工会/Danmist/按房间弹幕都不依赖注册表
     "/api/live/recommend", "/api/live/guilds", "/api/live/guild",
     "/api/live/chat/recent", "/api/live/chat/stop",
-    "/api/guild/add", "/api/danmist/status", "/api/danmist/start",
+    "/api/guild/add", "/api/live/guild/refresh", "/api/danmist/status", "/api/danmist/start",
     "/api/feedback/upload", "/api/feedback/reveal",
     "/api/live/ws",            # 同上：房间号由 URL 带，跟注册表无关
     # 歌单：导入的是任意 B 站投稿，与注册表里有没有主播无关（首批用户就是先导歌单）
@@ -1172,7 +1172,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.31"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.32"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
@@ -5688,7 +5688,10 @@ def _guilds_load():
 
 def api_guilds():
     g = _guilds_load()
-    return 200, {"guilds": [{"name": k, "count": len(v)}
+    meta = _guild_seed_meta()
+    return 200, {"guilds": [{"name": k, "count": len(v),
+                             "official": bool((meta.get(k) or {}).get("official_uid")),
+                             "source": (meta.get(k) or {}).get("source") or ""}
                             for k, v in sorted(g.items(), key=lambda kv: -len(kv[1]))]}
 
 
@@ -5726,6 +5729,171 @@ def api_guild_live(name):
             "warn": ("有 %d 批状态获取失败，结果可能不全" % failed) if failed else ""}
     _GUILD_CACHE[name] = {"at": now, "data": data}
     return 200, data
+
+
+VTBS_API = "https://api.vtbs.moe/v1/info"
+VTBS_CACHE = os.path.join(ROOT, "data", "vtbs_cache.json")   # 纯缓存，打包时排除
+_VTBS = {"at": 0.0, "uids": None}
+VTBS_TTL = 24 * 3600
+# 官方账号的关注列表里混着合作方 / 活动号 / 自己的频道号。vtbs.moe 只解决「是不是主播」，
+# 这里再按名字挡一层（实测 VR 官方 100 个关注里 22 个是这类账号）。
+GUILD_NOISE = re.compile(
+    r"(官方|频道|小助手|推广|发电|音乐机|园长|大会员|装扮|周边|赛事|工作室|"
+    r"火锅|肯德基|手游|数字直播|中心|Project|搬运|上校)", re.I)
+GUILD_NOISE_SUFFIX = re.compile(r"_?[Oo]fficial$")
+
+
+def _guild_seed_meta():
+    """seed 里每个工会的官方账号 UID / 来源说明（名册刷新要用）。"""
+    out = {}
+    try:
+        with open(GUILD_SEED, encoding="utf-8") as f:
+            seed = json.load(f)
+        for g in (seed.get("guilds") or []):
+            n = str(g.get("name") or "").strip()
+            if n:
+                out[n] = {"official_uid": str(g.get("official_uid") or ""),
+                          "source": str(g.get("source") or "")}
+    except Exception:
+        pass
+    return out
+
+
+def _vtbs_uids():
+    """vtbs.moe 的虚拟主播库（约 1 万条 UID）。抓一次缓存 6 小时。
+
+    用途：把「工会官方账号关注的人」里不是主播的那些（合作品牌、活动号、
+    自家频道）筛掉。抓不到就返回空集 —— 调用方按「不过滤」处理，宁可多收几个。
+    """
+    now = time.time()
+    if _VTBS["uids"] is not None and now - _VTBS["at"] < VTBS_TTL:
+        return _VTBS["uids"]
+    # 落盘缓存：这次接口实测要 ~19 秒（近 1 万条、2MB+），
+    # 每次点「同步名册」都等 20 秒没人受得了；TTL 24 小时，够新也不吵 B 站。
+    try:
+        with open(VTBS_CACHE, encoding="utf-8") as f:
+            c = json.load(f)
+        uids = {str(x) for x in (c.get("uids") or []) if str(x).isdigit()}
+        if uids and now - float(c.get("at") or 0) < VTBS_TTL:
+            _VTBS["at"], _VTBS["uids"] = float(c.get("at") or 0), uids
+            return uids
+    except Exception:
+        pass
+    try:
+        req = urllib.request.Request(VTBS_API, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=25) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        uids = {str(x.get("mid")) for x in data if str(x.get("mid") or "").isdigit()}
+        if uids:
+            _VTBS["at"], _VTBS["uids"] = now, uids
+            try:
+                os.makedirs(os.path.dirname(VTBS_CACHE), exist_ok=True)
+                with open(VTBS_CACHE, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump({"at": now, "uids": sorted(uids)}, f)
+            except OSError:
+                pass
+    except Exception as e:
+        print("[guild] vtbs.moe 名册取失败：%s" % e)
+    return _VTBS["uids"] or set()
+
+
+def _guild_followings(vmid, pages=4):
+    """读某个 B 站账号的「关注」列表（要登录态；官方账号是公开的）。
+
+    每页 50 条，最多 4 页 —— 再多请求容易招风控，而工会关注列表一般 <200 人。
+    """
+    out, seen = [], set()
+    for pn in range(1, pages + 1):
+        url = wbi_signed("https://api.bilibili.com/x/relation/followings",
+                         {"vmid": str(vmid), "pn": pn, "ps": 50, "order": "desc"})
+        d = bili_get(url, referer="https://space.bilibili.com/%s/relation/follow" % vmid)
+        if not isinstance(d, dict):
+            break
+        if d.get("code") != 0:
+            if pn == 1:
+                raise RuntimeError(d.get("message") or ("code %s" % d.get("code")))
+            break
+        lst = (d.get("data") or {}).get("list") or []
+        for m in lst:
+            uid = str(m.get("mid") or "")
+            if uid.isdigit() and uid not in seen:
+                seen.add(uid)
+                out.append({"name": str(m.get("uname") or "").strip() or ("UID " + uid),
+                            "uid": uid})
+        if len(lst) < 50:
+            break
+        time.sleep(0.4)
+    return out
+
+
+def api_guild_refresh(name):
+    """POST /api/live/guild/refresh —— 从工会的**官方 B 站账号关注列表**补人名。
+
+    名册 = 内置 seed（随版本更新）+ 这里补进来的（写 data/guilds_user.json，不进包）。
+    只做「补」不做「删」：官方账号偶尔会取关老成员，那些人也还在名册里。
+    """
+    name = str(name or "").strip()
+    if not name:
+        return 400, {"error": "缺少工会名"}
+    meta = _guild_seed_meta().get(name) or {}
+    official = str(meta.get("official_uid") or "").strip()
+    if not official.isdigit():
+        return 400, {"error": "「%s」还没有登记官方账号 UID，暂时不能自动补全" % name}
+    if not sessdata():
+        return 401, {"error": "读官方账号的关注列表需要登录：设置页扫码后再试"}
+    try:
+        rows = _guild_followings(official)
+    except Exception as e:
+        return 502, {"error": "读关注列表失败：%s" % str(e)[:80]}
+    if not rows:
+        return 502, {"error": "官方账号的关注列表是空的（或对方设了隐私）"}
+    vt = _vtbs_uids()
+    if not vt:
+        # 主播库没取到就**不要写**：这时没有任何过滤依据，会把合作方、活动号
+        # 一起写进名册（用户看到的就是「名册里混进一堆不是主播的号」）。
+        return 502, {"error": "主播库（vtbs.moe）暂时取不到，无法判断哪些是主播；稍后再试一次"}
+    keep = []
+    for m in rows:
+        nm = m["name"]
+        if GUILD_NOISE.search(nm) or GUILD_NOISE_SUFFIX.search(nm):
+            continue
+        if m["uid"] not in vt:
+            continue
+        keep.append(m)
+    # 写进用户名册（与手动添加共用同一个文件）
+    try:
+        with open(GUILD_USER, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    arr = data.get(name) if isinstance(data.get(name), list) else []
+    have = {str((x or {}).get("uid")) for x in arr}
+    # 「新增」按**合并后的名册**算：seed 里已经有的人不算新增，
+    # 否则第一次点同步会把 76 个老成员全报成「新增」，而总数一点没变（用户会以为坏了）。
+    existing = {str((m or {}).get("uid")) for m in (_guilds_load().get(name) or [])}
+    added = 0
+    for m in keep:
+        if m["uid"] in have:
+            continue
+        arr.append({"name": _guild_name(m["name"])[:40], "uid": m["uid"]})
+        have.add(m["uid"])
+        if m["uid"] not in existing:
+            added += 1
+    data[name] = arr
+    try:
+        os.makedirs(os.path.dirname(GUILD_USER), exist_ok=True)
+        with open(GUILD_USER, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+    except OSError as e:
+        return 500, {"error": "保存失败：%s" % str(e)[:80]}
+    _GUILD_CACHE.pop(name, None)
+    print("[guild] %s 从官方账号补了 %d 人（关注 %d / 主播 %d）"
+          % (name, added, len(rows), len(keep)))
+    return 200, {"ok": True, "guild": name, "official_uid": official,
+                 "fetched": len(rows), "kept": len(keep), "added": added,
+                 "total": len(_guilds_load().get(name) or [])}
 
 
 def api_guild_add(obj):
@@ -10396,6 +10564,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, {"ok": True, "queued": queued})
         if parsed.path == "/api/guild/add":
             return self._json(*api_guild_add(obj))
+        if parsed.path == "/api/live/guild/refresh":
+            return self._json(*api_guild_refresh(obj.get("name", "")))
         if parsed.path == "/api/danmist/start":
             return self._json(*api_danmist_start())
         if parsed.path == "/api/feedback":
