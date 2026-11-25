@@ -227,6 +227,7 @@ window.__BOOT_T0 = Date.now();
     <a class="tab" data-view="schedule" href="#/schedule">24 小时频道</a>
     <a class="tab" data-view="playlist" href="#/playlist">歌单</a>
     <a class="tab" data-view="multi" href="#/multi">监控室</a>
+    <a class="tab" data-view="board" href="#/board">弹幕板</a>
     <a class="tab" data-view="recorder" href="#/recorder">录播姬</a>
     <a class="tab" data-view="dynamic" href="#/dynamic">动态</a>
     <a class="tab" data-view="weibo" href="#/weibo">微博</a>
@@ -456,7 +457,11 @@ window.__BOOT_T0 = Date.now();
         <div class="multi-src" id="multi-src">
           <button class="btn small ghost on" data-msrc="stations" type="button">我的板块</button>
           <button class="btn small ghost" data-msrc="following" type="button">关注的直播</button>
+          <button class="btn small ghost" data-msrc="recommend" type="button">推荐主播</button>
+          <button class="btn small ghost" data-msrc="guild" type="button">工会主播</button>
         </div>
+        <button class="btn small ghost" id="multi-chat-toggle" type="button"
+                title="把左侧列表换成当前这一路的实时弹幕">聚焦弹幕</button>
         <!-- 收起左侧主播列表：收起后画面墙吃满整行，能多排几路。
              只有「关注的直播」有左栏，切到「我的板块」时这个按钮会隐藏。 -->
         <button class="btn small ghost" id="multi-side-toggle" type="button" hidden>‹ 收起列表</button>
@@ -489,10 +494,48 @@ window.__BOOT_T0 = Date.now();
       </div>
       <div class="multi-body">
         <aside class="multi-side" id="multi-side" hidden></aside>
+        <aside class="multi-chat" id="multi-chat" hidden>
+          <div class="mchat-h">
+            <b id="mchat-title">弹幕</b>
+            <span class="mchat-state" id="mchat-state">未连接</span>
+            <button class="mchat-x" id="mchat-close" type="button" title="返回主播列表">×</button>
+          </div>
+          <div class="mchat-list" id="mchat-list"></div>
+          <div class="mchat-send">
+            <input id="mchat-input" maxlength="30" placeholder="发条弹幕，30 字内"
+                   title="最多 30 字">
+            <button class="btn small primary" id="mchat-send" type="button">发送</button>
+          </div>
+          <p class="mchat-note" id="mchat-note"></p>
+        </aside>
         <div class="multi-grid" id="multi-grid"></div>
         <div class="multi-empty" id="multi-empty" hidden>
           <b>所有直播间都已最小化</b>
           <span>点上方「已隐藏 N 路」可以逐个恢复；刷新页面也会全部恢复。</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-board">
+      <div class="board-bar">
+        <span class="board-state" id="board-state">正在检测本机 Danmist…</span>
+        <button class="btn small ghost" id="board-retry" type="button">重新检测</button>
+        <button class="btn small primary" id="board-start" type="button" hidden>启动 Danmist</button>
+        <a class="btn small ghost" id="board-open" target="_blank" rel="noopener"
+           href="http://127.0.0.1:8373/" hidden>新窗口打开 ↗</a>
+      </div>
+      <div class="board-wrap">
+        <iframe id="board-frame" title="Danmist 弹幕板" hidden></iframe>
+        <div class="board-empty" id="board-empty">
+          <b>弹幕板需要本机运行 Danmist</b>
+          <span>Danmist 是一个独立的开源弹幕工作台（MIT）。本页负责探测并嵌入它，
+            不复制它的代码；在 Danmist 里配置好直播间即可看到弹幕、SC 与礼物。</span>
+          <span class="board-actions">
+            <button class="btn small primary" id="board-start2" type="button">尝试启动</button>
+            <a class="btn small ghost" id="board-download" target="_blank" rel="noopener"
+               href="https://github.com/xShadowMoon/Danmist/releases/latest">下载 / 安装</a>
+          </span>
+          <span class="board-hint">默认端口 8373。装好或解压后点「重新检测」；也可以直接在新窗口打开。</span>
         </div>
       </div>
     </section>

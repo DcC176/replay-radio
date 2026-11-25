@@ -115,3 +115,4 @@ data/fans/
 data/recorder.json
 # .tmp/：测试/临时脚本目录，非仓库内容
 .tmp/
+data/guilds_user.json

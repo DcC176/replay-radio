@@ -6790,3 +6790,118 @@ body.view-dd .views { grid-column: 1 / -1; }
   background: rgba(var(--ink), .09); font-size: 11.5px;
 }
 .upd-notes .upd-empty { color: var(--muted); }
+
+/* ---- 弹幕板（内嵌本机 Danmist，v1.9.31） ---- */
+.board-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.board-state { font-size: var(--fs-fine); color: var(--muted); }
+.board-wrap {
+  position: relative;
+  height: calc(100vh - var(--topbar-h) - 120px);
+  min-height: 320px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel-2); overflow: hidden;
+}
+.board-wrap iframe { width: 100%; height: 100%; border: 0; display: block; }
+.board-empty {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 28px; text-align: center;
+  color: var(--muted);
+}
+.board-empty[hidden] { display: none; }
+.board-empty b { color: var(--text); font-size: var(--fs-h2); }
+.board-empty span { max-width: 560px; font-size: var(--fs-fine); line-height: 1.7; }
+.board-actions { display: flex; gap: 8px; }
+.board-hint { color: var(--muted-2); }
+
+/* ---- 监控室：左侧弹幕面板（与 .multi-side 同宽一列） ---- */
+.multi-chat {
+  width: 300px; flex: none;
+  max-height: calc(100vh - 200px);
+  min-height: 220px;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel-2); overflow: hidden;
+}
+.multi-chat[hidden] { display: none; }
+.mchat-h {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.mchat-h b { color: var(--text); font-weight: 600; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mchat-state { margin-left: auto; font-size: 11px; color: var(--muted-2); }
+.mchat-x {
+  flex: none; width: 22px; height: 22px; padding: 0; line-height: 20px;
+  border: 0; border-radius: 6px; background: none; color: var(--muted);
+  font-size: 16px; cursor: pointer;
+}
+.mchat-x:hover { background: rgba(var(--ink), .08); color: var(--text); }
+.mchat-list {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: 8px 10px; font-size: 12.5px; line-height: 1.6;
+}
+.mchat-line { margin: 0 0 4px; color: var(--text-2); word-break: break-word; }
+.mchat-line b { color: var(--text); font-weight: 500; margin-right: 4px; }
+.mchat-sys { color: var(--muted); font-size: 11.5px; }
+.mchat-send {
+  flex: none; display: flex; gap: 6px; padding: 8px 10px;
+  border-top: 1px solid var(--line); background: var(--panel);
+}
+.mchat-send input {
+  flex: 1 1 auto; min-width: 0; padding: 6px 9px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel-2); color: var(--text); font: inherit; font-size: 12px;
+}
+.mchat-send input:focus { border-color: var(--red); outline: none; }
+.mchat-note { flex: none; margin: 0; padding: 0 10px 6px; font-size: 10.5px; color: var(--muted-2); }
+.mchat-note:empty { display: none; }
+
+/* 每格弹幕开关与覆盖层 */
+.ms-dm-btn.on { background: var(--red); border-color: var(--red); color: var(--on-red); }
+.ms-dm {
+  position: absolute; left: 6px; right: 6px; bottom: 40px;
+  max-height: 62%; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  gap: 2px; pointer-events: none; z-index: 2;
+}
+.ms-dm[hidden] { display: none; }
+.ms-dm span {
+  align-self: flex-start; max-width: 100%;
+  padding: 1px 5px; border-radius: 4px;
+  background: rgba(0, 0, 0, .45);
+  color: #fff; font-size: 12px; line-height: 1.45;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .8);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  animation: dm-in .18s ease-out;
+}
+.ms-dm span b { font-weight: 500; opacity: .82; margin-right: 4px; }
+@keyframes dm-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@container (max-width: 260px) {
+  .ms-dm span { font-size: 10.5px; }
+}
+
+/* 推荐 / 工会列表头 */
+.mf-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 4px 4px 8px; font-size: 11.5px; color: var(--muted);
+}
+.mf-head b { color: var(--text); font-weight: 600; }
+.mf-head select {
+  max-width: 130px; padding: 3px 6px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  font: inherit; font-size: 11.5px; color-scheme: dark;
+}
+.mf-head .btn { padding: 3px 7px; }
+.mf-state { padding: 14px 8px; font-size: 12px; color: var(--muted); line-height: 1.7; }
+.mf-state b { color: var(--text); }
+.mf-state .btn { margin-top: 6px; }
+
+/* 弹幕板整宽：右侧播放大区对它没意义，留在两列里只会把 iframe 挤成一条 */
+body.view-board .wrap { grid-template-columns: minmax(0, 1fr); gap: 0; }
+body.view-board .col-right { display: none; }
+body.view-board .views { max-width: none; }

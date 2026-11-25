@@ -1726,8 +1726,8 @@
     };
   })();
 
-  var VIEWS = ['live', 'multi', 'recorder', 'broadcast', 'schedule', 'playlist',
-               'dynamic', 'weibo', 'dd', 'about', 'settings'];
+  var VIEWS = ['live', 'multi', 'board', 'recorder', 'broadcast', 'schedule',
+               'playlist', 'dynamic', 'weibo', 'dd', 'about', 'settings'];
   var KEY_MUTED = 'xl_muted';
   var KEY_LOOP = 'xl_loop';         // 循环播放：off / one / list / random（见 state.loop）
   /* 播放进度，按板块分键（`xl_pos_<板块 id>` / `xl_plpos_<板块 id>`）。
@@ -4715,6 +4715,14 @@
        ⚠️ body 上只有这种**特例 class**，没有通用的 view-<name>（踩过一次）。 */
     document.body.classList.toggle('view-dd', name === 'dd');
     document.body.classList.toggle('view-recorder', name === 'recorder');
+    document.body.classList.toggle('view-board', name === 'board');
+    if (name === 'board') renderBoard();
+    else stopBoardPoll();
+    if (name !== 'multi') {
+      // 离开监控室就收掉弹幕面板与轮询：不能让 6 条 B 站 WS 在后台跟着页面跑
+      if (multiChatOpen) closeMultiChat();
+      stopAllChatFeeds();
+    }
     document.querySelectorAll('.tab').forEach(function (t) {
       t.classList.toggle('active', t.getAttribute('data-view') === name);
     });
@@ -8849,6 +8857,73 @@
      pageSetup 放在这里而不是 initMain 里 —— 服务靠页面心跳判断「网页是不是全关了」，
      引导页停留期间也得照常报到，否则会被判定成页面已关闭。 */
 
+  /* ---------------------------------------------------------- 弹幕板（Danmist）
+     Danmist 是独立应用（MIT），这里只做「探测 + 尝试启动 + 内嵌」。
+     不在我们的进程里重写它的弹幕栈：它的配置、OBS 源、存档都归它自己。 */
+  var boardTimer = 0;
+  var boardBusy = false;
+
+  function boardApply(d) {
+    var frame = document.getElementById('board-frame');
+    var empty = document.getElementById('board-empty');
+    var state = document.getElementById('board-state');
+    var open = document.getElementById('board-open');
+    var start = document.getElementById('board-start');
+    var start2 = document.getElementById('board-start2');
+    if (!frame || !empty) return;
+    if (d && d.running) {
+      if (frame.getAttribute('src') !== d.url) frame.src = d.url;
+      frame.hidden = false;
+      empty.hidden = true;
+      if (state) state.textContent = '已连接本机 Danmist（' + d.url + '）';
+      if (open) { open.href = d.url; open.hidden = false; }
+      if (start) start.hidden = true;
+      if (start2) start2.hidden = true;
+    } else {
+      frame.hidden = true;
+      frame.removeAttribute('src');       // 不留一个错误页在后台
+      empty.hidden = false;
+      if (state) state.textContent = '未检测到 Danmist（127.0.0.1:8373）';
+      if (open) { open.href = (d && d.download) || 'https://github.com/xShadowMoon/Danmist/releases/latest'; open.hidden = false; open.textContent = '打开发布页 ↗'; }
+      if (start) start.hidden = !(d && d.exe);
+      if (start2) start2.hidden = !!(d && d.exe);   // 空态里那颗只在「找得到但不能自动起」时留着
+    }
+  }
+
+  function boardStatus() {
+    fetch('/api/danmist/status').then(function (r) { return r.json(); })
+      .then(function (d) { boardApply(d || {}); })
+      .catch(function () {
+        var st = document.getElementById('board-state');
+        if (st) st.textContent = '本机服务没有响应，无法检测 Danmist';
+      });
+  }
+
+  function boardStart() {
+    if (boardBusy) return;
+    boardBusy = true;
+    var st = document.getElementById('board-state');
+    if (st) st.textContent = '正在启动 Danmist…';
+    postJSON('/api/danmist/start', {}).then(function (d) {
+      boardApply(d || {});
+      if (st && d && d.error) st.textContent = d.error + '（也可以手动打开 Danmist 后点「重新检测」）';
+    }).catch(function () {
+      if (st) st.textContent = '启动失败：本机服务没有响应';
+    }).then(function () { boardBusy = false; });
+  }
+
+  function renderBoard() {
+    boardStatus();
+    if (boardTimer) clearInterval(boardTimer);
+    boardTimer = setInterval(function () {
+      if (state.view === 'board') boardStatus();
+    }, 5000);
+  }
+
+  function stopBoardPoll() {
+    if (boardTimer) { clearInterval(boardTimer); boardTimer = 0; }
+  }
+
   /* ---------------------------------------------------------- 版本更新
      启动只检查、只提示；偏好存本机浏览器。所有下载/替换都必须由用户点
      「立即更新」触发。snooze: 0=未抑制 / 时间戳=到点前不弹 / -1=永久不弹。 */
@@ -9452,6 +9527,18 @@
     setTimeout(function () { updCheck(false); }, 3000);
   }
 
+  function bindBoard() {
+    var r = document.getElementById('board-retry');
+    if (r && r.getAttribute('data-bound') !== '1') {
+      r.setAttribute('data-bound', '1');
+      r.addEventListener('click', boardStatus);
+      ['board-start', 'board-start2'].forEach(function (id) {
+        var b = document.getElementById(id);
+        if (b) b.addEventListener('click', boardStart);
+      });
+    }
+  }
+
   function init() {
     pageSetup();
     bindThemeToggle();           // 顶栏那颗按钮在两种模式下都要能用（含空态引导页）
@@ -9466,6 +9553,7 @@
     bindDDLive();                // 直播数据：日历翻月 + 点日期看场次
     bindDDSub();                 // DD 内部三个子页面
     bindUpdate();                // 更新：启动静默检查 + 手动按钮 + 提示偏好
+    bindBoard();                 // 弹幕板：检测 / 尝试启动本机 Danmist
     fetchStations().then(function (list) {
       var picked = false;
       try { picked = sessionStorage.getItem(PICK_KEY) === '1'; } catch (e) { /* 隐私模式 */ }
@@ -10550,6 +10638,10 @@
   }
 
   function multiTeardown() {
+    Object.keys(cellChatRef).forEach(function (id) {
+      chatUnwatch(cellChatRef[id], 'cell:' + id);
+    });
+    cellChatRef = {};
     multiTimers.forEach(function (t) { clearTimeout(t); });
     multiTimers = [];
     multiPlayers.forEach(function (p) {
@@ -10622,6 +10714,9 @@
       + ' title="这一路全屏">⛶</button>'
       + '<button class="ms-btn" data-act="zoom" type="button" aria-label="聚焦或取消聚焦这一路"'
       + ' aria-pressed="false" title="聚焦 / 取消聚焦">⤢</button>'
+      + '<button class="ms-btn ms-dm-btn" data-act="dm" type="button"'
+      + ' aria-label="这一路的弹幕开关" aria-pressed="false"'
+      + ' title="弹幕开关（每格独立）">弹</button>'
       + open
       + '</span></div>'
       + msHandlesHtml();
@@ -10656,6 +10751,7 @@
       + '<video muted playsinline></video>'
       + msMinHtml()
       + msOffHtml(s.short || s.name, s.face, '正在获取开播状态…')
+      + '<div class="ms-dm" hidden></div>'
       + msBarHtml(s.tag || '', s.short || s.name, accent, s.room) + '</div>';
   }
 
@@ -10663,6 +10759,7 @@
     src = src || {};                     // 「关注的直播」传 {info, stream}：按 uid 查、按房间取
     cell._s = s;                         // 单路画质/音量控件要按格重启，把数据挂在格子上
     cell._src = src;
+    applyCellChat(cell);
     /* 代次：同一个格子可能被重启多次（换画质、点卡片重连、看门狗重连），
        每次重启都挂一只看门狗 —— 旧的那只必须能认出自己过期了，
        否则几只狗同时咬同一格，会各自销毁对方刚建好的 player。 */
@@ -10873,6 +10970,9 @@
     var id = cell.getAttribute('data-id');
     multiFocusId = (multiFocusId === id) ? '' : id;
     applyMultiLayout();
+    if (multiChatOpen && cell._s && cell._s.room) {
+      setFocusRoom(cell._s.room, cell._s.uname || cell._s.short || '');
+    }
   }
 
   /* ---------------------------------------------------------- 最小化 / 恢复
@@ -10987,6 +11087,21 @@
 
   function bindMulti() {
     bindHiddenBar();
+    var ct = document.getElementById('multi-chat-toggle');
+    if (ct && ct.getAttribute('data-bound') !== '1') {
+      ct.setAttribute('data-bound', '1');
+      ct.addEventListener('click', function () {
+        if (multiChatOpen) closeMultiChat(); else openMultiChat();
+      });
+      var mx = document.getElementById('mchat-close');
+      if (mx) mx.addEventListener('click', closeMultiChat);
+      var ms = document.getElementById('mchat-send');
+      if (ms) ms.addEventListener('click', sendFocusChat);
+      var mi = document.getElementById('mchat-input');
+      if (mi) mi.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); sendFocusChat(); }
+      });
+    }
     var grid = document.getElementById('multi-grid');
     if (!grid || grid.getAttribute('data-bound') === '1') return;
     grid.setAttribute('data-bound', '1');
@@ -11000,6 +11115,7 @@
       if (act === 'solo') multiSolo(cell);
       if (act === 'min') multiMinimize(cell);
       if (act === 'zoom') multiFocus(cell);
+      if (act === 'dm') toggleCellChat(cell);
       if (act === 'full') {
         var v = cell.querySelector('video');
         if (v && v.requestFullscreen) {
@@ -11170,6 +11286,7 @@
           if (next === multiSrc) return;
           multiSrc = next;
           store.set('xl_mf_src', multiSrc);
+          if (multiChatOpen) closeMultiChat();
           mfNote('');                 // 上一来源的「N 路…」不要带到新来源上
           Array.prototype.forEach.call(
             document.querySelectorAll('#multi-src [data-msrc]'), function (x) {
@@ -11213,7 +11330,24 @@
       side.addEventListener('pointerdown', function (e) {
         var item = e.target.closest ? e.target.closest('.mf-item') : null;
         if (!item) return;
-        toggleFollow(item.getAttribute('data-mid'), item);
+        var mid = item.getAttribute('data-mid');
+        if (multiSrc === 'recommend' || multiSrc === 'guild') {
+          toggleExtraCard(mfExtraCards[mid], item);
+          return;
+        }
+        toggleFollow(mid, item);
+      });
+      side.addEventListener('click', function (e) {
+        var retry = e.target.closest ? e.target.closest('[data-mretry]') : null;
+        if (retry) {
+          if (retry.getAttribute('data-mretry') === 'recommend') renderMultiRecommend();
+          else loadGuild(multiGuildName);
+          return;
+        }
+        if (e.target.closest && e.target.closest('[data-gadd]')) addGuildMember();
+      });
+      side.addEventListener('change', function (e) {
+        if (e.target && e.target.id === 'mf-guild-select') loadGuild(e.target.value);
       });
       side.addEventListener('input', function (e) {
         if (!e.target.classList.contains('mf-search')) return;
@@ -11257,12 +11391,417 @@
     }
   }
 
+  /* ---------------- 监控室：按房间的弹幕（轮询；一格一个开关，互不影响） ---------------- */
+  function chatWatch(room, ref, cb) {
+    room = String(room || '');
+    if (!/^\d+$/.test(room)) return null;
+    var f = chatFeeds[room];
+    if (!f) {
+      f = chatFeeds[room] = { refs: {}, since: 0, items: [], err: '', running: false,
+                              logged: true };
+      chatPoll(room);
+    }
+    f.refs[ref] = cb || function () {};
+    return f;
+  }
+
+  function chatUnwatch(room, ref) {
+    var f = chatFeeds[room];
+    if (!f) return;
+    delete f.refs[ref];
+    if (Object.keys(f.refs).length) return;
+    if (chatTimers[room]) { clearTimeout(chatTimers[room]); delete chatTimers[room]; }
+    delete chatFeeds[room];
+    // 没人看就把它那条 B 站 WS 也停掉，别在后台白占连接
+    fetch('/api/live/chat/stop?room=' + encodeURIComponent(room)).catch(function () {});
+  }
+
+  function chatPoll(room) {
+    var f = chatFeeds[room];
+    if (!f) return;
+    if (document.hidden) {
+      chatTimers[room] = setTimeout(function () { chatPoll(room); }, 3000);
+      return;
+    }
+    fetch('/api/live/chat/recent?room=' + encodeURIComponent(room) + '&since=' + f.since)
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!chatFeeds[room]) return;
+        if (!d || d.error) {
+          f.err = (d && d.error) || '弹幕服务不可用';
+          f.running = false;
+        } else {
+          f.err = (d.state && d.state.error) || '';
+          f.running = !!(d.state && d.state.running);
+          f.logged = d.logged !== false;
+          var items = d.items || [];
+          if (items.length) {
+            items.forEach(function (x) { if (x && x.item) f.items.push(x.item); });
+            if (f.items.length > 200) f.items = f.items.slice(-200);
+            f.since = d.seq || f.since;
+            Object.keys(f.refs).forEach(function (k) {
+              try { f.refs[k](items, f); } catch (e) { /* 某个订阅者出错不影响别的 */ }
+            });
+          }
+        }
+        if (multiChatOpen && multiChatRoom === room) renderFocusChat();
+      })
+      .catch(function () {
+        if (chatFeeds[room]) { f.err = '弹幕连接失败（本机服务无响应）'; f.running = false; }
+        if (multiChatOpen && multiChatRoom === room) renderFocusChat();
+      })
+      .then(function () {
+        if (!chatFeeds[room]) return;
+        chatTimers[room] = setTimeout(function () { chatPoll(room); },
+                                       f.err ? 3200 : 1200);
+      });
+  }
+
+  function stopAllChatFeeds() {
+    Object.keys(chatTimers).forEach(function (r) { clearTimeout(chatTimers[r]); });
+    chatTimers = {};
+    Object.keys(chatFeeds).forEach(function (r) {
+      fetch('/api/live/chat/stop?room=' + encodeURIComponent(r)).catch(function () {});
+    });
+    chatFeeds = {};
+    cellChatRef = {};
+  }
+
+  function pushCellDm(ov, items) {
+    (items || []).forEach(function (x) {
+      var it = x.item || x;
+      if (!it || it.type !== 'danmaku') return;
+      var sp = document.createElement('span');
+      var b = document.createElement('b');
+      b.textContent = (it.uname || '') + '：';
+      sp.appendChild(b);
+      sp.appendChild(document.createTextNode(it.text || ''));
+      ov.appendChild(sp);
+    });
+    while (ov.childNodes.length > 14) ov.removeChild(ov.firstChild);
+  }
+
+  function applyCellChat(cell) {
+    var id = cell.getAttribute('data-id');
+    var s = cell._s || {};
+    var on = !!multiChatOn[id];
+    var ov = cell.querySelector('.ms-dm');
+    var btn = cell.querySelector('[data-act="dm"]');
+    if (btn) {
+      btn.classList.toggle('on', on);
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+    if (!ov) return;
+    ov.hidden = !on;
+    var room = String(s.room || '');
+    var prev = cellChatRef[id];
+    if (prev && prev !== room) { chatUnwatch(prev, 'cell:' + id); delete cellChatRef[id]; }
+    if (!on || !/^\d+$/.test(room)) {
+      if (prev && prev === room) { chatUnwatch(room, 'cell:' + id); delete cellChatRef[id]; }
+      return;
+    }
+    if (cellChatRef[id] === room) return;
+    cellChatRef[id] = room;
+    var f = chatWatch(room, 'cell:' + id, function (items) {
+      if (cell.isConnected) pushCellDm(ov, items);
+    });
+    ov.innerHTML = '';
+    if (f) pushCellDm(ov, f.items.slice(-10).map(function (it) { return { item: it }; }));
+  }
+
+  function toggleCellChat(cell) {
+    var id = cell.getAttribute('data-id');
+    var s = cell._s || {};
+    if (!/^\d+$/.test(String(s.room || ''))) {
+      mfNote('这一路还没拿到房间号，暂时不能开弹幕');
+      return;
+    }
+    multiChatOn[id] = !multiChatOn[id];
+    store.set('xl_mf_chat_on', multiChatOn);
+    applyCellChat(cell);
+    mfNote(multiChatOn[id] ? ('已开启弹幕：' + (s.uname || s.short || s.room))
+                           : ('已关闭弹幕：' + (s.uname || s.short || s.room)));
+  }
+
+  /* 聚焦面板：左侧列表换成某一格的弹幕。房间切换时先把旧订阅解绑。 */
+  function setFocusRoom(room, name) {
+    room = String(room || '');
+    if (multiChatRoom && multiChatRoom !== room) chatUnwatch(multiChatRoom, 'focus');
+    multiChatRoom = room;
+    var t = document.getElementById('mchat-title');
+    if (t) t.textContent = name || (room ? ('房间 ' + room) : '弹幕');
+    if (/^\d+$/.test(room)) {
+      chatWatch(room, 'focus', function () { renderFocusChat(); });
+    }
+    renderFocusChat();
+  }
+
+  function renderFocusChat() {
+    if (!multiChatOpen) return;
+    var list = document.getElementById('mchat-list');
+    var st = document.getElementById('mchat-state');
+    var note = document.getElementById('mchat-note');
+    if (!list) return;
+    if (!multiChatRoom) {
+      list.innerHTML = '<p class="mchat-sys">点某一格的「弹」或 ⤢，选择要看弹幕的直播间。</p>';
+      if (st) st.textContent = '未选择';
+      return;
+    }
+    var f = chatFeeds[multiChatRoom];
+    if (!f) {
+      list.innerHTML = '<p class="mchat-sys">正在连接弹幕…</p>';
+      if (st) st.textContent = '连接中…';
+      return;
+    }
+    if (st) st.textContent = f.err ? '连接失败' : (f.running ? '已连接' : '连接中…');
+    if (note) {
+      note.textContent = f.err
+        || (f.logged === false ? '未登录：只能收弹幕，不能发送。' : '');
+    }
+    var near = list.scrollHeight - list.scrollTop - list.clientHeight < 60;
+    list.innerHTML = '';
+    if (!f.items.length) {
+      var p0 = document.createElement('p');
+      p0.className = 'mchat-sys';
+      p0.textContent = f.err ? '弹幕连接失败，正在重试…' : '还没有弹幕，等一会儿…';
+      list.appendChild(p0);
+    } else {
+      f.items.slice(-120).forEach(function (it) {
+        if (it.type === 'state') return;
+        var row = document.createElement('div');
+        row.className = 'mchat-line';
+        if (it.type === 'danmaku') {
+          var b = document.createElement('b');
+          b.textContent = it.uname || '';
+          row.appendChild(b);
+          row.appendChild(document.createTextNode(it.text || ''));
+        } else {
+          row.className += ' mchat-sys';
+          row.textContent = it.text || '';
+        }
+        list.appendChild(row);
+      });
+    }
+    if (near) list.scrollTop = list.scrollHeight;
+  }
+
+  function openMultiChat() {
+    var cell = document.querySelector('#multi-grid .ms-cell[data-id="' + multiFocusId + '"]')
+      || document.querySelector('#multi-grid .ms-cell');
+    if (!cell) { mfNote('画面墙上还没有直播间'); return; }
+    multiChatOpen = true;
+    applyMultiSide();
+    setFocusRoom(cell._s && cell._s.room,
+                 cell._s && (cell._s.uname || cell._s.short));
+    applyMultiLayout();
+  }
+
+  function closeMultiChat() {
+    if (multiChatRoom) chatUnwatch(multiChatRoom, 'focus');
+    multiChatRoom = '';
+    multiChatOpen = false;
+    applyMultiSide();
+    applyMultiLayout();
+  }
+
+  function sendFocusChat() {
+    var input = document.getElementById('mchat-input');
+    var note = document.getElementById('mchat-note');
+    var btn = document.getElementById('mchat-send');
+    var msg = input ? input.value.trim() : '';
+    if (!multiChatRoom) { if (note) note.textContent = '先选一个在播的直播间'; return; }
+    if (!msg) return;
+    if (btn) btn.disabled = true;
+    if (note) note.textContent = '发送中…';
+    postJSON('/api/live/send', { room: multiChatRoom, msg: msg }).then(function (d) {
+      if (d && d.code === 0) {
+        if (input) input.value = '';
+        if (note) note.textContent = '已发送 ✓';
+      } else {
+        if (note) note.textContent = '发送失败：'
+          + ((d && (d.error || d.message)) || '未知原因');
+      }
+    }).catch(function () {
+      if (note) note.textContent = '发送失败：本机服务无响应';
+    }).then(function () { if (btn) btn.disabled = false; });
+  }
+
+  /* ---------------- 监控室：推荐 / 工会（左侧卡片来源） ---------------- */
+  var mfExtraCards = {};          // mid -> 卡片数据（推荐/工会）
+  var multiGuildName = '';
+
+  function mfExtraItem(s) {
+    var on = multiFollowOn[s.mid] ? ' on' : '';
+    var img = s.face
+      ? '<img class="mf-face" src="' + dynImg(s.face) + '" alt="" loading="lazy" decoding="async">'
+      : '<span class="mf-face mf-noface"></span>';
+    return '<div class="mf-item' + on + '" data-mid="' + esc(s.mid) + '">' + img
+      + '<div class="mf-meta"><div class="mf-name">' + esc(s.uname || s.name || s.mid)
+      + '<span class="mf-live">LIVE</span></div>'
+      + '<div class="mf-title" title="' + esc(s.title || '') + '">'
+      + esc(s.title || (s.area || '直播中')) + '</div></div>'
+      + '<div class="mf-pop">' + fmtNum(s.online || 0) + '</div></div>';
+  }
+
+  function mfSideState(html, retry) {
+    return '<div class="mf-state">' + html
+      + (retry ? '<br><button class="btn small ghost" data-mretry="' + retry
+        + '" type="button">重试</button>' : '') + '</div>';
+  }
+
+  function renderMultiRecommend() {
+    var side = document.getElementById('multi-side');
+    if (!side) return;
+    applyMultiSide();
+    var head = '<div class="mf-head"><b>虚拟区热门</b>'
+      + '<span>按人气排序 · 点击加入监控墙</span></div>';
+    side.innerHTML = head + '<div class="mf-state">正在读取推荐列表…</div>';
+    fetch('/api/live/recommend').then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (state.view !== 'multi' || multiSrc !== 'recommend') return;
+        if (!d || d.error) {
+          side.innerHTML = head + mfSideState('加载失败：' + esc((d && d.error) || '网络不可达'),
+                                              'recommend');
+          return;
+        }
+        var list = d.list || [];
+        if (!list.length) {
+          side.innerHTML = head + mfSideState('虚拟区当前没有在播的推荐主播。', 'recommend');
+          return;
+        }
+        mfExtraCards = {};
+        list.forEach(function (x) { mfExtraCards[x.mid] = x; });
+        side.innerHTML = head.replace('</div>', '<span class="mf-pop">' + list.length
+          + ' 位在播</span></div>') + list.map(mfExtraItem).join('');
+        bindFaceFallback(side);
+      })
+      .catch(function () {
+        if (state.view !== 'multi' || multiSrc !== 'recommend') return;
+        side.innerHTML = head + mfSideState('加载失败：本机服务无响应', 'recommend');
+      });
+  }
+
+  function renderMultiGuild() {
+    var side = document.getElementById('multi-side');
+    if (!side) return;
+    applyMultiSide();
+    side.innerHTML = '<div class="mf-head"><b>工会</b>'
+      + '<select id="mf-guild-select" title="选择工会"></select>'
+      + '<button class="btn small ghost" data-gadd="1" type="button" title="手动添加成员">＋ 成员</button>'
+      + '</div><div id="mf-guild-list"><div class="mf-state">正在读取工会名单…</div></div>';
+    fetch('/api/live/guilds').then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (state.view !== 'multi' || multiSrc !== 'guild') return;
+        var gs = (d && d.guilds) || [];
+        var sel = document.getElementById('mf-guild-select');
+        var box = document.getElementById('mf-guild-list');
+        if (!sel || !box) return;
+        if (!gs.length) {
+          box.innerHTML = mfSideState('还没有工会名册。点「＋ 成员」手动添加第一位。');
+          return;
+        }
+        sel.innerHTML = gs.map(function (g) {
+          return '<option value="' + esc(g.name) + '">' + esc(g.name)
+            + '（' + g.count + '）</option>';
+        }).join('');
+        if (!multiGuildName || !gs.some(function (g) { return g.name === multiGuildName; })) {
+          multiGuildName = gs[0].name;
+        }
+        sel.value = multiGuildName;
+        loadGuild(multiGuildName);
+      })
+      .catch(function () {
+        var box = document.getElementById('mf-guild-list');
+        if (box) box.innerHTML = mfSideState('工会名单读取失败：本机服务无响应');
+      });
+  }
+
+  function loadGuild(name) {
+    name = String(name || '').trim();
+    if (!name) return;
+    multiGuildName = name;
+    var box = document.getElementById('mf-guild-list');
+    if (!box) return;
+    box.innerHTML = '<div class="mf-state">正在查询「' + esc(name) + '」谁在播…</div>';
+    fetch('/api/live/guild?name=' + encodeURIComponent(name)).then(function (r) {
+      return r.json().then(function (j) { return { code: r.status, j: j }; });
+    }).then(function (res) {
+      if (state.view !== 'multi' || multiSrc !== 'guild') return;
+      if (res.code !== 200 || res.j.error) {
+        box.innerHTML = mfSideState('查询失败：'
+          + esc((res.j && res.j.error) || ('HTTP ' + res.code)), 'guild');
+        return;
+      }
+      var d = res.j;
+      var live = d.list || [];
+      mfExtraCards = {};
+      live.forEach(function (x) { mfExtraCards[x.mid] = x; });
+      if (!live.length) {
+        box.innerHTML = '<div class="mf-state">「' + esc(name) + '」名册 ' + d.total
+          + ' 人，当前没有人在播。</div>';
+        return;
+      }
+      box.innerHTML = '<div class="mf-state" style="padding:2px 4px 6px">名册 ' + d.total
+        + ' 人 · 在播 ' + live.length + (d.warn ? ' · ' + esc(d.warn) : '') + '</div>'
+        + live.map(function (x) {
+          // 名册里的显示名优先（B 站 uname 可能带后缀）
+          x.uname = x.name || x.uname;
+          return mfExtraItem(x);
+        }).join('');
+      bindFaceFallback(box);
+    }).catch(function () {
+      if (box) box.innerHTML = mfSideState('查询失败：本机服务无响应', 'guild');
+    });
+  }
+
+  function addGuildMember() {
+    var g = window.prompt('工会名（可新建）', multiGuildName || 'VirtuaReal');
+    if (!g) return;
+    var nm = window.prompt('主播显示名（例如 七海）');
+    if (!nm) return;
+    var uid = window.prompt('B 站 UID（纯数字，可在主播主页地址里找到）');
+    if (!uid) return;
+    postJSON('/api/guild/add', { guild: g, name: nm, uid: uid }).then(function (d) {
+      if (d && d.ok) {
+        multiGuildName = d.guild;
+        mfNote('已加入「' + d.guild + '」：' + d.name);
+        renderMultiGuild();
+      } else {
+        mfNote('添加失败：' + ((d && d.error) || '未知原因'));
+      }
+    }).catch(function () { mfNote('添加失败：本机服务无响应'); });
+  }
+
+  function toggleExtraCard(s, item) {
+    if (!s) return;
+    if (multiFollowOn[s.mid]) { toggleFollow(s.mid, item); return; }
+    if (!multiCustom.some(function (x) { return x.mid === s.mid; })) {
+      multiCustom.unshift({ mid: s.mid, uname: s.uname || s.name, face: s.face,
+                            room: s.room, title: s.title, online: s.online });
+      saveMfState();
+    }
+    multiFollowOn[s.mid] = true;
+    saveMfState();
+    if (item) item.classList.add('on');
+    addFollowCell(s);
+    mfNote('已加入监控墙：' + (s.uname || s.name || s.mid));
+  }
+
   function renderMulti(force) {
     var grid = document.getElementById('multi-grid');
     if (!grid) return;
     multiTeardown();
     applyMultiLayout();
     if (multiSrc === 'following') { renderMultiFollowing(force); return; }
+    if (multiSrc === 'recommend' || multiSrc === 'guild') {
+      applyMultiSide();
+      renderFollowGrid(false);          // 墙上仍是「已加入监控墙」的那几路
+      if (multiSrc === 'recommend') renderMultiRecommend();
+      else renderMultiGuild();
+      applyMultiLayout();
+      if (multiChatOpen) renderFocusChat();
+      return;
+    }
     applyMultiSide();
     fetchStations().then(function (list) {
       // 名单是异步回来的：等它回来时用户可能已经切走了 —— 这时不该再接流
@@ -11296,6 +11835,14 @@
   var multiCustom = store.get('xl_mf_custom', []) || [];   // 手动添加的直播间（「＋ 添加直播间」）
   var multiLayout = store.get('xl_mf_layout', 'auto') || 'auto';
   var multiFocusId = '';
+  /* 每格弹幕开关（data-id -> true）与聚焦弹幕面板状态。开关是**按格独立**的：
+     关掉一格不影响其它格，也不影响聚焦面板。 */
+  var multiChatOn = store.get('xl_mf_chat_on', {}) || {};
+  var multiChatOpen = false;
+  var multiChatRoom = '';
+  var cellChatRef = {};            // data-id -> room（用于换房/销毁时解绑）
+  var chatFeeds = {};              // room -> {refs, since, items, err, running}
+  var chatTimers = {};             // room -> setTimeout id
   /* 被「最小化」的那几路：data-id → true。只在本次会话内有效 ——
      刷新页面就全部回来，符合「暂时隐藏」的语义。 */
   var multiHidden = {};                                    // 聚焦中的那格（不记忆：刷新后回到均分）
@@ -11871,12 +12418,21 @@
   function applyMultiSide() {
     var side = document.getElementById('multi-side');
     var btn = document.getElementById('multi-side-toggle');
-    var hasSide = (multiSrc === 'following');
-    if (side) side.hidden = !hasSide || multiSideHidden;
+    var chat = document.getElementById('multi-chat');
+    var ct = document.getElementById('multi-chat-toggle');
+    var hasSide = (multiSrc === 'following' || multiSrc === 'recommend'
+                   || multiSrc === 'guild');
+    if (chat) chat.hidden = !multiChatOpen;
+    if (side) side.hidden = multiChatOpen || !hasSide || multiSideHidden;
     if (btn) {
-      btn.hidden = !hasSide;
+      btn.hidden = !hasSide || multiChatOpen;
       btn.textContent = multiSideHidden ? '› 展开列表' : '‹ 收起列表';
       btn.title = multiSideHidden ? '展开左侧主播列表' : '收起左侧主播列表，画面墙铺满整行';
+    }
+    if (ct) {
+      ct.hidden = (multiSrc === 'stations');
+      ct.classList.toggle('on', multiChatOpen);
+      ct.textContent = multiChatOpen ? '退出弹幕' : '聚焦弹幕';
     }
   }
 
@@ -11885,6 +12441,7 @@
       + '<video muted playsinline></video>'
       + msMinHtml()
       + msOffHtml(s.uname, s.face, '正在获取开播状态…')
+      + '<div class="ms-dm" hidden></div>'
       + msBarHtml('关注', s.uname, '#8a8a95', s.room) + '</div>';
   }
 

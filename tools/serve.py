@@ -1097,6 +1097,10 @@ STATIONLESS_OK = (
     "/api/protocol/register", "/api/protocol/unregister",
     "/api/following/live",     # 只依赖登录态，与有没有注册主播无关
     "/api/feedback", "/api/feedback/conf",   # 反馈是本机功能，与主播无关
+    # 监控室的推荐/工会/Danmist/按房间弹幕都不依赖注册表
+    "/api/live/recommend", "/api/live/guilds", "/api/live/guild",
+    "/api/live/chat/recent", "/api/live/chat/stop",
+    "/api/guild/add", "/api/danmist/status", "/api/danmist/start",
     "/api/feedback/upload", "/api/feedback/reveal",
     "/api/live/ws",            # 同上：房间号由 URL 带，跟注册表无关
     # 歌单：导入的是任意 B 站投稿，与注册表里有没有主播无关（首批用户就是先导歌单）
@@ -1168,7 +1172,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.30"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.31"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
@@ -5114,16 +5118,18 @@ def _live_emote_find(unique):
     return None
 
 
-def _send_danmaku(msg, emote=None):
+def _send_danmaku(msg, emote=None, room=None):
     """发一条弹幕，返回 (B 站 code, message)。code=0 才是成功。
 
     emote 不为空时走**表情通道**：B 站把大表情/房间表情当独立类型，
     普通文字通道发出去只会显示成一串文字（实测「不能用 [表情名] 兜底」）。
+    room：监控室聚焦面板要发给「当前那一路」，不传则跟当前板块。
     """
     _, jct = load_credentials()
+    target = str(room or cur_room())
     fields = {
         "bubble": "0", "msg": msg, "color": "16777215", "mode": "1",
-        "fontsize": "25", "roomid": cur_room(), "rnd": str(int(time.time())),
+        "fontsize": "25", "roomid": target, "rnd": str(int(time.time())),
         "csrf": jct, "csrf_token": jct,
     }
     if emote:
@@ -5143,7 +5149,7 @@ def _send_danmaku(msg, emote=None):
     sess = load_credentials()[0]
     req = urllib.request.Request("https://api.live.bilibili.com/msg/send", data=body, headers={
         "User-Agent": UA,
-        "Referer": "https://live.bilibili.com/%s" % cur_room(),
+        "Referer": "https://live.bilibili.com/%s" % target,
         "Origin": "https://live.bilibili.com",
         "Content-Type": "application/x-www-form-urlencoded",
         "Cookie": "SESSDATA=%s; bili_jct=%s" % (sess, jct),
@@ -5157,6 +5163,9 @@ def _send_danmaku(msg, emote=None):
 
 
 def api_live_send(obj):
+    room = str(obj.get("room") or "").strip()
+    if room and not room.isdigit():
+        return 400, {"error": "房间号不合法"}
     em = obj.get("emoticon")
     if em is not None:
         if not isinstance(em, dict):
@@ -5168,7 +5177,7 @@ def api_live_send(obj):
             return 403, {"error": "这个表情当前不可发送"}
         if not _danmaku_ready():
             return 403, {"error": "发弹幕需要登录，并粘贴 bili_jct（直播间页右侧有入口）"}
-        code, message = _send_danmaku("", item)
+        code, message = _send_danmaku("", item, room or None)
         return (200 if code == 0 else 502), {"code": code, "message": message,
                                              "emoticon": item["u"]}
     msg = str(obj.get("msg") or "").strip()
@@ -5178,7 +5187,7 @@ def api_live_send(obj):
         return 400, {"error": "弹幕最长 %d 个字（当前 %d 个）" % (DANMAKU_MAX_LEN, len(msg))}
     if not _danmaku_ready():
         return 403, {"error": "发弹幕需要登录，并粘贴 bili_jct（直播间页右侧有入口）"}
-    code, message = _send_danmaku(msg)
+    code, message = _send_danmaku(msg, None, room or None)
     return (200 if code == 0 else 502), {"code": code, "message": message}
 
 
@@ -5626,6 +5635,219 @@ def _follow_batch(batch):
             "online": info.get("online") or 0,
         })
     return out
+
+
+# ---------------------------------------------------------------- 监控室：推荐 / 工会
+RECOMMEND_CACHE = {"at": 0.0, "area": "", "data": []}
+GUILD_SEED = os.path.join(ROOT, "assets", "guilds_seed.json")
+GUILD_USER = os.path.join(ROOT, "data", "guilds_user.json")
+_GUILD_CACHE = {}                 # name -> {"at":ts,"data":{...}}
+GUILD_CACHE_TTL = 30
+
+
+def _guild_name(n):
+    """萌娘条目名常带消歧义后缀：七海(虚拟UP主) → 七海。"""
+    return re.sub(r"[（(](虚拟UP主|虚拟主播|虚拟歌手)[)）]$", "", str(n or "")).strip()
+
+
+def _guilds_load():
+    """内置名册（随版本更新）+ 用户手动添加（data/guilds_user.json）。"""
+    out = {}
+    try:
+        with open(GUILD_SEED, encoding="utf-8") as f:
+            seed = json.load(f)
+        for g in (seed.get("guilds") or []):
+            name = str(g.get("name") or "").strip()
+            if not name:
+                continue
+            out.setdefault(name, {})
+            for m in (g.get("members") or []):
+                uid = str(m.get("uid") or "").strip()
+                if uid.isdigit():
+                    out[name][uid] = {"name": _guild_name(m.get("name")) or ("UID " + uid),
+                                      "uid": uid}
+    except Exception:
+        pass
+    try:
+        with open(GUILD_USER, encoding="utf-8") as f:
+            user = json.load(f)
+        for name, arr in (user.items() if isinstance(user, dict) else []):
+            name = str(name).strip()
+            if not name or not isinstance(arr, list):
+                continue
+            out.setdefault(name, {})
+            for m in arr:
+                uid = str((m or {}).get("uid") or "").strip()
+                if uid.isdigit():
+                    out[name][uid] = {"name": str((m or {}).get("name") or uid)[:40],
+                                      "uid": uid}
+    except Exception:
+        pass
+    return {k: list(v.values()) for k, v in out.items()}
+
+
+def api_guilds():
+    g = _guilds_load()
+    return 200, {"guilds": [{"name": k, "count": len(v)}
+                            for k, v in sorted(g.items(), key=lambda kv: -len(kv[1]))]}
+
+
+def api_guild_live(name):
+    name = str(name or "").strip()
+    if not name:
+        return 400, {"error": "缺少工会名"}
+    now = time.time()
+    hit = _GUILD_CACHE.get(name)
+    if hit and now - hit["at"] < GUILD_CACHE_TTL:
+        return 200, hit["data"]
+    members = _guilds_load().get(name) or []
+    if not members:
+        return 404, {"error": "没有这个工会的名册"}
+    uids = [m["uid"] for m in members]
+    live = []
+    failed = 0
+    for i in range(0, len(uids), FOLLOW_BATCH):
+        got = _follow_batch(uids[i:i + FOLLOW_BATCH])
+        if got is None:
+            failed += 1
+            continue
+        live.extend(got)
+    if failed and not live:
+        return 502, {"error": "开播状态获取失败（可能被限流），稍后重试"}
+    # 名册里的显示名优先（B 站 uname 可能带后缀）
+    by_uid = {m["uid"]: m for m in members}
+    for x in live:
+        m = by_uid.get(x["mid"])
+        if m and m.get("name"):
+            x["name"] = m["name"]
+    live.sort(key=lambda x: -(x.get("online") or 0))
+    data = {"ok": True, "name": name, "total": len(members), "live": len(live),
+            "list": live, "at": int(now),
+            "warn": ("有 %d 批状态获取失败，结果可能不全" % failed) if failed else ""}
+    _GUILD_CACHE[name] = {"at": now, "data": data}
+    return 200, data
+
+
+def api_guild_add(obj):
+    name = str(obj.get("guild") or "").strip()
+    uid = str(obj.get("uid") or "").strip()
+    uname = str(obj.get("name") or "").strip()
+    if not name or len(name) > 40:
+        return 400, {"error": "工会名不能为空，且不超过 40 字"}
+    if not uid.isdigit():
+        return 400, {"error": "B 站 UID 必须是数字"}
+    if not uname:
+        uname = "UID " + uid
+    try:
+        with open(GUILD_USER, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    arr = data.get(name) if isinstance(data.get(name), list) else []
+    if not any(str((x or {}).get("uid")) == uid for x in arr):
+        arr.append({"name": uname[:40], "uid": uid})
+    data[name] = arr
+    try:
+        os.makedirs(os.path.dirname(GUILD_USER), exist_ok=True)
+        with open(GUILD_USER, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+    except OSError as e:
+        return 500, {"error": "保存失败：%s" % str(e)[:80]}
+    _GUILD_CACHE.pop(name, None)
+    return 200, {"ok": True, "guild": name, "uid": uid, "name": uname}
+
+
+def api_live_recommend(area="9"):
+    """虚拟区当前热门（Area/getRoomList，老接口不需要 wbi 签名）。"""
+    area = str(area or "9")
+    if not area.isdigit():
+        area = "9"
+    now = time.time()
+    if RECOMMEND_CACHE["data"] and RECOMMEND_CACHE["area"] == area \
+            and now - RECOMMEND_CACHE["at"] < 60:
+        return 200, {"ok": True, "area": area, "list": RECOMMEND_CACHE["data"],
+                     "cached": True}
+    url = ("https://api.live.bilibili.com/room/v1/Area/getRoomList"
+           "?parent_area_id=%s&area_id=0&sort_type=online&page_no=1&page_size=30" % area)
+    try:
+        d = bili_get(url, "https://live.bilibili.com/%s" % area, fallback_anon=True)
+    except Exception as e:
+        return 502, {"error": "推荐列表获取失败：%s" % str(e)[:80]}
+    if d.get("code") != 0:
+        return 502, {"error": "推荐列表 code=%s %s" % (d.get("code"), d.get("message"))}
+    out = []
+    for x in (d.get("data") or []):
+        room = str(x.get("roomid") or "")
+        mid = str(x.get("uid") or "")
+        if not room or not mid:
+            continue
+        out.append({"mid": mid, "room": room, "uname": x.get("uname") or "",
+                    "face": x.get("face") or "", "title": x.get("title") or "",
+                    "online": int(x.get("online") or 0),
+                    "area": x.get("area_v2_name") or x.get("area_name") or "",
+                    "cover": x.get("user_cover") or x.get("cover") or ""})
+    RECOMMEND_CACHE.update(at=now, area=area, data=out)
+    return 200, {"ok": True, "area": area, "list": out, "cached": False}
+
+
+# ---------------------------------------------------------------- Danmist 弹幕板
+# 独立应用（MIT），默认 127.0.0.1:8373。这里只做「探测 + 尝试启动」，不捆绑、不改它。
+DANMIST_URL = "http://127.0.0.1:8373/"
+DANMIST_DOWNLOAD = "https://github.com/xShadowMoon/Danmist/releases/latest"
+
+
+def _danmist_running():
+    try:
+        req = urllib.request.Request(DANMIST_URL, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=0.8) as r:
+            return 200 <= int(getattr(r, "status", 200)) < 500
+    except Exception:
+        return False
+
+
+def _danmist_exe():
+    lad = os.environ.get("LOCALAPPDATA") or ""
+    pf = os.environ.get("ProgramFiles") or r"C://Program Files"
+    cands = [
+        os.path.join(lad, "Programs", "Danmist", "Danmist.exe"),
+        os.path.join(lad, "Programs", "Danmist", "danmist.exe"),
+        os.path.join(lad, "Danmist", "Danmist.exe"),
+        os.path.join(pf, "Danmist", "Danmist.exe"),
+    ]
+    for p in cands:
+        if lad and p and os.path.isfile(p):
+            return p
+    return ""
+
+
+def api_danmist_status():
+    run = _danmist_running()
+    return 200, {"ok": True, "running": run, "url": DANMIST_URL,
+                 "download": DANMIST_DOWNLOAD, "exe": _danmist_exe()}
+
+
+def api_danmist_start():
+    if _danmist_running():
+        return 200, {"ok": True, "running": True, "url": DANMIST_URL}
+    exe = _danmist_exe()
+    if not exe:
+        return 404, {"error": "没有找到 Danmist。装上（或解压）后再点一次。",
+                     "download": DANMIST_DOWNLOAD, "running": False}
+    try:
+        subprocess.Popen([exe], cwd=os.path.dirname(exe),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, close_fds=True,
+                         creationflags=0x00000008 | 0x00000200)
+    except Exception as e:
+        return 500, {"error": "启动失败：%s" % str(e)[:100], "download": DANMIST_DOWNLOAD}
+    for _ in range(24):
+        time.sleep(0.5)
+        if _danmist_running():
+            return 200, {"ok": True, "running": True, "url": DANMIST_URL}
+    return 504, {"error": "已尝试启动，但 12 秒内没等到 8373 端口响应。",
+                 "download": DANMIST_DOWNLOAD, "running": False}
 
 
 def _follow_live_fetch():
@@ -7825,7 +8047,9 @@ def chat_state(sid=None):
         if st is None:
             st = {"subs": [], "backlog": [], "worker": {
                 "thread": None, "running": False, "popularity": 0,
-                "error": "", "logged_err": ""}}
+                "error": "", "logged_err": ""},
+                # 监控室按房间轮询用：ring 带序号，便于 since 增量取
+                "ring": [], "seq": 0, "keep_at": 0.0, "ephemeral": False}
             CHAT[sid] = st
         return st
 _UID = [None]
@@ -7917,6 +8141,9 @@ def _chat_broadcast(sid, item):
     with CHAT_LOCK:
         st["backlog"].append(payload)
         del st["backlog"][:-CHAT_BACKLOG_MAX]
+        st["seq"] = int(st.get("seq") or 0) + 1
+        st.setdefault("ring", []).append({"seq": st["seq"], "item": item})
+        del st["ring"][:-200]
         subs = list(st["subs"])
     for q in subs:
         try:
@@ -7996,13 +8223,20 @@ def _chat_parse_nested(sid, payload):
         off += ln
 
 
-def _chat_worker(sid):
+def _chat_worker(sid, room=None):
     st = chat_state(sid)
     st["worker"].update(running=True, error="")
-    _CUR.station = find_station(sid)      # 后台线程：不绑就会连到主站房间去
+    if room:
+        # 监控室可盯注册表之外的房间：给线程一个最小上下文，cur_room() 才有值
+        _CUR.station = {"id": sid, "room": str(room), "mid": ""}
+    else:
+        _CUR.station = find_station(sid)  # 后台线程：不绑就会连到主站房间去
     try:
         while True:
             with CHAT_LOCK:
+                if st.get("ephemeral") and st.get("keep") \
+                        and time.time() - float(st.get("keep_at") or 0) > 90:
+                    st["keep"] = False
                 if not st["subs"] and not st.get("keep"):
                     break
             sock = None
@@ -8106,6 +8340,57 @@ def chat_unsubscribe(sid, q):
     with CHAT_LOCK:
         if q in st["subs"]:
             st["subs"].remove(q)
+
+
+ROOM_CHAT_MAX = 6            # 同时盯的弹幕路数：再多就是 6 条 B 站 WS + 6 份解析线程
+
+
+def _room_key(room):
+    return "room:" + str(room)
+
+
+def api_room_chat(room, since=0):
+    """监控室按房间取弹幕增量（轮询）。返回 seq 之后的条目，客户端自己维护 since。
+
+    为什么不用 SSE：一个格子一条 HTTP 长连接，6 路就把同源连接用满了；轮询是
+    短请求，格子的开关互不影响，也不会跟画面墙抢连接。
+    """
+    room = str(room or "").strip()
+    if not room.isdigit():
+        return 400, {"error": "房间号不合法"}
+    key = _room_key(room)
+    st = chat_state(key)          # 内部会拿一次锁，不能套在下面的 with 里（Lock 不可重入）
+    with CHAT_LOCK:
+        active = sum(1 for k, v in CHAT.items()
+                     if k.startswith("room:") and v["worker"]["running"])
+        if not st["worker"]["running"]:
+            if active >= ROOM_CHAT_MAX:
+                return 429, {"error": "同时最多看 %d 路弹幕，请先关掉几路" % ROOM_CHAT_MAX}
+            st["ephemeral"] = True
+            st["keep"] = True
+            st["keep_at"] = time.time()
+            t = threading.Thread(target=_chat_worker, args=(key, room), daemon=True)
+            st["worker"]["thread"] = t
+            t.start()
+        else:
+            st["keep"] = True
+            st["keep_at"] = time.time()
+        seq = int(st.get("seq") or 0)
+        items = [x for x in list(st.get("ring") or []) if int(x["seq"]) > int(since)][-50:]
+        wk = dict(st["worker"])
+    return 200, {"ok": True, "room": room, "seq": seq, "items": items,
+                 "state": {"running": bool(wk.get("running")), "error": wk.get("error") or ""},
+                 "logged": bool(load_credentials()[0])}
+
+
+def api_room_chat_stop(room):
+    room = str(room or "").strip()
+    if not room.isdigit():
+        return 400, {"error": "房间号不合法"}
+    st = chat_state(_room_key(room))
+    with CHAT_LOCK:
+        st["keep"] = False
+    return 200, {"ok": True}
 
 
 def api_login_qrcode():
@@ -9950,6 +10235,19 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_live_wheel_status())
         if parsed.path == "/api/live/brief":
             return self._json(*api_live_brief())
+        if parsed.path == "/api/live/recommend":
+            return self._json(*api_live_recommend(q.get("area", ["9"])[0]))
+        if parsed.path == "/api/live/guilds":
+            return self._json(*api_guilds())
+        if parsed.path == "/api/live/guild":
+            return self._json(*api_guild_live(q.get("name", [""])[0]))
+        if parsed.path == "/api/live/chat/recent":
+            return self._json(*api_room_chat(q.get("room", [""])[0],
+                                             parse_int(q.get("since", ["0"])[0], 0)))
+        if parsed.path == "/api/live/chat/stop":
+            return self._json(*api_room_chat_stop(q.get("room", [""])[0]))
+        if parsed.path == "/api/danmist/status":
+            return self._json(*api_danmist_status())
         if parsed.path == "/api/live/emoticons":
             return self._json(*api_live_emoticons("refresh" in q))
         if parsed.path == "/api/feedback/conf":
@@ -10096,6 +10394,10 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(400, {"error": "本机没找到 ffmpeg，无法做分段"})
             queued = segments_enqueue(bvid, _find_program(bvid))
             return self._json(200, {"ok": True, "queued": queued})
+        if parsed.path == "/api/guild/add":
+            return self._json(*api_guild_add(obj))
+        if parsed.path == "/api/danmist/start":
+            return self._json(*api_danmist_start())
         if parsed.path == "/api/feedback":
             return self._json(*api_feedback(obj))
         if parsed.path == "/api/feedback/upload":
