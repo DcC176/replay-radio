@@ -116,3 +116,6 @@ data/recorder.json
 # .tmp/：测试/临时脚本目录，非仓库内容
 .tmp/
 data/guilds_user.json
+# vtbs.moe 主播资料缓存（近 1 万条 / 约 2MB，运行时写）
+data/vtbs_info.json
+data/vtbs_cache.json

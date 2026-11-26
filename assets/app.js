@@ -8983,253 +8983,581 @@
      pageSetup 放在这里而不是 initMain 里 —— 服务靠页面心跳判断「网页是不是全关了」，
      引导页停留期间也得照常报到，否则会被判定成页面已关闭。 */
 
-  /* ---------------------------------------------------------- 弹幕板（内置）
-     以前这一页是「探测本机 Danmist（127.0.0.1:8373）再 iframe 内嵌」——用户机器上
-     没装就整页空着，装了两个端口还得自己同步房间。v1.9.32 起改为**软件内置**：
-     直接复用本机的按房间弹幕接口（/api/live/chat/recent 轮询 + /api/live/chat/stop），
-     一列一个房间，每列自带一个与直播间同款的发送框。
-     并发上限 6 路：后端 ROOM_CHAT_MAX 也是 6（每条都是一条 B 站 WS + 一个解析线程）。 */
-  var BOARD_MAX = 6;
-  var BOARD_STORE = 'xl_board_rooms';
-  var boardRooms = store.get(BOARD_STORE, []) || [];
-  if (!Array.isArray(boardRooms)) boardRooms = [];
-  var boardSenders = {};         // room -> sender
-  var boardPickOpen = false;
+  /* ---------------------------------------------------------- 弹幕板（五面板）
+     布局与交互对齐 Danmist（MIT，https://github.com/xShadowMoon/Danmist）：
+     **弹幕 / SC / 点歌 / 礼物 / 观众**。数据由本机服务聚合（`/api/live/board`）：
+     增量弹幕 + 五面板快照（SC、礼物合计、观众榜、舰长、统计、点歌队列）。
+     点歌只做队列与审核，不放音 —— 不接网易云 / QQ 音乐，避免登录凭据与版权问题。
+     ⚠️ 与 Danmist 一样是**单房间**工作台，不是多列监控墙。
+     ⚠️ 面板里的时间、名字颜色、舰长/房管/粉丝牌徽章都按 B 站弹幕里的原字段画。 */
+  var BD_ROOM_KEY = 'xl_board_room';
+  var BD = {
+    room: String(store.get(BD_ROOM_KEY, '') || ''),
+    name: '', seq: 0, timer: 0, busy: false, err: '',
+    dm: [], dmShown: 0,
+    snap: { sc: [], gifts: [], viewers: [], enters: [], guards: [],
+            stats: {}, songs: { items: [], cur: '' } },
+    tab: { sc: 'all', song: 'wait', gift: 'all', vw: 'online' },
+    filter: 'all', sender: null
+  };
+  var BD_MAX_DM = 400;
 
-  function boardSave() {
-    store.set(BOARD_STORE, boardRooms);
+  function bdEl(id) { return document.getElementById(id); }
+
+  function bdClock(t) {
+    var d = new Date((t || 0) * 1000);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
   }
 
-  function boardState(text) {
-    var el2 = document.getElementById('board-state');
-    if (el2) el2.textContent = text;
+  /* 金瓜子 1000 = ¥1；银瓜子（免费礼物）不计入金额 —— 与 Danmist 的口径一致 */
+  function bdYuan(coin) {
+    var y = (coin || 0) / 1000;
+    if (y >= 1000) return '¥' + fmtNum(Math.round(y));
+    return '¥' + y.toFixed(y < 10 ? 2 : 1);
   }
 
-  function boardHas(room) {
-    room = String(room || '');
-    return boardRooms.some(function (x) { return String(x.room) === room; });
-  }
+  function bdNote(t) { var n = bdEl('board-state'); if (n) n.textContent = t || ''; }
 
-  /* 加一列。已经在了就只提示，不重复建连接。 */
-  function boardAddRoom(card) {
-    if (!card || !/^\d+$/.test(String(card.room || ''))) {
-      boardState('没解析出房间号，换个链接或直接填房间号试试');
-      return false;
+  function bdEmpty(text) { return '<div class="bd-empty">' + esc(text) + '</div>'; }
+
+  /* ---------------- 顶部：房间与统计 ---------------- */
+  function bdSyncHead() {
+    var nm = bdEl('bd-room-name'), meta = bdEl('bd-room-meta'), open = bdEl('bd-open');
+    if (nm) nm.textContent = BD.name || (BD.room ? ('房间 ' + BD.room) : '未选择直播间');
+    if (meta) {
+      meta.textContent = BD.room
+        ? ('房间 ' + BD.room + (BD.err ? ' · ' + BD.err : ''))
+        : '点这里选一个直播间';
     }
-    var room = String(card.room);
-    if (boardHas(room)) { boardState('这个房间已经在板子上了'); return false; }
-    if (boardRooms.length >= BOARD_MAX) {
-      boardState('最多同时看 ' + BOARD_MAX + ' 路弹幕，先关掉一列再加');
-      return false;
+    if (open) {
+      if (BD.room) {
+        open.href = 'https://live.bilibili.com/' + BD.room;
+        open.hidden = false;
+      } else {
+        open.hidden = true;
+      }
     }
-    boardRooms.push({ room: room, name: card.uname || card.name || ('房间 ' + room) });
-    boardSave();
-    renderBoard();
+  }
+
+  function bdSyncStats() {
+    var s = BD.snap.stats || {};
+    var set = function (id, v) { var e = bdEl(id); if (e) e.textContent = v; };
+    set('bd-online', s.online ? fmtNum(s.online) : '—');
+    set('bd-watched', s.watched ? fmtNum(s.watched) : '—');
+    set('bd-dm-n', s.danmaku ? fmtNum(s.danmaku) : '0');
+    set('bd-sc-n', (BD.snap.sc.length ? BD.snap.sc.length : 0) + ' 条');
+    set('bd-gift-n', bdYuan(s.gift_coin || 0));
+  }
+
+  /* ---------------- 面板 1：弹幕 ---------------- */
+  function bdDmBadges(it) {
+    var out = '';
+    if (it.guard === 1) out += '<i class="bd-bd t1">总督</i>';
+    else if (it.guard === 2) out += '<i class="bd-bd t2">提督</i>';
+    else if (it.guard === 3) out += '<i class="bd-bd t3">舰长</i>';
+    if (it.admin) out += '<i class="bd-bd adm">房管</i>';
+    if (it.medal && it.medal.level) {
+      out += '<i class="bd-bd med" title="' + esc(it.medal.name || '') + '">'
+        + '<em>' + esc(it.medal.name || '') + '</em>' + it.medal.level + '</i>';
+    }
+    return out;
+  }
+
+  function bdDmRow(it) {
+    var row = document.createElement('div');
+    row.className = 'bd-line' + (it.admin ? ' admin' : '');
+    row.innerHTML = '<time>' + bdClock(it.t) + '</time>' + bdDmBadges(it)
+      + '<span class="bd-nm" style="color:hsl(' + ((it.uid || 0) % 360) + ',70%,72%)">'
+      + esc(it.uname || '') + '：</span>';
+    if (it.emoticon && it.emoticon.url) {
+      var im = document.createElement('img');
+      im.className = 'bd-em';
+      im.src = dynImg(it.emoticon.url);
+      im.alt = it.text || '表情';
+      im.loading = 'lazy';
+      row.appendChild(im);
+    } else {
+      var tx = document.createElement('span');
+      tx.className = 'bd-tx';
+      tx.textContent = it.text || '';
+      row.appendChild(tx);
+    }
+    return row;
+  }
+
+  function bdDmMatch(it) {
+    if (BD.filter === 'guard') return it.guard > 0;
+    if (BD.filter === 'medal') return !!(it.medal && it.medal.level);
     return true;
   }
 
-  function boardRemoveRoom(room) {
-    room = String(room || '');
-    boardRooms = boardRooms.filter(function (x) { return String(x.room) !== room; });
-    boardSave();
-    chatUnwatch(room, 'board:' + room);
-    delete boardSenders[room];
-    renderBoard();
-  }
-
-  function boardColumnHtml(r) {
-    var room = String(r.room);
-    return '<div class="bc" data-room="' + esc(room) + '">'
-      + '<div class="bc-h">'
-      + '<b title="' + esc(r.name) + '">' + esc(r.name) + '</b>'
-      + '<span class="bc-state" data-bc-state>连接中…</span>'
-      + '<a class="bc-btn" href="https://live.bilibili.com/' + esc(room) + '"'
-      + ' target="_blank" rel="noopener noreferrer" title="在新标签页打开原直播间">↗</a>'
-      + '<button class="bc-btn" type="button" data-bc-x title="从弹幕板上移除">×</button>'
-      + '</div>'
-      + '<div class="bc-list" data-bc-list></div>'
-      + '<div class="bc-send" data-bc-send>' + chatSenderHtml() + '</div>'
-      + '</div>';
-  }
-
-  /* 一列的数据源：chatWatch 是按房间共享的，监控室/监控格子用的也是它 */
-  function boardFeed(r) {
-    var room = String(r.room);
-    var col = document.querySelector('.bc[data-room="' + room + '"]');
-    if (!col) return;
-    var list = col.querySelector('[data-bc-list]');
-    var stateEl = col.querySelector('[data-bc-state]');
-    var shown = 0;
-
-    function paint(items) {
-      if (!list) return;
-      if (items.length < shown) { list.innerHTML = ''; shown = 0; }
-      var near = list.scrollHeight - list.scrollTop - list.clientHeight < 60;
-      var frag = document.createDocumentFragment();
-      items.slice(shown).forEach(function (it) {
-        if (it.type === 'state') return;
-        frag.appendChild(monRow(it));
-      });
-      list.appendChild(frag);
-      shown = items.length;
-      while (list.children.length > 200) list.removeChild(list.firstChild);
-      if (near || shown <= 3) list.scrollTop = list.scrollHeight;
-    }
-
-    function stateText(f) {
-      if (!stateEl) return;
-      stateEl.textContent = f.err ? '断开' : (f.running ? '已连接' : '连接中…');
-      stateEl.classList.toggle('bad', !!f.err);
-      stateEl.title = f.err || '';
-    }
-
-    var f = chatWatch(room, 'board:' + room, function (items, feed) {
-      stateText(feed);
-      paint(feed.items.filter(function (it) { return it.type !== 'state'; }));
-    });
-    if (f) {
-      stateText(f);
-      paint(f.items.filter(function (it) { return it.type !== 'state'; }));
-      // 刚建的 feed 还在等第一轮轮询：先把状态画成「连接中」
-      if (!f.running && !f.err) stateText(f);
-    }
-    var sender = makeChatSender(col.querySelector('[data-bc-send]'), {
-      room: function () { return room; },
-      label: '发条弹幕…'
-    });
-    boardSenders[room] = sender;
-  }
-
-  function renderBoard() {
-    var cols = document.getElementById('board-cols');
-    if (!cols) return;
-    // 拆掉旧列之前先把订阅解绑，否则切页再回来会越挂越多
-    Array.prototype.forEach.call(cols.querySelectorAll('.bc'), function (c) {
-      var room = c.getAttribute('data-room');
-      if (room) chatUnwatch(room, 'board:' + room);
-    });
-    boardSenders = {};
-    if (!boardRooms.length) {
-      cols.innerHTML = '<div class="board-empty">'
-        + '<b>弹幕板是空的</b>'
-        + '<span>在上面填房间号（或直播间链接），或者点「从关注 / 我的板块选」。</span>'
-        + '<span class="board-hint">最多同时看 ' + BOARD_MAX
-        + ' 路；每列都能直接发弹幕，与「直播间」用的是同一套发送框。</span>'
-        + '</div>';
-      boardState('添加直播间后，这里按房间分列显示实时弹幕');
+  function bdRenderDm() {
+    var list = bdEl('bd-dm-list');
+    if (!list) return;
+    var shown = BD.dm.filter(bdDmMatch);
+    var cnt = bdEl('bd-dm-count');
+    if (cnt) cnt.textContent = String(shown.length);
+    /* 增量追加：每 1.2 秒整块重建 400 行会明显掉帧，也会打断滚动位置。
+       过滤条件变化、或缓冲被裁剪过，就整块重画。 */
+    if (BD.dmShown > shown.length) { list.innerHTML = ''; BD.dmShown = 0; }
+    if (!shown.length) {
+      if (!list.querySelector('.bd-empty')) list.innerHTML = bdEmpty(BD.room ? '还没有弹幕，等一会儿…' : '先选一个直播间');
+      BD.dmShown = 0;
       return;
     }
-    cols.innerHTML = boardRooms.map(boardColumnHtml).join('');
-    boardRooms.forEach(boardFeed);
-    boardState(boardRooms.length + ' 路弹幕 · 最多 ' + BOARD_MAX + ' 路');
+    if (BD.dmShown === 0 || (BD.dmShown === shown.length && !list.querySelector('.bd-line'))) {
+      list.innerHTML = '';
+    }
+    var near = list.scrollHeight - list.scrollTop - list.clientHeight < 60;
+    var frag = document.createDocumentFragment();
+    shown.slice(BD.dmShown).forEach(function (it) { frag.appendChild(bdDmRow(it)); });
+    list.appendChild(frag);
+    BD.dmShown = shown.length;
+    while (list.children.length > 260) list.removeChild(list.firstChild);
+    if (near || BD.dmShown <= 3) list.scrollTop = list.scrollHeight;
   }
 
-  /* 离开弹幕板：把所有列的解绑、顺手让后端停掉对应的 WS（不占着连接） */
-  function stopBoard() {
-    Array.prototype.forEach.call(document.querySelectorAll('.bc'), function (c) {
-      var room = c.getAttribute('data-room');
-      if (room) chatUnwatch(room, 'board:' + room);
+  /* ---------------- 面板 2：SC ---------------- */
+  function bdScRow(x) {
+    var row = document.createElement('div');
+    row.className = 'bd-item bd-scx' + (x.read ? ' read' : '') + (x.price >= 100 ? ' big' : '');
+    row.innerHTML = '<span class="bd-av">' + faceHtml(x.face, 'bd-av-img', x.uname || '') + '</span>'
+      + '<div class="bd-item-b">'
+      + '<div class="bd-item-h"><b>' + esc(x.uname || '') + '</b>'
+      + '<i class="bd-price">¥' + (x.price || 0) + '</i>'
+      + '<time>' + bdClock(x.t) + '</time>'
+      + '<button class="bd-mini" type="button" data-sc-read="' + esc(x.id) + '"'
+      + (x.read ? ' disabled' : '') + '>' + (x.read ? '已读' : '已读') + '</button></div>'
+      + '<p>' + esc(x.text || '') + '</p></div>';
+    return row;
+  }
+
+  function bdRenderSc() {
+    var list = bdEl('bd-sc-list');
+    if (!list) return;
+    var all = BD.snap.sc || [];
+    var unread = all.filter(function (x) { return !x.read; });
+    var cnt = bdEl('bd-sc-count');
+    if (cnt) cnt.textContent = all.length + ' 条' + (unread.length ? ' · 未读 ' + unread.length : '');
+    var shown = BD.tab.sc === 'unread' ? unread : all;
+    if (!shown.length) {
+      list.innerHTML = bdEmpty(BD.tab.sc === 'unread' ? '没有未读 SC' : '还没有 SC');
+      return;
+    }
+    list.innerHTML = '';
+    // 与 Danmist 一致：按时间正序，新的在下面
+    shown.slice(-60).forEach(function (x) { list.appendChild(bdScRow(x)); });
+    bindFaceFallback(list);
+    list.scrollTop = list.scrollHeight;
+  }
+
+  /* ---------------- 面板 3：点歌 ---------------- */
+  var BD_SONG_LABEL = { wait: '待审核', queued: '已通过', playing: '播放中',
+                        played: '已播', skipped: '已跳过' };
+
+  function bdSongRow(x, i) {
+    var row = document.createElement('div');
+    row.className = 'bd-item bd-songx' + (x.state === 'playing' ? ' playing' : '');
+    row.innerHTML = '<span class="bd-rank">' + (i + 1) + '</span>'
+      + '<div class="bd-item-b"><div class="bd-item-h"><b>' + esc(x.song || '') + '</b>'
+      + '<i class="bd-chip-s">' + (BD_SONG_LABEL[x.state] || x.state) + '</i></div>'
+      + '<div class="bd-item-sub">' + esc(x.name || '') + ' · ' + bdClock(x.t) + '</div></div>'
+      + '<span class="bd-song-btns">'
+      + (x.state === 'wait' ? '<button class="bd-mini ok" type="button" data-song-ok="' + esc(x.id) + '" title="通过">✓</button>' : '')
+      + (x.state !== 'played' && x.state !== 'skipped'
+          ? '<button class="bd-mini del" type="button" data-song-skip="' + esc(x.id) + '" title="跳过 / 移除">×</button>' : '')
+      + '</span>';
+    return row;
+  }
+
+  function bdRenderSong() {
+    var list = bdEl('bd-song-list');
+    if (!list) return;
+    var sg = BD.snap.songs || { items: [], cur: '' };
+    var items = sg.items || [];
+    var wait = items.filter(function (x) { return x.state === 'wait' || x.state === 'queued' || x.state === 'playing'; });
+    var done = items.filter(function (x) { return x.state === 'played' || x.state === 'skipped'; });
+    var cnt = bdEl('bd-song-count');
+    if (cnt) cnt.textContent = wait.length + ' 首待播';
+    var shown = BD.tab.song === 'done' ? done : wait;
+    if (!shown.length) {
+      list.innerHTML = bdEmpty(BD.tab.song === 'done'
+        ? '还没有播过的点歌' : '观众发「点歌 歌名」就会排到这里');
+      return;
+    }
+    list.innerHTML = '';
+    var base = BD.tab.song === 'done' ? 0 : 0;
+    shown.forEach(function (x, i) { list.appendChild(bdSongRow(x, base + i)); });
+  }
+
+  /* ---------------- 面板 4：礼物 ---------------- */
+  function bdGiftRow(x) {
+    var row = document.createElement('div');
+    row.className = 'bd-item';
+    var money = x.coin_type === 'gold' ? bdYuan(x.coin) : '免费';
+    row.innerHTML = '<span class="bd-av">' + faceHtml(x.face, 'bd-av-img', x.uname || '') + '</span>'
+      + '<div class="bd-item-b"><div class="bd-item-h"><b>' + esc(x.uname || '') + '</b>'
+      + '<i class="bd-price">' + money + '</i><time>' + bdClock(x.t) + '</time></div>'
+      + '<div class="bd-item-sub">' + esc(x.gift || '') + ' × ' + (x.num || 1) + '</div></div>';
+    return row;
+  }
+
+  function bdRenderGift() {
+    var list = bdEl('bd-gift-list');
+    if (!list) return;
+    var gifts = BD.snap.gifts || [];
+    var guards = BD.snap.guards || [];
+    var total = bdEl('bd-gift-total');
+    var s = BD.snap.stats || {};
+    if (total) total.textContent = bdYuan(s.gift_coin || 0);
+    var rows;
+    if (BD.tab.gift === 'guard') {
+      rows = guards.map(function (g) {
+        return { uid: g.uid, uname: g.uname, face: '', gift: g.level === 1 ? '总督'
+                 : (g.level === 2 ? '提督' : '舰长'), num: g.num || 1,
+                 coin: g.price || 0, coin_type: 'gold', t: g.t };
+      }).reverse();
+    } else if (BD.tab.gift === 'gift') {
+      rows = gifts;
+    } else {
+      rows = gifts.concat(guards.map(function (g) {
+        return { uid: g.uid, uname: g.uname, face: '', gift: g.level === 1 ? '总督'
+                 : (g.level === 2 ? '提督' : '舰长'), num: g.num || 1,
+                 coin: g.price || 0, coin_type: 'gold', t: g.t };
+      })).sort(function (a, b) { return (b.t || 0) - (a.t || 0); });
+    }
+    if (!rows.length) { list.innerHTML = bdEmpty('还没有礼物'); return; }
+    list.innerHTML = '';
+    rows.slice(0, 60).forEach(function (x) { list.appendChild(bdGiftRow(x)); });
+    bindFaceFallback(list);
+  }
+
+  /* ---------------- 面板 5：观众 ---------------- */
+  function bdVwRow(x, i, kind) {
+    var row = document.createElement('div');
+    row.className = 'bd-item bd-vwx';
+    var sub = kind === 'guard'
+      ? ((x.level === 1 ? '总督' : (x.level === 2 ? '提督' : '舰长')) + ' · ' + bdClock(x.t))
+      : (kind === 'enter'
+          ? (x.follow ? '关注了主播' : '进入直播间') + ' · ' + bdClock(x.t)
+          : (x.score ? '活跃 ' + fmtNum(x.score) : ''));
+    row.innerHTML = '<span class="bd-rank">' + (i + 1) + '</span>'
+      + '<span class="bd-av sm">' + faceHtml(x.face, 'bd-av-img', x.uname || '') + '</span>'
+      + '<div class="bd-item-b"><div class="bd-item-h"><b>' + esc(x.uname || '') + '</b>'
+      + (x.guard && kind === 'online' ? '<i class="bd-bd t3">舰</i>' : '') + '</div>'
+      + '<div class="bd-item-sub">' + esc(sub) + '</div></div>';
+    return row;
+  }
+
+  function bdRenderVw() {
+    var list = bdEl('bd-vw-list');
+    if (!list) return;
+    var snap = BD.snap;
+    var cnt = bdEl('bd-vw-count');
+    var rows = [];
+    var kind = BD.tab.vw;
+    if (kind === 'online') {
+      rows = (snap.viewers || []).slice(0, 60);
+      if (cnt) cnt.textContent = '在线 ' + ((snap.stats || {}).online
+        ? fmtNum(snap.stats.online) : (rows.length || '—'));
+    } else if (kind === 'enter') {
+      var seen = {};
+      rows = (snap.enters || []).slice().reverse().filter(function (x) {
+        var k = x.uid || x.uname;
+        if (seen[k]) return false;
+        seen[k] = 1;
+        return true;
+      }).slice(0, 60);
+      if (cnt) cnt.textContent = (snap.enters || []).length + ' 次';
+    } else {
+      rows = (snap.guards || []).slice().reverse();
+      if (cnt) cnt.textContent = rows.length + ' 位';
+    }
+    if (!rows.length) {
+      list.innerHTML = bdEmpty(kind === 'online' ? '还没有观众榜（B 站要等几分钟）'
+        : (kind === 'enter' ? '还没有进出记录' : '还没有舰长'));
+      return;
+    }
+    list.innerHTML = '';
+    rows.forEach(function (x, i) { list.appendChild(bdVwRow(x, i, kind)); });
+    bindFaceFallback(list);
+  }
+
+  function bdRenderAll() {
+    bdSyncHead();
+    bdSyncStats();
+    bdRenderDm();
+    bdRenderSc();
+    bdRenderSong();
+    bdRenderGift();
+    bdRenderVw();
+  }
+
+  /* ---------------- 轮询 ---------------- */
+  function bdApply(d) {
+    BD.seq = d.seq || BD.seq;
+    var s = d.snap || {};
+    BD.snap = {
+      sc: s.sc || [], gifts: s.gifts || [], viewers: s.viewers || [],
+      enters: s.enters || [], guards: s.guards || [],
+      stats: s.stats || {}, songs: s.songs || { items: [], cur: '' }
+    };
+    (d.items || []).forEach(function (x) {
+      var it = x && x.item;
+      if (it && it.type === 'danmaku') BD.dm.push(it);
     });
-    boardSenders = {};
+    if (BD.dm.length > BD_MAX_DM) BD.dm = BD.dm.slice(-BD_MAX_DM);
+    var st = d.state || {};
+    if (st.error) bdNote('弹幕连接异常：' + st.error + '（正在重试）');
+    else if (st.running) bdNote(BD.name ? ('已连接 · ' + BD.name) : '已连接');
+    else bdNote('连接中…');
+    bdRenderAll();
   }
 
-  /* ---- 选房间浮层：我的板块 + 关注在播 ---- */
-  function boardPickRender() {
-    var box = document.getElementById('board-pick');
-    if (!box) return;
-    box.innerHTML = '<div class="bp-head"><b>加一列到弹幕板</b>'
-      + '<span>点一下即可加入（最多 ' + BOARD_MAX + ' 路）</span></div>'
-      + '<div class="bp-body" id="bp-body"><div class="mf-state">正在读名单…</div></div>';
-    var body = document.getElementById('bp-body');
+  function bdPoll() {
+    if (state.view !== 'board' || !BD.room || BD.busy) return;
+    BD.busy = true;
+    fetch('/api/live/board?room=' + encodeURIComponent(BD.room) + '&since=' + BD.seq)
+      .then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
+      .then(function (res) {
+        if (state.view !== 'board') return;
+        if (res.code !== 200 || !res.j || res.j.error) {
+          BD.err = (res.j && res.j.error) || ('HTTP ' + res.code);
+          bdNote('弹幕连接失败：' + BD.err + '（会自动重试）');
+        } else {
+          BD.err = '';
+          bdApply(res.j);
+        }
+      })
+      .catch(function () {
+        if (state.view !== 'board') return;
+        BD.err = '本机服务无响应';
+        bdNote('本机服务无响应，正在重试…');
+      })
+      .then(function () {
+        BD.busy = false;
+        if (state.view !== 'board' || !BD.room) return;
+        if (BD.timer) clearTimeout(BD.timer);
+        BD.timer = setTimeout(bdPoll, BD.err ? 2600 : 1200);
+      });
+  }
+
+  /* ---------------- 选房间 ---------------- */
+  function bdPickRow(x, kind) {
+    return '<button class="bd-pick" type="button" data-bd-room="' + esc(x.room) + '"'
+      + ' data-bd-name="' + esc(x.name || '') + '">'
+      + '<span class="bd-av sm">' + faceHtml(x.face, 'bd-av-img', x.name || '') + '</span>'
+      + '<b>' + esc(x.name || ('房间 ' + x.room)) + '</b>'
+      + '<em>' + esc(kind) + '</em></button>';
+  }
+
+  function bdRenderPick() {
+    var pop = bdEl('bd-room-pop');
+    if (!pop) return;
+    pop.innerHTML = '<div class="bd-pick-top">'
+      + '<input id="bd-pick-input" maxlength="200" placeholder="房间号 / 直播间链接 / b23.tv 短链">'
+      + '<button class="btn small primary" id="bd-pick-add" type="button">打开</button></div>'
+      + '<div class="bd-pick-list" id="bd-pick-list">' + bdEmpty('正在读名单…') + '</div>';
+    var box = bdEl('bd-pick-list');
     Promise.all([
       fetch('/api/stations').then(function (r) { return r.json(); }).catch(function () { return {}; }),
       fetch('/api/following/live').then(function (r) { return r.json(); }).catch(function () { return {}; })
     ]).then(function (res) {
-      if (!body || box.hidden) return;
+      if (!box || pop.hidden) return;
       var st = ((res[0] && res[0].stations) || []).map(function (s) {
-        return { room: s.room, name: s.name || s.short || s.id, from: '我的板块' };
-      });
+        return { room: String(s.room || ''), name: s.name || s.short || s.id, face: s.face || '' };
+      }).filter(function (x) { return /^\d+$/.test(x.room); });
       var fo = ((res[1] && res[1].list) || []).map(function (s) {
-        return { room: s.room, name: s.uname || ('房间 ' + s.room), from: '关注在播' };
-      });
-      var all = st.concat(fo).filter(function (x) { return /^\d+$/.test(String(x.room || '')); });
-      if (!all.length) {
-        body.innerHTML = '<div class="mf-state">没有可加的房间：先在「我的板块」里加主播，'
-          + '或者扫码登录后读关注列表。</div>';
-        return;
+        return { room: String(s.room || ''), name: s.uname || '', face: s.face || '' };
+      }).filter(function (x) { return /^\d+$/.test(x.room); });
+      var html = '';
+      if (st.length) {
+        html += '<div class="bd-pick-h">我的板块</div>'
+          + st.map(function (x) { return bdPickRow(x, '我的板块'); }).join('');
       }
-      var seen = {};
-      body.innerHTML = all.map(function (x) {
-        if (seen[x.room]) return '';
-        seen[x.room] = 1;
-        var on = boardHas(x.room);
-        return '<button class="bp-item' + (on ? ' on' : '') + '" type="button"'
-          + ' data-bp-room="' + esc(x.room) + '" data-bp-name="' + esc(x.name) + '"'
-          + (on ? ' disabled' : '') + '>'
-          + '<b>' + esc(x.name) + '</b><em>' + esc(x.from) + '</em>'
-          + '<span>' + (on ? '已在板上' : '＋ 加入') + '</span></button>';
-      }).join('');
+      if (fo.length) {
+        html += '<div class="bd-pick-h">关注在播</div>'
+          + fo.map(function (x) { return bdPickRow(x, '关注'); }).join('');
+      }
+      box.innerHTML = html || bdEmpty('没有可选的直播间：先在上面填房间号或链接');
+      bindFaceFallback(box);
     });
   }
 
-  function bindBoard() {
-    var add = document.getElementById('board-add');
-    var input = document.getElementById('board-room');
-    var pickBtn = document.getElementById('board-pick-btn');
-    var pick = document.getElementById('board-pick');
-    var clear = document.getElementById('board-clear');
-    if (!add || add.getAttribute('data-bound') === '1') return;
-    add.setAttribute('data-bound', '1');
-
-    function addByInput() {
-      var text = input ? input.value.trim() : '';
-      if (!text) { boardState('先填房间号或链接'); return; }
-      boardState('正在解析「' + text.slice(0, 40) + '」…');
-      fetch('/api/live/resolve?input=' + encodeURIComponent(text)).then(function (r) {
-        return r.json().then(function (j) { return { code: r.status, j: j }; });
-      }).then(function (res) {
-        if (res.code !== 200 || (res.j && res.j.error)) {
-          boardState((res.j && res.j.error) || '没解析出直播间，检查一下房间号');
-          return;
-        }
-        if (boardAddRoom(res.j) && input) input.value = '';
-      }).catch(function () { boardState('解析失败：本机服务无响应'); });
+  function bdSelect(room, name) {
+    room = String(room || '').trim();
+    if (!/^\d+$/.test(room)) { bdNote('房间号不合法'); return; }
+    var prev = BD.room;
+    BD.room = room;
+    BD.name = name || '';
+    BD.seq = 0;
+    BD.dm = [];
+    BD.dmShown = 0;
+    BD.err = '';
+    BD.snap = { sc: [], gifts: [], viewers: [], enters: [], guards: [],
+                stats: {}, songs: { items: [], cur: '' } };
+    store.set(BD_ROOM_KEY, BD.room);
+    if (prev && prev !== room) {
+      fetch('/api/live/chat/stop?room=' + encodeURIComponent(prev)).catch(function () {});
     }
+    var pop = bdEl('bd-room-pop');
+    if (pop) pop.hidden = true;
+    var btn = bdEl('bd-room-btn');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+    bdSyncHead();
+    bdRenderAll();
+    bdNote('正在连接 ' + (name || ('房间 ' + room)) + ' …');
+    if (BD.timer) { clearTimeout(BD.timer); BD.timer = 0; }
+    bdPoll();
+    if (BD.sender) BD.sender.refreshQuick();
+  }
 
-    add.addEventListener('click', addByInput);
-    if (input) input.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); addByInput(); }
-    });
-    if (pickBtn) pickBtn.addEventListener('click', function () {
-      boardPickOpen = !boardPickOpen;
-      if (pick) pick.hidden = !boardPickOpen;
-      pickBtn.setAttribute('aria-expanded', boardPickOpen ? 'true' : 'false');
-      if (boardPickOpen) boardPickRender();
-    });
-    if (pick) pick.addEventListener('click', function (e) {
-      var b = e.target.closest ? e.target.closest('[data-bp-room]') : null;
-      if (!b) return;
-      var ok = boardAddRoom({ room: b.getAttribute('data-bp-room'),
-                              uname: b.getAttribute('data-bp-name') });
-      if (ok) { boardPickOpen = false; pick.hidden = true; if (pickBtn) pickBtn.setAttribute('aria-expanded', 'false'); }
-    });
-    if (clear) clear.addEventListener('click', function () {
-      if (!boardRooms.length) return;
-      boardRooms.forEach(function (r) { chatUnwatch(String(r.room), 'board:' + r.room); });
-      boardRooms = [];
-      boardSave();
-      renderBoard();
-    });
-    var cols = document.getElementById('board-cols');
-    if (cols && cols.getAttribute('data-bound') !== '1') {
-      cols.setAttribute('data-bound', '1');
-      cols.addEventListener('click', function (e) {
-        var x = e.target.closest ? e.target.closest('[data-bc-x]') : null;
-        if (!x) return;
-        var col = x.closest('.bc');
-        if (col) boardRemoveRoom(col.getAttribute('data-room'));
+  /* ---------------- 动作：SC 已读 / 点歌 ---------------- */
+  function bdScRead(id) {
+    if (!BD.room) return;
+    postJSON('/api/live/board/read', { room: BD.room, ids: [id] }).then(function (d) {
+      if (d && d.sc) { BD.snap.sc = d.sc; bdRenderSc(); bdSyncStats(); }
+    }).catch(function () { /* 下一次轮询会同步回来 */ });
+  }
+
+  function bdSongAct(act, id) {
+    if (!BD.room) return;
+    postJSON('/api/live/song', { room: BD.room, act: act, id: id || '' }).then(function (d) {
+      if (d && d.songs) { BD.snap.songs = d.songs; bdRenderSong(); }
+      else if (d && d.error) bdNote('点歌操作失败：' + d.error);
+    }).catch(function () { bdNote('点歌操作失败：本机服务无响应'); });
+  }
+
+  /* ---------------- 进入 / 离开 ---------------- */
+  function renderBoard() {
+    bindBoard();
+    bdSyncHead();
+    bdRenderAll();
+    if (!BD.room) {
+      bdNote('选一个直播间开始');
+      return;
+    }
+    BD.seq = 0;
+    BD.dm = [];
+    BD.dmShown = 0;
+    if (BD.timer) { clearTimeout(BD.timer); BD.timer = 0; }
+    bdNote('正在连接…');
+    bdPoll();
+  }
+
+  function stopBoard() {
+    if (BD.timer) { clearTimeout(BD.timer); BD.timer = 0; }
+    if (BD.room) {
+      fetch('/api/live/chat/stop?room=' + encodeURIComponent(BD.room)).catch(function () {});
+    }
+  }
+
+  function bindBoard() {
+    if (!BD.sender) {
+      BD.sender = makeChatSender(bdEl('bd-sender'), {
+        room: function () { return BD.room; },
+        label: '发条弹幕，30 字内'
       });
     }
+    var wrap = bdEl('bd-grid');
+    if (!wrap || wrap.getAttribute('data-bound') === '1') return;
+    wrap.setAttribute('data-bound', '1');
+
+    /* 房间下拉 */
+    var rbtn = bdEl('bd-room-btn');
+    var rpop = bdEl('bd-room-pop');
+    if (rbtn && rpop) {
+      rbtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var open = rpop.hidden;
+        rpop.hidden = !open;
+        rbtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open) bdRenderPick();
+      });
+      document.addEventListener('click', function (e) {
+        if (rpop.hidden) return;
+        if (e.target && (rpop.contains(e.target) || rbtn.contains(e.target))) return;
+        rpop.hidden = true;
+        rbtn.setAttribute('aria-expanded', 'false');
+      });
+      rpop.addEventListener('click', function (e) {
+        var add = e.target.closest ? e.target.closest('#bd-pick-add') : null;
+        if (add) {
+          var inp = bdEl('bd-pick-input');
+          var text = inp ? inp.value.trim() : '';
+          if (!text) return;
+          bdNote('正在解析「' + text.slice(0, 30) + '」…');
+          fetch('/api/live/resolve?input=' + encodeURIComponent(text))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (!d || d.error || !d.room) { bdNote('没解析出直播间：' + ((d && d.error) || '检查房间号')); return; }
+              bdSelect(d.room, d.uname || '');
+            })
+            .catch(function () { bdNote('解析失败：本机服务无响应'); });
+          return;
+        }
+        var pick = e.target.closest ? e.target.closest('[data-bd-room]') : null;
+        if (pick) bdSelect(pick.getAttribute('data-bd-room'), pick.getAttribute('data-bd-name'));
+      });
+      rpop.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && e.target && e.target.id === 'bd-pick-input') {
+          var add2 = bdEl('bd-pick-add');
+          if (add2) add2.click();
+        }
+      });
+    }
+
+    /* 过滤与页签 */
+    var f = bdEl('bd-dm-filter');
+    if (f) f.addEventListener('change', function () {
+      BD.filter = f.value;
+      BD.dmShown = 0;
+      var list = bdEl('bd-dm-list');
+      if (list) list.innerHTML = '';
+      bdRenderDm();
+    });
+    [['bd-sc-tabs', 'sc'], ['bd-song-tabs', 'song'],
+     ['bd-gift-tabs', 'gift'], ['bd-vw-tabs', 'vw']].forEach(function (pair) {
+      var box = bdEl(pair[0]);
+      if (!box) return;
+      box.addEventListener('click', function (e) {
+        var b = e.target.closest ? e.target.closest('[data-t]') : null;
+        if (!b) return;
+        BD.tab[pair[1]] = b.getAttribute('data-t');
+        Array.prototype.forEach.call(box.querySelectorAll('[data-t]'), function (x) {
+          x.classList.toggle('on', x === b);
+        });
+        if (pair[1] === 'sc') bdRenderSc();
+        if (pair[1] === 'song') bdRenderSong();
+        if (pair[1] === 'gift') bdRenderGift();
+        if (pair[1] === 'vw') bdRenderVw();
+      });
+    });
+
+    /* SC / 点歌的行内动作（委托） */
+    var scList = bdEl('bd-sc-list');
+    if (scList) scList.addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('[data-sc-read]') : null;
+      if (b) bdScRead(b.getAttribute('data-sc-read'));
+    });
+    var songList = bdEl('bd-song-list');
+    if (songList) songList.addEventListener('click', function (e) {
+      var ok = e.target.closest ? e.target.closest('[data-song-ok]') : null;
+      if (ok) { bdSongAct('ok', ok.getAttribute('data-song-ok')); return; }
+      var sk = e.target.closest ? e.target.closest('[data-song-skip]') : null;
+      if (sk) bdSongAct('skip', sk.getAttribute('data-song-skip'));
+    });
+    var readAll = bdEl('bd-sc-read');
+    if (readAll) readAll.addEventListener('click', function () {
+      if (!BD.room) return;
+      postJSON('/api/live/board/read', { room: BD.room, all: true }).then(function (d) {
+        if (d && d.sc) { BD.snap.sc = d.sc; bdRenderSc(); bdSyncStats(); }
+      }).catch(function () { bdNote('标记失败：本机服务无响应'); });
+    });
+    var clear = bdEl('bd-song-clear');
+    if (clear) clear.addEventListener('click', function () { bdSongAct('clear'); });
+    var next = bdEl('bd-song-next');
+    if (next) next.addEventListener('click', function () { bdSongAct('next'); });
   }
 
   /* ---------------------------------------------------------- 版本更新
@@ -11391,6 +11719,7 @@
 
   function bindMulti() {
     bindHiddenBar();
+    bindMultiSync();         // 同步直播面板（选两路 → 采样 → 追赶）
     bindEmojiPanel();        // 表情面板是全局单例：进监控室也用得到，绑定是幂等的
     /* 左侧弹幕面板的发送器：与直播间同一份实现，room() 指向当前这一格 */
     if (!monSender) {
@@ -11655,6 +11984,7 @@
         }
         if (e.target.closest && e.target.closest('[data-gadd]')) addGuildMember();
         if (e.target.closest && e.target.closest('[data-gsync]')) syncGuildRoster();
+        if (e.target.closest && e.target.closest('[data-vtbs-retry]')) refreshVtbs();
       });
       side.addEventListener('change', function (e) {
         if (e.target && e.target.id === 'mf-guild-select') loadGuild(e.target.value);
@@ -11921,7 +12251,11 @@
       note.textContent = f.err
         || (f.logged === false ? '未登录：只能收弹幕，不能发送。' : '');
     }
-    var items = f.items.filter(function (it) { return it.type !== 'state'; });
+    /* 环形缓冲里现在还有 SC / 礼物 / 上舰 / 进房等事件（弹幕板要用）。
+       监控室这一栏只看弹幕，其余事件在这里滤掉，否则会多出一排空行。 */
+    var items = f.items.filter(function (it) {
+      return it.type === 'danmaku' || it.type === 'state';
+    });
     if (!items.length) {
       if (!list.querySelector('.mchat-sys')) {
         list.innerHTML = '';
@@ -11982,6 +12316,324 @@
     else if (multiSrc === 'guild') renderMultiGuild();
   }
 
+  /* ---------------- 监控室：同步直播（自研对齐） ----------------
+     参考 Fy1Sync 的**思路**（把两路直播对到同一秒），但不复制它的代码：
+     Fy1Sync 是 GPL-3.0，核心是识别记分板时钟的 OCR（matching.rs + basic_clock.rs），
+     移植即要求整个项目改 GPL 发布。这里改用与内容无关的「感知哈希 + 互相关」：
+
+       ① 每 ~400ms 把两路画面缩到 32×18，按 16×9 的块取亮度均值，再按均值二值化
+          成 144 位指纹（对压缩噪声、亮度整体偏移都不敏感）；
+       ② 在 ±8 秒（±20 个采样）范围内滑窗比对两串指纹，取平均汉明距离最小的位移；
+       ③ 位移 × 采样间隔 = 时差。把**慢的那一路**临时加速到 1.15× 追上去，
+          追完恢复 1.0×；追不上（>25 秒）就停下并如实报告。
+
+     ⚠️ 采样期间如果某一路 seek / 重连，两串指纹就对不上 —— 这时宁可按「画面差异
+        过大」报错，也不要乱调播放速度。
+     ⚠️ 只在监控室格子上工作：视频是同源 MediaSource，canvas 不会被跨域污染。 */
+  var MSYNC = { a: '', b: '', timer: 0, cadence: 0.4, sa: [], sb: [],
+                state: 'idle', offset: 0 };
+
+  function msyncCell(id) {
+    if (!id) return null;
+    var el = document.querySelector('#multi-grid .ms-cell[data-id="' + id + '"]');
+    if (!el) return null;
+    var v = el.querySelector('video');
+    var nm = el.querySelector('.ms-bar .ms-name');
+    return v ? { id: id, v: v, name: nm ? nm.textContent : id } : null;
+  }
+
+  function msyncList() {
+    return Array.prototype.slice.call(document.querySelectorAll('#multi-grid .ms-cell'))
+      .map(function (el) {
+        var v = el.querySelector('video');
+        if (!v) return null;
+        var nm = el.querySelector('.ms-bar .ms-name');
+        return { id: el.getAttribute('data-id'),
+                 name: nm ? nm.textContent : el.getAttribute('data-id') };
+      }).filter(Boolean);
+  }
+
+  function msyncNote(t) {
+    var n = document.getElementById('msync-note');
+    if (n) n.textContent = t || '';
+  }
+
+  function msyncBar(ratio) {
+    var b = document.getElementById('msync-bar');
+    if (b) b.style.width = Math.round(Math.max(0, Math.min(1, ratio)) * 100) + '%';
+  }
+
+  function msyncState(text) {
+    var s = document.getElementById('msync-state');
+    if (s) s.textContent = text || '';
+  }
+
+  var MSYNC_CANVAS = null;
+
+  function msyncHash(v) {
+    if (!MSYNC_CANVAS) {
+      MSYNC_CANVAS = document.createElement('canvas');
+      MSYNC_CANVAS.width = 32;
+      MSYNC_CANVAS.height = 18;
+    }
+    var ctx = MSYNC_CANVAS.getContext('2d', { willReadFrequently: true });
+    var d;
+    try {
+      ctx.drawImage(v, 0, 0, 32, 18);
+      d = ctx.getImageData(0, 0, 32, 18).data;
+    } catch (e) {
+      return null;                     // 画布被污染 / 视频还没首帧
+    }
+    var vals = new Float32Array(144), k = 0, sum = 0;
+    for (var by = 0; by < 9; by++) {
+      for (var bx = 0; bx < 16; bx++) {
+        var s = 0;
+        for (var yy = 0; yy < 2; yy++) {
+          for (var xx = 0; xx < 2; xx++) {
+            var i = ((by * 2 + yy) * 32 + bx * 2 + xx) * 4;
+            s += d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+          }
+        }
+        var avg = s / 4;
+        vals[k++] = avg;
+        sum += avg;
+      }
+    }
+    var mean = sum / 144, bits = new Uint8Array(144);
+    for (var j = 0; j < 144; j++) bits[j] = vals[j] > mean ? 1 : 0;
+    return bits;
+  }
+
+  function msyncDist(a, b) {
+    var n = 0;
+    for (var i = 0; i < 144; i++) if (a[i] !== b[i]) n++;
+    return n / 144;
+  }
+
+  /* 在两串指纹上找最佳位移（单位：采样点）。shift>0 表示「跟随路比基准路慢」。 */
+  function msyncMatch(sa, sb) {
+    var scores = [];
+    for (var sh = -20; sh <= 20; sh++) {
+      var n = 0, d = 0;
+      for (var i = 0; i < sa.length; i++) {
+        var j = i + sh;
+        if (j < 0 || j >= sb.length) continue;
+        d += msyncDist(sa[i], sb[j]);
+        n++;
+      }
+      if (n >= 16) scores.push({ sh: sh, score: d / n });
+    }
+    if (!scores.length) return null;
+    scores.sort(function (x, y) { return x.score - y.score; });
+    var best = scores[0], rival = null;
+    for (var k = 1; k < scores.length; k++) {
+      if (Math.abs(scores[k].sh - best.sh) >= 3) { rival = scores[k]; break; }
+    }
+    var conf = rival ? Math.max(0, 1 - best.score / Math.max(rival.score, 1e-6)) : 0;
+    return { shift: best.sh, score: best.score, conf: conf };
+  }
+
+  function msyncFillSelects() {
+    var list = msyncList();
+    var sa = document.getElementById('msync-a');
+    var sb = document.getElementById('msync-b');
+    if (!sa || !sb) return;
+    var html = list.map(function (x) {
+      return '<option value="' + esc(x.id) + '">' + esc(x.name) + '</option>';
+    }).join('');
+    sa.innerHTML = html;
+    sb.innerHTML = html;
+    if (list.some(function (x) { return x.id === MSYNC.a; })) sa.value = MSYNC.a;
+    else MSYNC.a = list[0] ? list[0].id : '';
+    if (list.some(function (x) { return x.id === MSYNC.b; })) sb.value = MSYNC.b;
+    else MSYNC.b = list[1] ? list[1].id : MSYNC.a;
+    sa.value = MSYNC.a;
+    sb.value = MSYNC.b;
+    if (list.length < 2) {
+      msyncState('画面墙上至少要有两路');
+      msyncNote('先在左侧「关注的直播 / 推荐主播」里加两路进监控墙，再来对齐。');
+    }
+  }
+
+  function msyncRate(cell, rate, ms, done) {
+    try { cell.v.playbackRate = rate; } catch (e) { /* 不支持就算了 */ }
+    MSYNC.timer = setTimeout(function () {
+      MSYNC.timer = 0;
+      try { cell.v.playbackRate = 1; } catch (e) { /* 已卸载 */ }
+      MSYNC.state = 'idle';
+      msyncBar(1);
+      if (done) done();
+    }, ms);
+  }
+
+  function msyncStop() {
+    if (MSYNC.timer) { clearTimeout(MSYNC.timer); clearInterval(MSYNC.timer); MSYNC.timer = 0; }
+    var a = msyncCell(MSYNC.a), b = msyncCell(MSYNC.b);
+    [a, b].forEach(function (c) {
+      if (c) { try { c.v.playbackRate = 1; } catch (e) { /* 忽略 */ } }
+    });
+    MSYNC.state = 'idle';
+    msyncState('已停止');
+    var stop = document.getElementById('msync-stop');
+    if (stop) stop.hidden = true;
+  }
+
+  function msyncCompute(A, B) {
+    var r = msyncMatch(MSYNC.sa, MSYNC.sb);
+    if (!r || r.score > 0.36 || r.conf < 0.12) {
+      MSYNC.state = 'idle';
+      msyncBar(1);
+      var similar = r ? Math.round((1 - r.score) * 100) : 0;
+      msyncState('算不出可靠时差');
+      msyncNote('两路画面差异过大（最高相似度 ' + similar + '%），无法自动对齐。'
+        + '可以点「跟随提前 / 延后」手动微调，或换两路画面更接近的直播。');
+      return;
+    }
+    var offset = r.shift * MSYNC.cadence;          // >0：跟随路落后
+    MSYNC.offset = offset;
+    if (Math.abs(offset) < 0.3) {
+      MSYNC.state = 'idle';
+      msyncBar(1);
+      msyncState('已同步');
+      msyncNote('两路已经在同一时刻（估算差 ' + offset.toFixed(1) + ' 秒，相似度 '
+        + Math.round((1 - r.score) * 100) + '%）。');
+      return;
+    }
+    var target = offset > 0 ? B : A;               // 落后的是谁就加速谁
+    var secs = Math.abs(offset);
+    var rate = 1.15;
+    var ms = Math.min(25000, Math.max(900, secs / (rate - 1) * 1000));
+    MSYNC.state = 'trim';
+    msyncState('正在追赶');
+    msyncNote('「' + target.name + '」落后约 ' + secs.toFixed(1) + ' 秒，'
+      + '正在用 1.15× 追，预计 ' + Math.round(ms / 1000) + ' 秒。');
+    msyncBar(0.55);
+    msyncRate(target, rate, ms, function () {
+      msyncState('已对齐');
+      msyncNote('已对齐：「' + target.name + '」追回 ' + secs.toFixed(1)
+        + ' 秒。再点一次「开始对齐」可以复核残余时差。');
+    });
+  }
+
+  function msyncRun() {
+    if (MSYNC.state !== 'idle') { msyncStop(); return; }
+    if (msyncList().length < 2) {
+      msyncNote('画面墙上至少要两路：先在左侧列表里再加一路。');
+      return;
+    }
+    var A = msyncCell(MSYNC.a), B = msyncCell(MSYNC.b);
+    if (!A || !B) { msyncNote('先在上下两个下拉里选两路直播'); return; }
+    if (A.id === B.id) { msyncNote('请选择两路不同的直播'); return; }
+    if (A.v.readyState < 2 || B.v.readyState < 2) {
+      msyncNote('两路都拿到画面才能对齐：有一路还在连接/缓冲。');
+      return;
+    }
+    if (A.v.paused || B.v.paused) { msyncNote('两路都要处于播放状态（点一下画面即可继续）。'); return; }
+    MSYNC.sa = [];
+    MSYNC.sb = [];
+    MSYNC.state = 'sampling';
+    msyncState('采样中');
+    msyncBar(0);
+    msyncNote('正在比对两路画面…（约 13 秒，期间请不要切换画质或点卡片重连）');
+    var need = 32, ticks = 0, last = 0;
+    var stop = document.getElementById('msync-stop');
+    if (stop) stop.hidden = false;
+    MSYNC.timer = setInterval(function () {
+      if (state.view !== 'multi') { msyncStop(); return; }
+      if (!A.v.isConnected || !B.v.isConnected) {
+        msyncStop();
+        msyncNote('格子被移除了，同步已停止。');
+        return;
+      }
+      var ha = msyncHash(A.v), hb = msyncHash(B.v);
+      if (ha && hb && !A.v.paused && !B.v.paused) {
+        var now = (window.performance && performance.now) ? performance.now() : Date.now();
+        if (last) MSYNC.cadence = MSYNC.cadence * 0.75 + ((now - last) / 1000) * 0.25;
+        last = now;
+        MSYNC.sa.push(ha);
+        MSYNC.sb.push(hb);
+      }
+      ticks++;
+      msyncBar(MSYNC.sa.length / need);
+      if (MSYNC.sa.length >= need) {
+        clearInterval(MSYNC.timer);
+        MSYNC.timer = 0;
+        if (stop) stop.hidden = true;
+        msyncCompute(A, B);
+      } else if (ticks > need * 5) {
+        clearInterval(MSYNC.timer);
+        MSYNC.timer = 0;
+        if (stop) stop.hidden = true;
+        MSYNC.state = 'idle';
+        msyncState('采样不足');
+        msyncNote('只采到 ' + MSYNC.sa.length + ' 帧：有一路画面没在动（暂停/缓冲/黑屏）。');
+      }
+    }, 400);
+  }
+
+  /* 手动微调：把「跟随」这一路提前（加速）或延后（减速）0.5 秒 */
+  function msyncNudge(dir) {
+    var B = msyncCell(MSYNC.b);
+    if (!B) { msyncNote('先选「跟随」这一路'); return; }
+    if (MSYNC.state !== 'idle') { msyncNote('正在同步中，等它跑完再微调。'); return; }
+    var rate = dir > 0 ? 1.15 : 0.9;
+    var ms = 500 / Math.abs(rate - 1);
+    MSYNC.state = 'trim';
+    msyncState(dir > 0 ? '提前 0.5s' : '延后 0.5s');
+    msyncNote('正在把「' + B.name + '」' + (dir > 0 ? '提前' : '延后') + ' 0.5 秒…');
+    try { B.v.playbackRate = rate; } catch (e) { /* 直播流不支持倍速时保持 1.0 */ }
+    MSYNC.timer = setTimeout(function () {
+      MSYNC.timer = 0;
+      try { B.v.playbackRate = 1; } catch (e) { /* 忽略 */ }
+      MSYNC.state = 'idle';
+      msyncNote('已微调 0.5 秒（可连点几次）。');
+      msyncState('已微调');
+    }, ms);
+  }
+
+  /* 只用于验收的钩子：带 ?msync_debug=1 时把纯函数暴露出来，
+     好在无头浏览器里喂合成指纹验证「位移 → 秒数」这一步算得对（不影响正常使用）。 */
+  if (location.search.indexOf('msync_debug') >= 0) {
+    window.__msync = { hash: msyncHash, dist: msyncDist, match: msyncMatch };
+  }
+
+  function bindMultiSync() {
+    var btn = document.getElementById('multi-sync');
+    var pop = document.getElementById('multi-sync-pop');
+    if (!btn || !pop || btn.getAttribute('data-bound') === '1') return;
+    btn.setAttribute('data-bound', '1');
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var open = pop.hidden;
+      pop.hidden = !open;
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open) {
+        msyncState('选两路，自动算时差');
+        msyncBar(0);
+        msyncNote('对两路画面采样比对，估算差了几秒，再把慢的一路临时加速追上去。');
+        msyncFillSelects();          // 放在最后：路数不足时由它把提示覆盖成「至少两路」
+      }
+    });
+    document.addEventListener('click', function (e) {
+      if (pop.hidden) return;
+      if (e.target && (pop.contains(e.target) || btn.contains(e.target))) return;
+      pop.hidden = true;
+      btn.setAttribute('aria-expanded', 'false');
+    });
+    var sa = document.getElementById('msync-a');
+    var sb = document.getElementById('msync-b');
+    if (sa) sa.addEventListener('change', function () { MSYNC.a = sa.value; });
+    if (sb) sb.addEventListener('change', function () { MSYNC.b = sb.value; });
+    var run = document.getElementById('msync-run');
+    if (run) run.addEventListener('click', msyncRun);
+    var stop = document.getElementById('msync-stop');
+    if (stop) stop.addEventListener('click', msyncStop);
+    var earlier = document.getElementById('msync-earlier');
+    if (earlier) earlier.addEventListener('click', function () { msyncNudge(1); });
+    var later = document.getElementById('msync-later');
+    if (later) later.addEventListener('click', function () { msyncNudge(-1); });
+  }
+
   /* ---------------- 监控室：推荐 / 工会（左侧卡片来源） ---------------- */
   var mfExtraCards = {};          // mid -> 卡片数据（推荐/工会）
   var multiGuildName = '';
@@ -11996,7 +12648,33 @@
       + '<span class="mf-live">LIVE</span></div>'
       + '<div class="mf-title" title="' + esc(s.title || '') + '">'
       + esc(s.title || (s.area || '直播中')) + '</div></div>'
-      + '<div class="mf-pop">' + fmtNum(s.online || 0) + '</div></div>';
+      + '<div class="mf-pop">' + fmtNum(s.online || 0)
+      + (s.follower ? '<em title="粉丝数（vtbs.moe）">粉 ' + fmtNum(s.follower) + '</em>' : '')
+      + '</div></div>';
+  }
+
+  function mfAge(sec) {
+    if (sec == null || sec < 0) return '还没有数据';
+    if (sec < 90) return '刚刚';
+    if (sec < 3600) return Math.round(sec / 60) + ' 分钟前';
+    if (sec < 86400) return Math.round(sec / 3600) + ' 小时前';
+    return Math.round(sec / 86400) + ' 天前';
+  }
+
+  /* 资料层（vtbs.moe）的状态条：展示「更新于 X 前」，失败时明确说清并且可重试。
+     ⚠️ 在播/在线来自 B 站，这里标的是**资料**（名字/头像/粉丝数）的更新时间。 */
+  function mfVtbsLine(st) {
+    st = st || {};
+    if (!st.ready) {
+      return '<span class="mf-src bad">vtbs 资料加载中'
+        + (st.error ? '（' + esc(st.error) + '）' : '（第一次约 15 秒）')
+        + '</span><button class="btn small ghost mf-src-btn" data-vtbs-retry="1"'
+        + ' type="button">重试</button>';
+    }
+    return '<span class="mf-src">资料 vtbs.moe · 更新于 ' + esc(mfAge(st.age))
+      + (st.stale ? ' · 已过期' : '') + '</span>'
+      + '<button class="btn small ghost mf-src-btn" data-vtbs-retry="1" type="button"'
+      + ' title="重新拉取 vtbs 资料（在播状态不受影响）">刷新资料</button>';
   }
 
   function mfSideState(html, retry) {
@@ -12010,7 +12688,8 @@
     if (!side) return;
     applyMultiSide();
     var head = '<div class="mf-head"><b>虚拟区热门</b>'
-      + '<span>按人气排序 · 点击加入监控墙</span></div>';
+      + '<span>按人气排序 · 点击加入监控墙</span></div>'
+      + '<div class="mf-src-line" id="mf-src-line"></div>';
     side.innerHTML = head + '<div class="mf-state">正在读取推荐列表…</div>';
     fetch('/api/live/recommend').then(function (r) { return r.json(); })
       .then(function (d) {
@@ -12029,6 +12708,8 @@
         list.forEach(function (x) { mfExtraCards[x.mid] = x; });
         side.innerHTML = head.replace('</div>', '<span class="mf-pop">' + list.length
           + ' 位在播</span></div>') + list.map(mfExtraItem).join('');
+        var line = document.getElementById('mf-src-line');
+        if (line) line.innerHTML = mfVtbsLine(d.vtbs);
         bindFaceFallback(side);
       })
       .catch(function () {
@@ -12046,7 +12727,8 @@
       + '<button class="btn small ghost" data-gsync="1" type="button"'
       + ' title="从这个工会的官方 B 站账号关注列表补全名册（需要登录）">同步名册</button>'
       + '<button class="btn small ghost" data-gadd="1" type="button" title="手动添加成员">＋ 成员</button>'
-      + '</div><div id="mf-guild-list"><div class="mf-state">正在读取工会名单…</div></div>';
+      + '</div><div class="mf-src-line" id="mf-src-line"></div>'
+      + '<div id="mf-guild-list"><div class="mf-state">正在读取工会名单…</div></div>';
     fetch('/api/live/guilds').then(function (r) { return r.json(); })
       .then(function (d) {
         if (state.view !== 'multi' || multiSrc !== 'guild') return;
@@ -12099,6 +12781,8 @@
           + ' 人，当前没有人在播。</div>';
         return;
       }
+      var line2 = document.getElementById('mf-src-line');
+      if (line2) line2.innerHTML = mfVtbsLine(d.vtbs);
       box.innerHTML = '<div class="mf-state" style="padding:2px 4px 6px">名册 ' + d.total
         + ' 人 · 在播 ' + live.length + (d.warn ? ' · ' + esc(d.warn) : '') + '</div>'
         + live.map(function (x) {
@@ -12128,6 +12812,29 @@
         mfNote('添加失败：' + ((d && d.error) || '未知原因'));
       }
     }).catch(function () { mfNote('添加失败：本机服务无响应'); });
+  }
+
+  /* 手动重拉 vtbs 资料：整包约 11~19 秒，所以点了之后轮询状态，
+     拿到结果再重画当前列表；在播状态不受影响（那一路始终走 B 站）。 */
+  function refreshVtbs() {
+    mfNote('正在重新拉取 vtbs 资料…（约 15 秒，在播状态不受影响）');
+    postJSON('/api/vtbs/refresh', {}).then(function () {
+      var n = 0;
+      var tick = setInterval(function () {
+        n++;
+        fetch('/api/vtbs/status').then(function (r) { return r.json(); }).then(function (d) {
+          var line = document.getElementById('mf-src-line');
+          if (line) line.innerHTML = mfVtbsLine(d);
+          if (d.ready && !d.refreshing) {
+            clearInterval(tick);
+            mfNote('vtbs 资料已更新（' + (d.count || 0) + ' 位主播）');
+            if (multiSrc === 'recommend') renderMultiRecommend();
+            else if (multiSrc === 'guild' && multiGuildName) loadGuild(multiGuildName);
+          }
+        }).catch(function () { /* 继续轮询 */ });
+        if (n >= 40) { clearInterval(tick); mfNote('资料仍在后台拉取，稍后自动生效'); }
+      }, 1500);
+    }).catch(function () { mfNote('刷新失败：本机服务无响应'); });
   }
 
   /* 从工会的官方 B 站账号关注列表补人（后端读关注 → 只留 vtbs.moe 认识的主播） */
@@ -12870,7 +13577,9 @@
       + '<div class="mf-meta"><div class="mf-name">' + esc(s.uname)
       + '<span class="mf-live">LIVE</span></div>'
       + '<div class="mf-title" title="' + esc(s.title) + '">' + esc(s.title || '直播中') + '</div></div>'
-      + '<div class="mf-pop">' + fmtNum(s.online || 0) + '</div></div>';
+      + '<div class="mf-pop">' + fmtNum(s.online || 0)
+      + (s.follower ? '<em title="粉丝数（vtbs.moe）">粉 ' + fmtNum(s.follower) + '</em>' : '')
+      + '</div></div>';
   }
 
   function mfPicked() {      // 当前该在墙上的那几路

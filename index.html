@@ -462,6 +462,26 @@ window.__BOOT_T0 = Date.now();
         </div>
         <button class="btn small ghost" id="multi-chat-toggle" type="button"
                 title="把左侧列表换成当前这一路的实时弹幕">聚焦弹幕</button>
+        <!-- 同步直播：选两路，比对画面指纹算出时差，把慢的一路加速追上 -->
+        <span class="msync-wrap">
+          <button class="btn small ghost" id="multi-sync" type="button"
+                  aria-expanded="false" title="把两路直播对齐到同一时刻">同步直播</button>
+          <div class="msync-pop" id="multi-sync-pop" hidden>
+            <div class="msync-h"><b>同步直播</b><span id="msync-state">选两路，自动算时差</span></div>
+            <label class="msync-row"><span>基准</span><select id="msync-a"></select></label>
+            <label class="msync-row"><span>跟随</span><select id="msync-b"></select></label>
+            <div class="msync-bar"><i id="msync-bar"></i></div>
+            <p class="msync-note" id="msync-note">对两路画面采样比对，估算差了几秒，再把慢的一路临时加速追上去。</p>
+            <div class="msync-btns">
+              <button class="btn small primary" id="msync-run" type="button">开始对齐</button>
+              <button class="btn small ghost" id="msync-stop" type="button" hidden>停止</button>
+              <button class="btn small ghost" id="msync-earlier" type="button"
+                      title="让「跟随」这一路提前 0.5 秒">跟随提前</button>
+              <button class="btn small ghost" id="msync-later" type="button"
+                      title="让「跟随」这一路延后 0.5 秒">跟随延后</button>
+            </div>
+          </div>
+        </span>
         <!-- 收起左侧主播列表：收起后画面墙吃满整行，能多排几路。
              只有「关注的直播」有左栏，切到「我的板块」时这个按钮会隐藏。 -->
         <button class="btn small ghost" id="multi-side-toggle" type="button" hidden>‹ 收起列表</button>
@@ -531,21 +551,109 @@ window.__BOOT_T0 = Date.now();
     </section>
 
     <section class="view" id="view-board">
-      <div class="board-bar">
-        <div class="board-add">
-          <input id="board-room" type="search" maxlength="200"
-                 placeholder="房间号 / live.bilibili.com/… / b23.tv 短链"
-                 title="输入直播间房间号或链接，回车即可添加">
-          <button class="btn small primary" id="board-add" type="button">添加房间</button>
+      <div class="bd-top">
+        <div class="bd-room">
+          <button class="bd-room-btn" id="bd-room-btn" type="button" aria-expanded="false">
+            <b id="bd-room-name">未选择直播间</b>
+            <span id="bd-room-meta">点这里选一个直播间</span>
+          </button>
+          <div class="bd-room-pop" id="bd-room-pop" hidden></div>
         </div>
-        <button class="btn small ghost" id="board-pick-btn" type="button"
-                aria-expanded="false">从关注 / 我的板块选</button>
-        <button class="btn small ghost" id="board-clear" type="button">清空</button>
-        <span class="board-state" id="board-state">添加直播间后，这里按房间分列显示实时弹幕</span>
+        <div class="bd-chips">
+          <span class="bd-chip"><em>在线</em><b id="bd-online">—</b></span>
+          <span class="bd-chip"><em>看过</em><b id="bd-watched">—</b></span>
+          <span class="bd-chip"><em>弹幕</em><b id="bd-dm-n">—</b></span>
+          <span class="bd-chip"><em>SC</em><b id="bd-sc-n">—</b></span>
+          <span class="bd-chip"><em>礼物</em><b id="bd-gift-n">—</b></span>
+        </div>
+        <span class="bd-state" id="board-state">选一个直播间开始</span>
+        <a class="btn small ghost" id="bd-open" target="_blank" rel="noopener" hidden>原直播间 ↗</a>
       </div>
-      <!-- 选房间浮层：我的板块 + 关注在播，点一下加到板子上 -->
-      <div class="board-pick" id="board-pick" hidden></div>
-      <div class="board-cols" id="board-cols"></div>
+
+      <div class="bd-grid" id="bd-grid">
+        <!-- 1. 弹幕 -->
+        <section class="bd-panel bd-dm">
+          <header class="bd-h">
+            <b>弹幕</b><span class="bd-count" id="bd-dm-count">0</span>
+            <select class="bd-sel" id="bd-dm-filter" title="筛选">
+              <option value="all">全部</option>
+              <option value="guard">仅舰长</option>
+              <option value="medal">仅带牌子</option>
+            </select>
+          </header>
+          <div class="bd-list" id="bd-dm-list"></div>
+          <div class="bd-send" id="bd-sender">
+            <div class="live-send">
+              <button class="live-emoji-btn" data-cs-emoji type="button"
+                      aria-label="表情" aria-haspopup="dialog" aria-expanded="false"
+                      title="表情">☺</button>
+              <input data-cs-input maxlength="30" placeholder="发条弹幕，30 字内" title="最多 30 字">
+              <button class="btn small primary" data-cs-send type="button">发送</button>
+              <button class="btn small ghost" data-cs-save type="button"
+                      title="把输入框里的内容存为常用">＋</button>
+            </div>
+            <div class="quick-row" data-cs-quick hidden>
+              <span class="quick-label" data-cs-qlabel>常用</span>
+              <div class="quick-chips" data-cs-chips></div>
+              <button class="quick-edit" data-cs-qedit type="button" hidden>编辑</button>
+            </div>
+            <div class="live-result" data-cs-result></div>
+          </div>
+        </section>
+
+        <!-- 2. SC -->
+        <section class="bd-panel bd-sc">
+          <header class="bd-h">
+            <b>SC</b><span class="bd-count" id="bd-sc-count">0 条</span>
+            <div class="bd-tabs" id="bd-sc-tabs">
+              <button data-t="all" class="on" type="button">全部</button>
+              <button data-t="unread" type="button">未读</button>
+            </div>
+            <button class="bd-act" id="bd-sc-read" type="button" title="把当前所有 SC 标为已读">全部已读</button>
+          </header>
+          <div class="bd-list" id="bd-sc-list"></div>
+        </section>
+
+        <!-- 3. 点歌 -->
+        <section class="bd-panel bd-song">
+          <header class="bd-h">
+            <b>点歌</b><span class="bd-count" id="bd-song-count">0 首待播</span>
+            <div class="bd-tabs" id="bd-song-tabs">
+              <button data-t="wait" class="on" type="button">待播</button>
+              <button data-t="done" type="button">已播</button>
+            </div>
+            <button class="bd-act" id="bd-song-clear" type="button" title="清空待播队列">清空</button>
+            <button class="bd-act" id="bd-song-next" type="button" title="当前这首播完，换下一首">下一首</button>
+          </header>
+          <div class="bd-list" id="bd-song-list"></div>
+        </section>
+
+        <!-- 4. 礼物 -->
+        <section class="bd-panel bd-gift">
+          <header class="bd-h">
+            <b>礼物</b><span class="bd-count" id="bd-gift-total">¥0</span>
+            <div class="bd-tabs" id="bd-gift-tabs">
+              <button data-t="all" class="on" type="button">全部</button>
+              <button data-t="guard" type="button">上舰</button>
+              <button data-t="gift" type="button">送礼</button>
+            </div>
+          </header>
+          <div class="bd-list" id="bd-gift-list"></div>
+        </section>
+
+        <!-- 5. 观众 -->
+        <section class="bd-panel bd-vw">
+          <header class="bd-h">
+            <b>观众</b><span class="bd-count" id="bd-vw-count">—</span>
+            <div class="bd-tabs" id="bd-vw-tabs">
+              <button data-t="online" class="on" type="button">在线</button>
+              <button data-t="enter" type="button">来过</button>
+              <button data-t="guard" type="button">舰长</button>
+            </div>
+          </header>
+          <div class="bd-list" id="bd-vw-list"></div>
+        </section>
+      </div>
     </section>
 
     <section class="view" id="view-broadcast">
