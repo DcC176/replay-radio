@@ -3831,7 +3831,10 @@ body.view-broadcast #btn-quality { display: none; }
 
 .multi-qn { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .multi-qn select {
-  padding: 4px 8px;
+  /* 与工具条里的 .btn.small 同高（32）：原来 4px 内边距只有 28px，
+     和旁边 32px 的按钮、26px 的分段控件挤在同一行，三个高度并排很显眼。 */
+  height: 32px; box-sizing: border-box;
+  padding: 0 8px;
   border-radius: 7px;
   border: 1px solid var(--line);
   background: var(--panel-2);
@@ -3858,8 +3861,9 @@ body.view-multi .col-right { display: none; }
   background: var(--red); border-color: var(--red); color: var(--on-red);
 }
 .multi-layout button {
-  min-width: 30px;
-  padding: 4px 8px;
+  /* 同上：与工具条按钮同高（32），否则分段控件比左右按钮矮 6px */
+  min-width: 32px; height: 32px; box-sizing: border-box;
+  padding: 0 10px;
   border-radius: 7px;
   border: 1px solid var(--line);
   background: var(--panel-2);
@@ -3954,11 +3958,17 @@ body.view-multi .col-right { display: none; }
 /* vtbs 资料状态行：来源 / 更新时间 / 重试 */
 .mf-src-line {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 0 4px 6px; font-size: 10.5px;
+  padding: 0 4px 6px; font-size: 10.5px; line-height: 15px;
 }
-.mf-src { color: var(--muted-2); }
+.mf-src { color: var(--muted-2); min-width: 0; }
 .mf-src.bad { color: var(--red); }
-.mf-src-btn { padding: 0 6px; height: 20px; line-height: 18px; font-size: 10.5px; }
+/* ⚠️ 必须写成 `.mf-src-line .btn.mf-src-btn`（三个类）：只写 `.mf-src-btn` 时
+   特异性(0,1,0) 低于 `.btn.small`(0,2,0)，padding/font-size 会被后者顶掉 ——
+   20px 高的胶囊里塞 7px 上下内边距 + 12.5px 字，「刷新资料」整行溢出胶囊、
+   压在边框下方（用户 2026-11-26 截图里的错位就是这个）。 */
+.mf-src-line .btn.mf-src-btn {
+  flex: none; padding: 0 8px; height: 20px; line-height: 18px; font-size: 11px;
+}
 @media (max-width: 820px) {
   /* ⚠️ 竖排后 align-items 必须改回 stretch：外层原来用 flex-start（横排时让左右两栏
      各按内容高度对齐），换成 column 后它管的是**横向** —— 会把画面墙压成内容宽度
@@ -6881,26 +6891,33 @@ body.view-dd .views { grid-column: 1 / -1; }
 }
 .bd-h {
   flex: none; display: flex; align-items: center; gap: 6px;
-  padding: 7px 10px; border-bottom: 1px solid var(--line);
+  padding: 6px 10px; border-bottom: 1px solid var(--line);
+  /* ⚠️ 必须给固定下限：五块面板的头部内容高度不一样（下拉 23 / 页签 19 / 按钮 21），
+     只按内容撑高会让「弹幕」那块比「SC / 点歌」高 2px，同一行的面板底边对不齐。 */
+  min-height: 38px; box-sizing: border-box;
   font-size: var(--fs-fine);
 }
 .bd-h > b { font-size: var(--fs-sub); font-weight: 600; color: var(--text); }
 .bd-count { color: var(--muted-2); font-size: 11px; }
 .bd-tabs { display: flex; gap: 2px; margin-left: auto; }
 .bd-tabs button {
-  padding: 2px 7px; border: 0; border-radius: 6px; background: none;
+  /* 与 .bd-act / .bd-sel 同高（22）同内边距：同一行里的三种控件必须一样高，
+     否则「全部」页签比旁边的「全部已读」矮 2px，看着像没对齐。 */
+  height: 22px; padding: 0 8px; border: 0; border-radius: 6px; background: none;
   color: var(--muted); font: inherit; font-size: 11px; cursor: pointer;
+  display: inline-flex; align-items: center;
 }
 .bd-tabs button.on { background: rgba(var(--ink), .1); color: var(--text); }
 .bd-act {
-  flex: none; padding: 2px 7px; border: 1px solid var(--line); border-radius: 6px;
+  flex: none; height: 22px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px;
   background: none; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer;
+  display: inline-flex; align-items: center;
 }
 .bd-act:hover { color: var(--text); border-color: var(--line-2); }
 .bd-sel {
-  margin-left: auto; padding: 2px 6px; border: 1px solid var(--line); border-radius: 6px;
+  margin-left: auto; height: 22px; padding: 0 4px; border: 1px solid var(--line); border-radius: 6px;
   background: var(--panel); color: var(--text); font: inherit; font-size: 11px;
-  color-scheme: dark;
+  color-scheme: dark; box-sizing: border-box;
 }
 .bd-list {
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
@@ -7145,7 +7162,7 @@ body.view-dd .views { grid-column: 1 / -1; }
   border: 1px solid var(--line); background: var(--panel); color: var(--text);
   font: inherit; font-size: 11.5px; color-scheme: dark;
 }
-.mf-head .btn { padding: 3px 7px; }
+.mf-head .btn { padding: 3px 10px; }   /* 7px 时 4 个字几乎顶到胶囊边（实测内边距只剩 7） */
 .mf-state { padding: 14px 8px; font-size: 12px; color: var(--muted); line-height: 1.7; }
 .mf-state b { color: var(--text); }
 .mf-state .btn { margin-top: 6px; }

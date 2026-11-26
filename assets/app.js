@@ -4769,7 +4769,10 @@
     if (instant) pill.classList.remove('ready');
     pill.style.width = tab.offsetWidth + 'px';
     pill.style.height = tab.offsetHeight + 'px';
-    pill.style.transform = 'translateX(' + tab.offsetLeft + 'px)';
+    /* ⚠️ 必须同时带上 offsetTop：`.tb-tabs` 有 `padding: 2px 0`，而胶囊是
+       `position:absolute; top:0`（对齐的是 padding 之前的盒子）—— 只写 X 的话
+       胶囊比标签高 2px，标签文字看着偏上、不在胶囊正中（用户截图的「DD」就是）。 */
+    pill.style.transform = 'translate(' + tab.offsetLeft + 'px, ' + tab.offsetTop + 'px)';
     /* 标签条在窄屏/两行布局下是可横向滚动的：切页后必须把当前标签带回视口，
        否则「设置」这类靠后的页签永远停在屏幕外，看起来像没切过去。 */
     if (nav.scrollWidth > nav.clientWidth + 1) {
@@ -9025,9 +9028,11 @@
     var nm = bdEl('bd-room-name'), meta = bdEl('bd-room-meta'), open = bdEl('bd-open');
     if (nm) nm.textContent = BD.name || (BD.room ? ('房间 ' + BD.room) : '未选择直播间');
     if (meta) {
-      meta.textContent = BD.room
-        ? ('房间 ' + BD.room + (BD.err ? ' · ' + BD.err : ''))
-        : '点这里选一个直播间';
+      /* 认不出主播名时标题本身已经是「房间 1455691」，副标题再写一遍就是
+         两行一模一样的字（实测截图里就是这样）。这种情况副标题改成操作提示。 */
+      if (!BD.room) meta.textContent = '点这里选一个直播间';
+      else if (BD.name) meta.textContent = '房间 ' + BD.room + (BD.err ? ' · ' + BD.err : '');
+      else meta.textContent = BD.err || '点这里换一个直播间';
     }
     if (open) {
       if (BD.room) {
