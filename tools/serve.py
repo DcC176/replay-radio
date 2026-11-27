@@ -1175,7 +1175,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.34"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.35"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_SITE = "https://dcc176.github.io/replay-radio/version.json"
@@ -8342,8 +8342,12 @@ def chat_state(sid=None):
                 # 弹幕板五面板（SC / 礼物 / 观众 / 统计）：面板要「累计视图」，
                 # 不能只靠 200 条的环形缓冲（一场直播几百条礼物就被冲掉了）
                 "sc": [], "gifts": {}, "viewers": [], "enters": [], "guards": [],
+                # 去重表：礼物按消息号、进出按 uid+秒；SC 直接按 id 查列表
+                "gift_seen": {}, "enter_seen": {},
                 # meta_at / meta_busy：观众榜与「看过」走 HTTP 补（见 _board_meta_fetch）
                 "meta_at": 0.0, "meta_busy": False,
+                # hist_*：SC 快照与大航海名册（见 _board_hist_fetch）
+                "hist_at": 0.0, "hist_sc": 0, "live_start": 0, "hist_busy": False,
                 "stats": {"online": 0, "watched": 0, "likes": 0, "sc_total": 0,
                           "gift_coin": 0, "danmaku": 0}}
             CHAT[sid] = st
@@ -8475,6 +8479,159 @@ def _chat_parse(sid, data):
         off += ln
 
 
+# ---------------------------------------------------------------- protobuf（V2 命令）
+# B 站从 2025 起把「进场 / 送礼」改成了 *V2 命令：JSON 外壳只留 cmd 与 data.pb，
+# data.pb 是 base64 的 protobuf。原来只认 INTERACT_WORD / SEND_GIFT，于是
+# 「来过」永远是 0 次、礼物永远是空 —— 不是没数据，是这类包被整条丢掉了。
+# 字段号来自实测样本（SEND_GIFT_V2 的 10=礼物子消息；INTERACT_WORD_V2 的 5=行为）。
+
+
+def _pb_varint(b, i):
+    v = shift = 0
+    while i < len(b):
+        x = b[i]
+        i += 1
+        v |= (x & 0x7F) << shift
+        if not x & 0x80:
+            return v, i
+        shift += 7
+        if shift > 63:
+            break
+    raise ValueError("varint 越界")
+
+
+def _pb_fields(buf):
+    """极简 protobuf 解码 → {字段号: [值]}（varint 给 int，其余给 bytes）。"""
+    out = {}
+    i = 0
+    while i < len(buf):
+        key, i = _pb_varint(buf, i)
+        no, wt = key >> 3, key & 7
+        if no <= 0:
+            break
+        if wt == 0:
+            v, i = _pb_varint(buf, i)
+        elif wt == 2:
+            ln, i = _pb_varint(buf, i)
+            v = buf[i:i + ln]
+            i += ln
+        elif wt == 5:
+            v = buf[i:i + 4]
+            i += 4
+        elif wt == 1:
+            v = buf[i:i + 8]
+            i += 8
+        else:
+            break
+        out.setdefault(no, []).append(v)
+    return out
+
+
+def _pb_int(f, no, default=0):
+    v = f.get(no) or []
+    return int(v[0]) if v and isinstance(v[0], int) else default
+
+
+def _pb_str(f, no, default=""):
+    v = f.get(no) or []
+    if not v or not isinstance(v[0], (bytes, bytearray)):
+        return default
+    return bytes(v[0]).decode("utf-8", "replace")
+
+
+def _pb_sub(f, no):
+    v = f.get(no) or []
+    if v and isinstance(v[0], (bytes, bytearray)):
+        try:
+            return _pb_fields(v[0])
+        except Exception:
+            return {}
+    return {}
+
+
+def _gift_from_pb(raw):
+    """SEND_GIFT_V2：1 uid / 2 uname / 3 face / 10 礼物（2 名称、3 数量、7 总价、
+    8 币种、9 消息号、10 时间）。"""
+    f = _pb_fields(raw)
+    g = _pb_sub(f, 10)
+    face = _pb_str(f, 3)
+    if not face:                                  # 兜底：15.2.2 是 sender_uinfo.base.face
+        face = _pb_str(_pb_sub(_pb_sub(f, 15), 2), 2)
+    return {"uid": str(_pb_int(f, 1)), "uname": _pb_str(f, 2), "face": face,
+            "gift": _pb_str(g, 2), "num": _pb_int(g, 3, 1),
+            "coin": _pb_int(g, 7), "coin_type": _pb_str(g, 8),
+            "t": _pb_int(g, 10) or int(time.time()), "tid": _pb_str(g, 9),
+            "guard": _pb_int(f, 5)}
+
+
+def _interact_from_pb(raw):
+    """INTERACT_WORD_V2：1 uid / 2 uname / 5 行为（1 进入 / 2 关注）/ 7 秒级时间。"""
+    f = _pb_fields(raw)
+    mt = _pb_int(f, 5)
+    face = _pb_str(_pb_sub(_pb_sub(f, 22), 2), 2)
+    return {"uid": str(_pb_int(f, 1)), "uname": _pb_str(f, 2), "face": face,
+            "t": _pb_int(f, 7) or int(time.time()), "follow": mt == 2, "msg_type": mt}
+
+
+def _chat_add_sc(sid, item):
+    """SC 入库：按 id 去重（历史快照与实时事件会重叠），金额按列表重算。"""
+    st0 = chat_state(sid)
+    with CHAT_LOCK:
+        if item.get("id") and any(x.get("id") == item["id"] for x in st0["sc"]):
+            return False
+        st0["sc"].append(item)
+        st0["sc"].sort(key=lambda x: int(x.get("t") or 0))
+        del st0["sc"][:-200]
+        st0["stats"]["sc_total"] = sum(int(x.get("price") or 0) for x in st0["sc"])
+        return True
+
+
+def _chat_add_gift(sid, g):
+    """礼物入库：按消息号去重（同一条包可能被重连/补拉重复投递）。"""
+    if not g.get("gift"):
+        return False
+    st0 = chat_state(sid)
+    with CHAT_LOCK:
+        tid = str(g.get("tid") or "")
+        if tid:
+            if tid in st0["gift_seen"]:
+                return False
+            st0["gift_seen"][tid] = 1
+            if len(st0["gift_seen"]) > 800:
+                for k in list(st0["gift_seen"])[:200]:
+                    st0["gift_seen"].pop(k, None)
+        if g.get("coin_type") == "gold":
+            st0["stats"]["gift_coin"] += int(g.get("coin") or 0)
+        k = str(g.get("uid") or "") + "|" + str(g.get("gift") or "")
+        cur = st0["gifts"].get(k)
+        if cur:
+            cur["num"] += int(g.get("num") or 1)
+            cur["coin"] += int(g.get("coin") or 0)
+            cur["t"] = max(int(cur.get("t") or 0), int(g.get("t") or 0))
+        else:
+            st0["gifts"][k] = dict(g)
+            if len(st0["gifts"]) > 200:
+                oldest = min(st0["gifts"].items(), key=lambda kv: kv[1]["t"])
+                st0["gifts"].pop(oldest[0], None)
+        return True
+
+
+def _chat_add_enter(sid, e):
+    """进出记录：按 uid+时间 去重；只留最近 300 条。"""
+    st0 = chat_state(sid)
+    with CHAT_LOCK:
+        k = (str(e.get("uid") or ""), int(e.get("t") or 0))
+        if k in st0["enter_seen"]:
+            return False
+        st0["enter_seen"][k] = 1
+        if len(st0["enter_seen"]) > 600:
+            for k2 in list(st0["enter_seen"])[:200]:
+                st0["enter_seen"].pop(k2, None)
+        st0["enters"].append(e)
+        del st0["enters"][:-300]
+        return True
+
+
 def _chat_parse_nested(sid, payload):
     off = 0
     while off + 16 <= len(payload):
@@ -8506,36 +8663,24 @@ def _chat_parse_nested(sid, payload):
                             "text": str(data.get("message") or ""),
                             "t": int(data.get("start_time") or time.time()),
                             "read": False}
-                    st0 = chat_state(sid)          # ⚠️ 不能写在 CHAT_LOCK 里：那把锁不可重入
-                    with CHAT_LOCK:
-                        st0["sc"].append(item)
-                        del st0["sc"][:-120]
-                        st0["stats"]["sc_total"] += item["price"]
+                    _chat_add_sc(sid, item)       # 去重 + 按列表重算金额
                 elif cmd == "SEND_GIFT":
-                    coin = int(data.get("total_coin") or 0)
-                    g = {"uid": str(data.get("uid") or ""),
-                         "uname": str(data.get("uname") or ""),
-                         "face": str(data.get("face") or ""),
-                         "gift": str(data.get("giftName") or ""),
-                         "num": int(data.get("num") or 1),
-                         "coin": coin,
-                         "coin_type": str(data.get("coin_type") or ""),
-                         "t": int(data.get("timestamp") or time.time())}
-                    st0 = chat_state(sid)
-                    with CHAT_LOCK:
-                        if g["coin_type"] == "gold":
-                            st0["stats"]["gift_coin"] += coin
-                        key = g["uid"] + "|" + g["gift"]
-                        cur = st0["gifts"].get(key)
-                        if cur:
-                            cur["num"] += g["num"]
-                            cur["coin"] += coin
-                            cur["t"] = g["t"]
-                        else:
-                            st0["gifts"][key] = g
-                            if len(st0["gifts"]) > 120:
-                                oldest = min(st0["gifts"].items(), key=lambda kv: kv[1]["t"])
-                                st0["gifts"].pop(oldest[0], None)
+                    _chat_add_gift(sid, {
+                        "uid": str(data.get("uid") or ""),
+                        "uname": str(data.get("uname") or ""),
+                        "face": str(data.get("face") or ""),
+                        "gift": str(data.get("giftName") or ""),
+                        "num": int(data.get("num") or 1),
+                        "coin": int(data.get("total_coin") or 0),
+                        "coin_type": str(data.get("coin_type") or ""),
+                        "t": int(data.get("timestamp") or time.time()),
+                        "tid": str(data.get("tid") or "")})
+                elif cmd == "SEND_GIFT_V2":
+                    # 现在的主流格式：JSON 外壳 + data.pb（protobuf）。不解析就一条礼物都没有。
+                    try:
+                        _chat_add_gift(sid, _gift_from_pb(base64.b64decode(data.get("pb") or "")))
+                    except Exception:
+                        pass
                 elif cmd == "GUARD_BUY":
                     g = {"type": "guard", "uid": str(data.get("uid") or ""),
                          "uname": str(data.get("username") or ""),
@@ -8543,11 +8688,12 @@ def _chat_parse_nested(sid, payload):
                          "num": int(data.get("num") or 1),
                          "price": int(data.get("price") or 0),
                          "t": int(data.get("start_time") or time.time())}
+                    g["src"] = "ws"
                     st0 = chat_state(sid)
                     with CHAT_LOCK:
                         arr = [x for x in st0["guards"] if x["uid"] != g["uid"]]
                         arr.append(g)
-                        st0["guards"] = arr[-100:]
+                        st0["guards"] = arr[-200:]
                     _chat_broadcast(sid, g)
                 elif cmd == "ONLINE_RANK_V2":
                     lst = []
@@ -8573,16 +8719,23 @@ def _chat_parse_nested(sid, payload):
                     st0 = chat_state(sid)
                     with CHAT_LOCK:
                         st0["stats"]["likes"] = int(data.get("click_count") or 0)
-                elif cmd == "INTERACT_WORD":
-                    if int(data.get("msg_type") or 0) in (1, 2):   # 1 进入 / 2 关注
+                elif cmd in ("INTERACT_WORD", "INTERACT_WORD_V2"):
+                    if cmd == "INTERACT_WORD":
+                        mt = int(data.get("msg_type") or 0)
                         e = {"uid": str(data.get("uid") or ""),
                              "uname": str(data.get("uname") or ""),
+                             "face": str(data.get("face") or ""),
                              "t": int(data.get("timestamp") or time.time()),
-                             "follow": int(data.get("msg_type") or 0) == 2}
-                        st0 = chat_state(sid)
-                        with CHAT_LOCK:
-                            st0["enters"].append(e)
-                            del st0["enters"][:-200]
+                             "follow": mt == 2}
+                    else:
+                        # V2：data.pb 是 protobuf（实测房间只推这一种，不解析就 0 条进出）
+                        try:
+                            e = _interact_from_pb(base64.b64decode(data.get("pb") or ""))
+                        except Exception:
+                            e = None
+                        mt = (e or {}).get("msg_type") or 0
+                    if e and mt in (1, 2):                 # 1 进入 / 2 关注
+                        _chat_add_enter(sid, e)
                 if cmd == "DANMU_MSG" and j.get("info"):
                     info = j["info"]
                     who = info[2] or []
@@ -8834,6 +8987,7 @@ def _songs_snap(sid):
 
 
 BOARD_META_TTL = 60          # 观众榜 / 看过 的刷新间隔（B 站接口，别打太勤）
+BOARD_HIST_TTL = 300         # SC 快照 / 舰长名册：5 分钟补一次就够（变化很慢）
 
 
 def _board_meta_fetch(room):
@@ -8880,6 +9034,7 @@ def _board_meta_fetch(room):
                 if not fresh or len(top) >= total or len(top) >= 120:
                     break
                 time.sleep(0.3)
+        live_start = int(ri.get("live_start_time") or 0)
         with CHAT_LOCK:
             if top:
                 st["viewers"] = top[:120]
@@ -8887,12 +9042,105 @@ def _board_meta_fetch(room):
                 st["stats"]["online"] = online
             if ws.get("num"):
                 st["stats"]["watched"] = int(ws.get("num") or 0)
+            if live_start:
+                st["live_start"] = live_start
             st["meta_at"] = time.time()
+            need_hist = time.time() - float(st.get("hist_at") or 0) > BOARD_HIST_TTL
+            if need_hist:
+                st["hist_at"] = time.time()      # 先占位，避免同一秒起两个线程
+        if need_hist:
+            _board_hist_fetch(room, uid, live_start or int(st.get("live_start") or 0))
     except Exception as e:
         print("[board] 观众榜/看过获取失败：%s" % e)
     finally:
         with CHAT_LOCK:
             st["meta_busy"] = False
+
+
+def _board_hist_fetch(room, uid, live_start):
+    """HTTP 补「本场 SC」与「大航海名册」。
+
+    为什么必须补：弹幕 WS 只在**连上之后**推增量，开播那几小时发生的事一概没有。
+      · SC：`/av/v1/SuperChat/getMessageList` 是公开快照（最多 100 条），
+        用 getInfoByRoom 的 live_start_time 把上一场的残留裁掉；
+      · 舰长：WS 只在「有人上舰」时推 GUARD_BUY，已经在舰上的一个都不会出现，
+        `/xlive/app-room/v2/guardTab/topList` 按 num 翻页拿当前名册。
+    """
+    key = _room_key(room)
+    st = chat_state(key)
+    ref = "https://live.bilibili.com/%s" % room
+    with CHAT_LOCK:
+        st["hist_busy"] = True
+    failed = False
+    try:
+        d = bili_get("https://api.live.bilibili.com/av/v1/SuperChat/getMessageList"
+                     "?room_id=%s" % room, referer=ref, fallback_anon=True) or {}
+        lst = (d.get("data") or {}).get("list") or []
+        added = 0
+        for x in lst:
+            t = int(x.get("start_time") or 0)
+            if live_start and t and t < live_start - 120:      # 上一场的 SC 不算本场
+                continue
+            ui = x.get("user_info") or {}
+            if _chat_add_sc(key, {"type": "sc", "id": str(x.get("id") or ""),
+                                  "uid": str(x.get("uid") or ""),
+                                  "uname": str(ui.get("uname") or ""),
+                                  "face": str(ui.get("face") or ""),
+                                  "price": int(x.get("price") or 0),
+                                  "text": str(x.get("message") or ""),
+                                  "t": t or int(time.time()), "read": False}):
+                added += 1
+        with CHAT_LOCK:
+            st["hist_sc"] += added
+        print("[board] SC 快照 %d 条（接口 %d 条）" % (added, len(lst)))
+    except Exception as e:
+        failed = True
+        print("[board] SC 快照获取失败：%s" % e)
+
+    if not uid:
+        with CHAT_LOCK:
+            st["hist_busy"] = False        # 没有 uid 就不拉名册，但别把「加载中」挂住
+        return
+    try:
+        got, page = {}, 1
+        while page <= 7 and len(got) < 200:
+            u = ("https://api.live.bilibili.com/xlive/app-room/v2/guardTab/topList"
+                 "?roomid=%s&page=%d&ruid=%s&page_size=30" % (room, page, uid))
+            d = bili_get(u, referer=ref, fallback_anon=True) or {}
+            data = d.get("data") or {}
+            total = int((data.get("info") or {}).get("num") or 0)
+            for x in (data.get("list") or []):
+                g_uid = str(x.get("uid") or "")
+                if not g_uid or g_uid in got:
+                    continue
+                got[g_uid] = {"type": "guard", "uid": g_uid,
+                              "uname": str(x.get("username") or ""),
+                              "face": str(x.get("face") or ""),
+                              "level": int(x.get("guard_level") or 0),
+                              "num": 1, "price": 0, "t": 0, "src": "list"}
+            # ⚠️ 停止条件按「已收人数」而不是页数：接口的 page_size 会被压到 25，
+            #    用 page*30 判断会在 100 人就提前收工（117 位舰长的房间少 17 个）。
+            if not (data.get("list") or []) or len(got) >= total:
+                break
+            page += 1
+            time.sleep(0.25)
+        if got:
+            with CHAT_LOCK:
+                have = {x["uid"] for x in st["guards"]}
+                for g_uid, g2 in got.items():
+                    if g_uid not in have:
+                        st["guards"].append(g2)
+                st["guards"] = st["guards"][-200:]
+        print("[board] 舰长名册 %d 位" % len(got))
+    except Exception as e:
+        failed = True
+        print("[board] 舰长名册获取失败：%s" % e)
+    finally:
+        with CHAT_LOCK:
+            st["hist_busy"] = False
+            if failed:
+                # 失败不能占满 5 分钟：60 秒后重试（B 站 412 是间歇的，等一轮多半就好了）
+                st["hist_at"] = time.time() - BOARD_HIST_TTL + 60
 
 
 def api_live_song(obj):
@@ -9004,6 +9252,9 @@ def api_live_board(room, since=0):
             # ⚠️ 不能调 _songs_snap()：它内部还要拿一次 CHAT_LOCK，而这里已经持锁
             # （Lock 不可重入，实测直接把这个接口焊死，整条弹幕管线跟着卡住）。
             "songs": {"items": [dict(x) for x in sg["items"]], "cur": sg.get("cur") or ""},
+            "hist": {"sc": int(st.get("hist_sc") or 0),
+                     "live_start": int(st.get("live_start") or 0),
+                     "loading": bool(st.get("hist_busy"))},
         }
         wk = dict(st["worker"])
     if need_meta:

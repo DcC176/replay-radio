@@ -8999,7 +8999,8 @@
     name: '', seq: 0, timer: 0, busy: false, err: '',
     dm: [], dmShown: 0,
     snap: { sc: [], gifts: [], viewers: [], enters: [], guards: [],
-            stats: {}, songs: { items: [], cur: '' } },
+            stats: {}, songs: { items: [], cur: '' },
+            hist: { sc: 0, live_start: 0 } },
     tab: { sc: 'all', song: 'wait', gift: 'all', vw: 'online' },
     filter: 'all', sender: null
   };
@@ -9132,7 +9133,7 @@
       + '<i class="bd-price">¥' + (x.price || 0) + '</i>'
       + '<time>' + bdClock(x.t) + '</time>'
       + '<button class="bd-mini" type="button" data-sc-read="' + esc(x.id) + '"'
-      + (x.read ? ' disabled' : '') + '>' + (x.read ? '已读' : '已读') + '</button></div>'
+      + (x.read ? ' disabled' : '') + '>' + (x.read ? '已读' : '标已读') + '</button></div>'
       + '<p>' + esc(x.text || '') + '</p></div>';
     return row;
   }
@@ -9146,12 +9147,22 @@
     if (cnt) cnt.textContent = all.length + ' 条' + (unread.length ? ' · 未读 ' + unread.length : '');
     var shown = BD.tab.sc === 'unread' ? unread : all;
     if (!shown.length) {
-      list.innerHTML = bdEmpty(BD.tab.sc === 'unread' ? '没有未读 SC' : '还没有 SC');
+      var loading = (BD.snap.hist || {}).loading;
+      list.innerHTML = bdEmpty(BD.tab.sc === 'unread' ? '没有未读 SC'
+        : (loading ? '正在回溯本场 SC…' : '还没有 SC'));
       return;
     }
     list.innerHTML = '';
-    // 与 Danmist 一致：按时间正序，新的在下面
-    shown.slice(-60).forEach(function (x) { list.appendChild(bdScRow(x)); });
+    // 历史快照（最多回溯 100 条）与实时事件合并在一起，这里标明来源，避免误以为是全部
+    if ((BD.snap.hist || {}).sc) {
+      var n0 = document.createElement('div');
+      n0.className = 'bd-note';
+      n0.textContent = '含本场历史 SC（B 站快照最多回溯 100 条）';
+      list.appendChild(n0);
+    }
+    // 与 Danmist 一致：按时间正序，新的在下面。
+    // 不截断：后端最多留 200 条，这里再切 60 会把「本场早期」的 SC 藏掉。
+    shown.forEach(function (x) { list.appendChild(bdScRow(x)); });
     bindFaceFallback(list);
     list.scrollTop = list.scrollHeight;
   }
@@ -9199,10 +9210,13 @@
   function bdGiftRow(x) {
     var row = document.createElement('div');
     row.className = 'bd-item';
-    var money = x.coin_type === 'gold' ? bdYuan(x.coin) : '免费';
+    /* 名册补进来的舰长没有金额、也没有「本场什么时候上的舰」：
+       不能拿 0 画成 ¥0.00、拿 t=0 画成 08:00（那是假数据）。 */
+    var money = !x.coin ? '—' : (x.coin_type === 'gold' ? bdYuan(x.coin) : '免费');
+    var when = x.t ? bdClock(x.t) : '在册';
     row.innerHTML = '<span class="bd-av">' + faceHtml(x.face, 'bd-av-img', x.uname || '') + '</span>'
       + '<div class="bd-item-b"><div class="bd-item-h"><b>' + esc(x.uname || '') + '</b>'
-      + '<i class="bd-price">' + money + '</i><time>' + bdClock(x.t) + '</time></div>'
+      + '<i class="bd-price">' + money + '</i><time>' + when + '</time></div>'
       + '<div class="bd-item-sub">' + esc(x.gift || '') + ' × ' + (x.num || 1) + '</div></div>';
     return row;
   }
@@ -9215,23 +9229,27 @@
     var total = bdEl('bd-gift-total');
     var s = BD.snap.stats || {};
     if (total) total.textContent = bdYuan(s.gift_coin || 0);
+    /* 舰长名册（src=list）是「当前在舰的人」，不是本场发生的事件：
+       只在「上舰」页签里列，不混进「全部」，否则上百位老舰长会把本场礼物挤没。 */
+    var guardRow = function (g) {
+      return { uid: g.uid, uname: g.uname, face: g.face || '',
+               gift: g.level === 1 ? '总督' : (g.level === 2 ? '提督' : '舰长'),
+               num: g.num || 1, coin: g.price || 0, coin_type: 'gold', t: g.t || 0 };
+    };
     var rows;
     if (BD.tab.gift === 'guard') {
-      rows = guards.map(function (g) {
-        return { uid: g.uid, uname: g.uname, face: '', gift: g.level === 1 ? '总督'
-                 : (g.level === 2 ? '提督' : '舰长'), num: g.num || 1,
-                 coin: g.price || 0, coin_type: 'gold', t: g.t };
-      }).reverse();
+      rows = guards.map(guardRow).reverse();
     } else if (BD.tab.gift === 'gift') {
       rows = gifts;
     } else {
-      rows = gifts.concat(guards.map(function (g) {
-        return { uid: g.uid, uname: g.uname, face: '', gift: g.level === 1 ? '总督'
-                 : (g.level === 2 ? '提督' : '舰长'), num: g.num || 1,
-                 coin: g.price || 0, coin_type: 'gold', t: g.t };
-      })).sort(function (a, b) { return (b.t || 0) - (a.t || 0); });
+      rows = gifts.concat(guards.filter(function (g) { return g.src !== 'list'; })
+        .map(guardRow))
+        .sort(function (a, b) { return (b.t || 0) - (a.t || 0); });
     }
-    if (!rows.length) { list.innerHTML = bdEmpty('还没有礼物'); return; }
+    if (!rows.length) {
+      list.innerHTML = bdEmpty('还没有礼物（自打开本页起统计）');
+      return;
+    }
     list.innerHTML = '';
     rows.slice(0, 60).forEach(function (x) { list.appendChild(bdGiftRow(x)); });
     bindFaceFallback(list);
@@ -9242,7 +9260,8 @@
     var row = document.createElement('div');
     row.className = 'bd-item bd-vwx';
     var sub = kind === 'guard'
-      ? ((x.level === 1 ? '总督' : (x.level === 2 ? '提督' : '舰长')) + ' · ' + bdClock(x.t))
+      ? ((x.level === 1 ? '总督' : (x.level === 2 ? '提督' : '舰长'))
+         + ' · ' + (x.t ? bdClock(x.t) : '在册'))
       : (kind === 'enter'
           ? (x.follow ? '关注了主播' : '进入直播间') + ' · ' + bdClock(x.t)
           : (x.score ? '活跃 ' + fmtNum(x.score) : ''));
@@ -9279,8 +9298,10 @@
       if (cnt) cnt.textContent = rows.length + ' 位';
     }
     if (!rows.length) {
+      var hist0 = snap.hist || {};
       list.innerHTML = bdEmpty(kind === 'online' ? '还没有观众榜（B 站要等几分钟）'
-        : (kind === 'enter' ? '还没有进出记录' : '还没有舰长'));
+        : (kind === 'enter' ? '还没有进出记录'
+           : (hist0.loading ? '正在读取舰长名册…' : '还没有舰长')));
       return;
     }
     list.innerHTML = '';
@@ -9305,7 +9326,8 @@
     BD.snap = {
       sc: s.sc || [], gifts: s.gifts || [], viewers: s.viewers || [],
       enters: s.enters || [], guards: s.guards || [],
-      stats: s.stats || {}, songs: s.songs || { items: [], cur: '' }
+      stats: s.stats || {}, songs: s.songs || { items: [], cur: '' },
+      hist: s.hist || { sc: 0, live_start: 0 }
     };
     (d.items || []).forEach(function (x) {
       var it = x && x.item;
@@ -9400,7 +9422,8 @@
     BD.dmShown = 0;
     BD.err = '';
     BD.snap = { sc: [], gifts: [], viewers: [], enters: [], guards: [],
-                stats: {}, songs: { items: [], cur: '' } };
+                stats: {}, songs: { items: [], cur: '' },
+                hist: { sc: 0, live_start: 0 } };
     store.set(BD_ROOM_KEY, BD.room);
     if (prev && prev !== room) {
       fetch('/api/live/chat/stop?room=' + encodeURIComponent(prev)).catch(function () {});
