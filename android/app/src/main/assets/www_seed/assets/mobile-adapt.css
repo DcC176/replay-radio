@@ -1,8 +1,7 @@
 /* 手机版适配层（噼里啪啦）
-   原则：一比一还原电脑版界面与逻辑，只补「手机环境」需要的部分：
-   1) 刘海/挖孔/手势条安全区域  2) 触控点击区域 ≥40px
-   3) 板块标签可横向滚动         4) 横屏与矮屏压缩
-   5) 禁用双击缩放/文本选中误触   6) 浅色/深色跟原版变量，不改配色
+   原则：一比一还原电脑版界面与逻辑，只补「手机/平板环境」需要的部分：
+   1) 安全区域  2) 手机/平板分级响应式  3) 压缩滚动、核心内容一屏可见
+   4) 触控点击区域 ≥40px  5) 板块标签横滑  6) 横竖屏  7) 点击反馈
    本文件只在 APK 内被引用，不改动仓库原版 style.css。 */
 
 /* ---- 视口与安全区基线 ---- */
@@ -10,16 +9,15 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {
   -webkit-tap-highlight-color: transparent;
   -webkit-touch-callout: none;
-  touch-action: manipulation;          /* 禁双击缩放，保留滑动 */
+  touch-action: manipulation;
   padding-left: env(safe-area-inset-left);
   padding-right: env(safe-area-inset-right);
   padding-bottom: env(safe-area-inset-bottom);
 }
-/* 顶栏与底部浮标避开安全区 */
 .topbar { padding-top: env(safe-area-inset-top); }
 .status-dock { bottom: calc(env(safe-area-inset-bottom, 0px) + 10px); }
 
-/* ---- 板块标签：12 个在手机上改为可横滑，标签加大到可点 ---- */
+/* ---- 板块标签：12 个在触屏上横滑，标签加大到可点 ---- */
 @media (max-width: 900px), (pointer: coarse) {
   .tb-tabs {
     overflow-x: auto; overflow-y: hidden;
@@ -29,68 +27,120 @@ body {
     scroll-behavior: smooth;
   }
   .tb-tabs::-webkit-scrollbar { display: none; }
-  .tb-tabs .tab {
-    flex: 0 0 auto;
-    min-height: 40px; line-height: 40px;
-    padding: 0 14px;
-    font-size: 14px;
-  }
-  /* 滑动胶囊跟随滚动，避免只 translateX 导致错位 */
+  .tb-tabs .tab { flex: 0 0 auto; min-height: 40px; line-height: 40px; padding: 0 14px; font-size: 14px; }
   .tb-pill { will-change: transform; }
 }
 
-/* ---- 触控点击区域：原版小按钮在手机上放大命中区（视觉不变） ---- */
+/* ---- 触控点击区域：视觉不变，仅放大命中 ---- */
 @media (pointer: coarse) {
-  .ghost-btn, .strip-fold, .m-icon-btn,
-  button.btn, .btn, .tab, a.tab {
-    min-height: 40px;
-  }
-  /* 用伪元素扩大命中，不改变视觉尺寸/位置 */
+  .ghost-btn, .strip-fold, button.btn, .btn, .tab, a.tab { min-height: 40px; }
   .tb-more, .ghost-btn.tb-login, #tb-space,
-  .strip-fold, .recorder-fold, #handle-side-l, #handle-side-r {
-    position: relative;
-  }
+  .strip-fold, .recorder-fold, #handle-side-l, #handle-side-r { position: relative; }
   .tb-more::after, .ghost-btn.tb-login::after,
   .strip-fold::after, #handle-side-l::after, #handle-side-r::after {
     content: ""; position: absolute; left: 50%; top: 50%;
     width: 44px; height: 44px; transform: translate(-50%, -50%);
   }
-  /* 播放器控件触控间距 */
   .ctrl-btn, .pb-btn, .player-box button { min-width: 34px; min-height: 34px; }
 }
 
-/* ---- 字体：手机上不让原版字号低于可读下限 ---- */
-@media (max-width: 560px) {
-  .tab { font-size: 14px; }
-  /* 正文最小 12px，说明性文字不要糊成一团 */
-  .muted, .dim, .hint, .sub, .note { font-size: max(12px, 1em); }
+/* ============================================================
+   【手机】竖屏：压缩首屏，让主播卡片 + 登录入口集中在一屏
+   ============================================================ */
+@media (max-width: 599px) and (orientation: portrait) {
+  #onboard { padding: calc(14px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); }
+  .ob-head { margin-bottom: 16px; }
+  .ob-title { margin: 6px 0 5px; font-size: 25px; }
+  .ob-sub { font-size: 12.5px; line-height: 1.5; }
+  .ob-grid { gap: 10px; }
+  .ob-card { width: 142px; min-height: 176px; padding: 14px 10px; gap: 9px; border-radius: 14px; }
+  .ob-face { width: 60px; height: 60px; }
+  .ob-add .plus { font-size: 38px; }
+  .ob-name { font-size: 12.5px; }
+  .ob-card-form { margin-top: 14px; padding: 16px; }
+  .ob-foot { margin-top: 12px; }
+
+  /* 主界面：压缩纵向间距，把标题/操作/播放器/统计收进首屏 */
+  .wrap { padding-top: 10px; gap: 14px; }
+  #view-live .title { margin-bottom: 10px; }
+  .actions { gap: 8px; margin-bottom: 10px; }
+  .data-bar { margin-top: 10px; }
+  .filters { margin-top: 10px; }
+  .player-box { margin-top: 0; }
+  #strip-left-body { max-height: 34vh; overflow-y: auto; }
 }
 
-/* ---- 横屏矮屏：压缩纵向占位，保证播放器与内容同屏 ---- */
-@media (orientation: landscape) and (max-height: 500px) {
-  .topbar { height: 52px; min-height: 52px; }
+/* ============================================================
+   【平板】竖屏/横屏：多列铺开，减少纵向堆叠
+   ============================================================ */
+@media (min-width: 600px) and (max-width: 1199px) {
+  #onboard { padding: 20px 28px; }
+  .ob-head { margin-bottom: 16px; }
+  /* 沿用原版 flex-wrap 居中，只收紧卡片尺寸让一行放更多，不改布局方式 */
+  .ob-grid { gap: 12px; }
+  .ob-card { width: 152px; min-height: 164px; padding: 14px 10px; }
+  .ob-face { width: 56px; height: 56px; }
+  .wrap { gap: 20px; }
+  .data-bar, .filters { margin-top: 12px; }
+}
+
+/* ============================================================
+   【横屏 / 矮屏】：压到一屏，卡片改横排小卡
+   ============================================================ */
+@media (orientation: landscape) and (max-height: 520px) {
+  .topbar { height: 48px; min-height: 48px; }
   .tb-tabs .tab { min-height: 34px; line-height: 34px; }
-  .wrap { padding-top: 6px; padding-bottom: 6px; }
-  /* 引导页横屏卡片收紧，避免底部贴边 */
-  #onboard .ob-card { max-height: 80vh; }
+  #onboard { padding: 10px 16px; justify-content: safe center; }
+  .ob-head { margin-bottom: 8px; }
+  .ob-brand { display: none; }
+  .ob-title { margin: 0 0 3px; font-size: 21px; }
+  .ob-sub { font-size: 11.5px; line-height: 1.35; }
+  .ob-grid { gap: 8px; }
+  .ob-card { width: 104px; min-height: 108px; padding: 8px 6px; gap: 5px; }
+  .ob-face { width: 40px; height: 40px; }
+  .ob-add .plus { font-size: 28px; }
+  .ob-name { font-size: 11px; }
+  .ob-main-tag { font-size: 10px; }
+  .ob-card-form { margin-top: 10px; padding: 12px; }
+  .wrap { padding-top: 6px; padding-bottom: 6px; gap: 10px; }
+  #strip-left-body { max-height: 30vh; overflow-y: auto; }
 }
 
-/* ---- 竖屏：给内容留出安全区与滑动空间 ---- */
+/* ---- 竖屏通用兜底 ---- */
 @media (orientation: portrait) {
   .wrap { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
-  /* 竖屏下播放器占满列宽，沿用原版规则，这里只兜底 possible 溢出 */
   .player-box, .pv-wrap { max-width: 100%; }
 }
 
-/* ---- 触摸反馈：轻点缩放，统一给可交互元素 ---- */
-@media (pointer: coarse) {
-  .tab:active, .btn:active, button:active, .ob-card:active, .m-station:active {
-    opacity: .72;
-    transition: opacity .08s ease-out;
-  }
+/* ---- B 站快捷登录按钮（适配层动态注入，复用原版登录弹窗） ---- */
+.ob-login-quick {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  min-height: 40px; padding: 0 18px; margin: 10px auto 0;
+  border: 1px solid var(--red); border-radius: 20px;
+  background: var(--red); color: var(--on-red, #fff);
+  font: 600 13.5px/1 inherit; cursor: pointer;
+}
+.ob-login-quick::before {
+  content: ""; width: 16px; height: 16px; flex: none; background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M17.8 3.3a2 2 0 0 1 2.8.3 2 2 0 0 1-.1 2.7l-2.2 2.4v8.1c0 2.8-2.3 5.1-5.1 5.1H6.3C3.5 22 1 19.7 1 16.9V8.8c0-2.8 2.4-5.1 5.2-5.1h11.6zm-2.5 9.9a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8zM8.7 13.2a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8z'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M17.8 3.3a2 2 0 0 1 2.8.3 2 2 0 0 1-.1 2.7l-2.2 2.4v8.1c0 2.8-2.3 5.1-5.1 5.1H6.3C3.5 22 1 19.7 1 16.9V8.8c0-2.8 2.4-5.1 5.2-5.1h11.6zm-2.5 9.9a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8zM8.7 13.2a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8z'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+.ob-login-quick:active { transform: scale(.96); }
+.ob-login-quick.is-logged { background: var(--panel); color: var(--text); border-color: var(--line-2); }
+
+/* 登录弹窗在小屏上收紧，保证二维码 + 提示一屏可见 */
+@media (max-height: 560px) {
+  .login-panel { padding: 10px; }
+  .login-box { padding: 12px 16px 14px; }
+  .login-qr canvas, .login-qr img { max-width: 150px; max-height: 150px; }
 }
 
-/* ---- 性能：仅对装饰性动画降负载，不影响功能动画 ---- */
+/* ---- 触摸反馈 ---- */
+@media (pointer: coarse) {
+  .tab:active, .btn:active, button:active, .ob-card:active { opacity: .72; transition: opacity .08s ease-out; }
+}
+
+/* ---- 性能 ---- */
 @media (prefers-reduced-motion: no-preference) {
   .glow { will-change: transform; }
 }
