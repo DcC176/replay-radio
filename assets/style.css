@@ -3936,11 +3936,20 @@ body.view-multi .col-right { display: none; }
   background: rgba(var(--ink), .1);
 }
 .mf-meta { flex: 1 1 auto; min-width: 0; }
+/* 头像占位：与 .mf-face 同尺寸的圆 + 居中首字母（faceHtml 失败兜底用） */
+.mf-face-ph {
+  display: grid; place-items: center;
+  font-size: 13px; font-weight: 600; color: var(--muted);
+  overflow: hidden;
+}
 .mf-name {
   display: flex; align-items: center; gap: 6px;
   font-size: 13px; font-weight: 600; color: var(--text);
   overflow: hidden; white-space: nowrap;
 }
+/* ⚠️ 名字必须是独立的 flex 项才能省略号收尾：直接放文本节点时它会被压窄、
+   字画到 LIVE 徽章下面（徽章 flex:none 不会让位）。 */
+.mf-nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mf-live {
   font-size: 11px; flex: none;
   color: var(--on-red); background: var(--red);

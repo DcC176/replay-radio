@@ -3153,7 +3153,7 @@
      ＋ 存为常用），差别只有「发到哪个房间」——由 opts.room() 决定（空串 = 当前主播）。
      ⚠️ 表情面板是全局单例（fixed 定位），所以必须记住「谁打开的」：
         EMO.owner 指向当前 sender，发送时按它的 room() 带房间号。 */
-  var EMO = { packs: [], active: 0, loaded: false, busy: false, err: '', owner: null };
+  var EMO = { packs: [], active: 0, loaded: false, busy: false, err: '', owner: null, room: '' };
 
   function emojiPanelEl() { return document.getElementById('emoji-panel'); }
 
@@ -3209,11 +3209,21 @@
     }
   }
 
+  /* 表情包是**跟房间走**的（尤其粉丝牌表情）。面板是全局单例，
+     必须按「谁打开的」去取包，否则监控室会拿到主站主播的包。 */
+  function emojiRoom() {
+    var o = EMO.owner;
+    if (!o || typeof o.room !== 'function') return '';
+    try { return String(o.room() || ''); } catch (e) { return ''; }
+  }
+
   function emojiLoad(force) {
+    var room = emojiRoom();
+    EMO.room = room;
     EMO.loaded = false;
     EMO.err = '';
     emojiRender();
-    fetch('/api/live/emoticons' + (force ? '?refresh=1' : ''))
+    fetch('/api/live/emoticons?room=' + encodeURIComponent(room) + (force ? '&refresh=1' : ''))
       .then(function (r) { return r.json(); })
       .then(function (d) {
         EMO.loaded = true;
@@ -3250,7 +3260,8 @@
     var h = p.getBoundingClientRect().height || 320;
     p.style.top = Math.max(8, r.top - h - 8) + 'px';
     btn.setAttribute('aria-expanded', 'true');
-    if (!EMO.loaded) emojiLoad(false);
+    // 换了房间（监控室切格子 / 直播间换主播）要重取这一路的包
+    if (!EMO.loaded || EMO.room !== emojiRoom()) emojiLoad(false);
   }
 
   function emojiSend(item) {
@@ -3429,6 +3440,7 @@
     var api = {
       send: send,
       sendEmoticon: sendEmoticon,
+      room: room,                       // 表情面板按它取「这一路」的表情包
       setResult: setResult,
       refreshQuick: renderQuick,
       emojiBtn: emojiBtn,
@@ -12669,10 +12681,11 @@
   function mfExtraItem(s) {
     var on = multiFollowOn[s.mid] ? ' on' : '';
     var img = s.face
-      ? '<img class="mf-face" src="' + dynImg(s.face) + '" alt="" loading="lazy" decoding="async">'
-      : '<span class="mf-face mf-noface"></span>';
+      ? faceHtml(s.face, 'mf-face', s.uname || s.name)
+      : '<span class="mf-face mf-noface">' + esc(String(s.uname || s.name || '?').charAt(0)) + '</span>';
     return '<div class="mf-item' + on + '" data-mid="' + esc(s.mid) + '">' + img
-      + '<div class="mf-meta"><div class="mf-name">' + esc(s.uname || s.name || s.mid)
+      + '<div class="mf-meta"><div class="mf-name"><span class="mf-nm">'
+      + esc(s.uname || s.name || s.mid) + '</span>'
       + '<span class="mf-live">LIVE</span></div>'
       + '<div class="mf-title" title="' + esc(s.title || '') + '">'
       + esc(s.title || (s.area || '直播中')) + '</div></div>'
@@ -12971,13 +12984,21 @@
   var mfRetryN = 0;          // 旧数据（stale）的静默重试次数
   var mfRetryTimer = 0;      // 已排队的重试（同时只允许一条）
 
-  function mfAllList() {   // 左栏 = 手动添加的 + 关注列表里在播的（按 mid 去重，添加的在前）
+  function mfAllList() {   // 画面墙的候选 = 手动添加的 + 关注列表里在播的（按 mid 去重）
     var seen = {};
     var out = [];
     multiCustom.concat(multiFollowList).forEach(function (s) {
       if (s && s.mid && !seen[s.mid]) { seen[s.mid] = 1; out.push(s); }
     });
     return out;
+  }
+
+  /* 左栏「关注的直播」只列**真正关注、且在播**的人。
+     以前用的是 mfAllList()，把「＋ 添加直播间」手动加进来的（多数并没有关注）
+     一起列了出来 —— 用户看到的就是「关注列表里有没关注的人」。
+     画面墙仍然用 mfAllList()：手动加的那几路照样能留在墙上。 */
+  function mfSideList() {
+    return multiFollowList;
   }
 
   function saveMfState() {
@@ -13596,13 +13617,13 @@
 
   function mfItemHtml(s) {
     var on = multiFollowOn[s.mid] ? ' on' : '';
+    /* 头像统一走 faceHtml：取不到图时由 bindFaceFallback 换成首字母占位。
+       （原来是裸 <img>，/api/img 一失败就只剩一个灰圆圈，也不报错。） */
     var img = s.face
-      // 懒加载 + 异步解码：名单可能有上百条，一次性打几百个 /api/img 会把本机服务的
-      // 连接池占满（同源只有 6 条 HTTP/1.1），慢的是「整页其它请求跟着排队」。
-      ? '<img class="mf-face" src="' + dynImg(s.face) + '" alt="" loading="lazy" decoding="async">'
-      : '<span class="mf-face mf-noface"></span>';
+      ? faceHtml(s.face, 'mf-face', s.uname)
+      : '<span class="mf-face mf-noface">' + esc(String(s.uname || '?').charAt(0)) + '</span>';
     return '<div class="mf-item' + on + '" data-mid="' + esc(s.mid) + '">' + img
-      + '<div class="mf-meta"><div class="mf-name">' + esc(s.uname)
+      + '<div class="mf-meta"><div class="mf-name"><span class="mf-nm">' + esc(s.uname) + '</span>'
       + '<span class="mf-live">LIVE</span></div>'
       + '<div class="mf-title" title="' + esc(s.title) + '">' + esc(s.title || '直播中') + '</div></div>'
       + '<div class="mf-pop">' + fmtNum(s.online || 0)
@@ -13707,14 +13728,15 @@
     /* 左栏正被弹幕面板占着：只更新数据、不写 DOM（写了看不见，还会把滚动位置打掉）。
        关闭面板时 restoreSideList() 会用缓存重画一次，所以不会停在旧内容上。 */
     if (multiChatOpen) return;
-    var list = mfAllList();
+    var list = mfSideList();
     if (!list.length) {
-      side.innerHTML = '<p class="sub" style="padding:10px">关注列表里现在没有人在播；'
-        + '也可以用「＋ 添加直播间」直接输入房间号或链接。</p>';
+      side.innerHTML = '<p class="sub" style="padding:10px">关注的主播里现在没有人在播；'
+        + '手动添加的直播间在「我的板块」，也可以用「＋ 添加直播间」输入房间号。</p>';
       return;
     }
     side.innerHTML = '<input class="mf-search" type="search" placeholder="搜主播名 / 标题…">'
       + list.map(mfItemHtml).join('');
+    bindFaceFallback(side);        // 头像失败 → 首字母占位，别留破图/空圈
   }
 
   /* 列表指纹：只比「会影响界面」的字段 —— 在线人数每几秒就变，但为了它重建整个左栏

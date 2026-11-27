@@ -5,6 +5,6 @@
   "sha256": "c25bf8a668c3aa32e0f2b7888dfee31566c5d450fde862b49f8f1b72be418ec6",
   "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.35/ReplayRadio-v1.9.35.exe",
   "published": "2026-11-27T08:04:15Z",
-  "notes": "弹幕板 SC / 礼物 / 来过 / 舰长 全部打通",
+  "notes": "弹幕板：本场的 SC、礼物、来过的观众、舰长都能看到了",
   "_note": "软件内更新检查的兜底数据源。发版时随 site/index.html 的 VERSION 一起改，发布到 gh-pages 后生效。"
 }
