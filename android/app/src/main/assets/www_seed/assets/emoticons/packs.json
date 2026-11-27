@@ -1,0 +1,15 @@
+{
+  "_doc": "本地表情包（可选）。B 站原生表情由后端实时取，这里只放你想额外加的表情。url 写相对路径按本目录解析，也可以写 https 地址。唯一 id 不能与 B 站重复。",
+  "_example": {
+    "packs": [
+      {
+        "id": "my",
+        "name": "我的表情",
+        "emoticons": [
+          { "unique": "my_happy", "name": "开心", "url": "happy.png", "width": 120, "height": 120 }
+        ]
+      }
+    ]
+  },
+  "packs": []
+}

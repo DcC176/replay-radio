@@ -49,6 +49,7 @@ import zlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 FROZEN = bool(getattr(sys, "frozen", False))    # True = 由 PyInstaller 打成的 EXE
+ANDROID = bool(os.environ.get("REPLAYRADIO_ANDROID"))   # True = Chaquopy / Android 版
 
 WEB_ITEMS = ("index.html", "favicon.ico", "favicon.png", "assets", "data")   # 打进 EXE 的网页文件
 
@@ -310,7 +311,13 @@ def unpack_web(appdir):
         return None
 
 
-if FROZEN:
+if ANDROID:
+    # Chaquopy 无 sys.executable / LOCALAPPDATA：网页与用户数据都放 App 私有目录，
+    # 具体路径由 Java 层通过环境变量传入（见 android_entry.py）。
+    APPDIR = os.environ.get("REPLAYRADIO_APPDIR") or os.path.expanduser("~")
+    ROOT = os.environ.get("REPLAYRADIO_ROOT") or APPDIR
+    os.makedirs(APPDIR, exist_ok=True)
+elif FROZEN:
     # 凭据和日志写用户目录，EXE 放在只读位置（Program Files、只读盘）也能跑。
     APPDIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
                           "ReplayRadio")
@@ -332,7 +339,7 @@ else:
 
 SESS_FILE = os.path.join(APPDIR, "sessdata.txt")
 
-if FROZEN:
+if FROZEN or ANDROID:
     # --noconsole 打包时没有控制台，PyInstaller 会把 sys.stdout/stderr 换成「丢弃式」
     # 对象（不一定是 None），输出全进黑洞 —— 出问题就完全无从排查。
     # 所以这里无条件改成写日志文件（追加 + 时间戳，便于事后回看）。
@@ -11258,6 +11265,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             return self._json(code, obj)
 
+        # Android APK 的 WebView 固定加 /?mobile=1，直接给移动页；
+        # 手机浏览器访问根路径时也按 UA 自动切到移动页（桌面版不受影响）。
+        ua = (self.headers.get("User-Agent") or "").lower()
+        mobile_ua = any(k in ua for k in ("android", "iphone", "ipad", "mobile"))
+        if parsed.path == "/" and ("mobile=1" in (parsed.query or "") or mobile_ua):
+            if os.path.exists(os.path.join(ROOT, "mobile.html")):
+                self.path = "/mobile.html"
         return super().do_GET()
 
     def do_POST(self):
@@ -12478,7 +12492,8 @@ def main():
         return 0
 
     # 升级后 EXE 换了文件名，协议注册还指着老版本 —— 每次启动顺手校正（详见函数注释）
-    protocol_refresh()
+    if not ANDROID:                      # Android 没有 Windows 注册表
+        protocol_refresh()
 
     # 给当前主播挂一条常驻 WS：开播/下播由 B 站主动推，省掉每 60 秒一次的 HTTP 轮询
     try:
@@ -12519,13 +12534,14 @@ def main():
     print("  地址：%s" % url)
     print("  停止：网页右下角「停止本地服务」，或本程序加 --stop 参数")
 
-    if not args.no_browser:
+    if not args.no_browser and not ANDROID:   # Android 由 WebView 直接加载，不开系统浏览器
         # 端口已经绑定，此刻打开不会连接失败
         print("  打开浏览器：%s" % ("成功" if open_browser(url) else "失败（请手动访问上面的地址）"))
 
     # 页面全关掉就退出（页面会 sendBeacon 说一声；心跳兜底浏览器崩溃的情况）
     SERVER_REF[0] = srv
-    start_page_watchdog()
+    if not ANDROID:                      # 手机 App 常驻，不能因页面不可见就退出服务
+        start_page_watchdog()
     # 回放清单自动发现：只填了 name + UID 的主播靠这一步补齐（后台跑，不挡启动）
     series_kick()
     # 录播姬：启动即开始按房间检测开播（auto 开着时不需要手动点「开始监控」）
@@ -12543,7 +12559,8 @@ def main():
             rc_finalize_all("应用退出")
         except Exception as e:
             print("[recorder] 收尾异常：%s" % e)
-        tray_stop()
+        if not ANDROID:                  # Android 无系统托盘
+            tray_stop()
     return 0
 
 

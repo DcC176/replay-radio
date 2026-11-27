@@ -1,0 +1,225 @@
+/* ⚠️ 本文件已停用（v1.0.46）：用户要求「去除磨砂玻璃材质」，
+   它的 <link> 已从 index.html 移除，这里的内容不再生效。
+   文件本身保留着（不删历史代码），如需恢复玻璃效果：
+   把 <link rel="stylesheet" href="assets/frost.css"> 加回 index.html 即可。 */
+
+/* ============================================================================
+   磨砂玻璃前景（实装版）  assets/frost.css
+   ----------------------------------------------------------------------------
+   规则：**背景保持纯色**，只给前景的框体做磨砂玻璃。所以这里没有环境层、
+   没有取色、没有 JS —— 页面底色（--bg）与 .glow 光晕一律不动。
+
+   在「纯色背景」上做玻璃，能读出来的只有四件事，本文件就是这四件事：
+     ① 细腻的颗粒（--fx-grain）—— 「磨砂」的那个「砂」；
+     ② 上缘高光细线 + 外投影（--fx-hi / --fx-sh）—— 让框体**浮**在底色上；
+     ③ 半透明面（--fx-face）—— 框体压在别的元素上时能透过去；
+     ④ 真模糊 backdrop-filter —— **只用在背后真有锐利内容的框体上**：
+        顶栏、播放器控制层、监控室每格底栏、状态面板、登录/离线浮层。
+        静态面板不做模糊：纯色底上模糊一圈纯色，在数学上就是不模糊。
+
+   ⚠️ 强度经过一轮收紧（2026-10-12，用户反馈「影响可读性」）：
+      压在**亮画面**上的文字曾经只有 2.5~3.1:1 —— 低不透明度叠在亮画面上，字就糊了。
+      现在：颗粒浓度减半（4.5%→2.2%），模糊半径 20→12 / 10→6，静态面板提到 ~82% 不透明度。
+
+   ⚠️ **播放器不在本文件的作用范围内（v1.0.24）**：用户明确要求「播放器界面不要磨砂玻璃、
+      改回原先设计」。所以这些选择器**故意不在此文件出现**，一律走 style.css 的原设计：
+        · 主播放器：`.player-box`、`.pv-top`、`.pv-ctrl`、`.pv-btn` / `.pv-ic` / `.pv-sel` / `.ctrl`、`.mute-hint`
+        · 监控室每格：`.ms-bar`、`.ms-btn` / `.ms-qn`
+      原设计里这些是**黑色渐变蒙版 + 半透明黑胶囊**（顶栏 `.pv-top` = 上黑下透明，
+      控制条 `.pv-ctrl` = 下黑上透明，按钮 `rgba(0,0,0,.45)`，音量提示 `rgba(0,0,0,.62)`）。
+      ⚠️ 别再给它们补「深底」或 backdrop-filter —— 那就是用户要求撤掉的东西。
+      （播放器**下方**的画质/标注/分段工具面板不在这个例外里，仍然走玻璃面。）
+
+   ⚠️ 两条踩过的坑：
+    · `.wrap` 是堆叠上下文（position:relative; z-index:1），它里面的元素用
+      backdrop-filter **采不到** .wrap 外面的任何东西 —— 所以别指望给面板加模糊
+      能透出外层背景。这里也就不加。
+    · 颜色从 `--ink / --panel / --panel-2 / --bg` 派生，不写死 —— `--ink` 在浅色主题下
+      翻成黑色，高光细线与颗粒因此自动反向。
+   ========================================================================== */
+
+:root {
+  /* 面：由 --panel 派生、几乎不透明（82%）。早期版本用的是「白 4.5%」的奶白面，
+     在纯色底上偏亮、让正文对比度从 17:1 掉到 15:1；现在回到接近原来的实色，
+     只保留颗粒 / 高光 / 投影 / 微透这些「玻璃」的线索。 */
+  --fx-face: color-mix(in srgb, var(--panel) 82%, transparent);
+  --fx-face-2: color-mix(in srgb, var(--panel-2) 90%, transparent);
+  --fx-hair: rgba(var(--ink), .13);
+  --fx-hi: inset 0 1px 0 rgba(var(--ink), .09);
+  --fx-sh: 0 10px 26px rgba(0, 0, 0, .26);
+  --fx-sheen: linear-gradient(180deg, rgba(var(--ink), .04), rgba(var(--ink), 0) 48%);
+  /* 颗粒：feTurbulence 出的中性噪点。浓度降到 2.2% —— 4.5% 时小字号会发糊。 */
+  --fx-grain: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='.022'/%3E%3C/svg%3E");
+  /* 模糊半径整体收一档：20→12 / 10→6。磨砂「毛」的程度主要靠半径，收敛后文字边缘更清。 */
+  --fx-blur: blur(12px) saturate(1.35);
+  --fx-blur-sm: blur(6px) saturate(1.2);
+}
+
+/* ---------------------------------------------------------------- 1. 静态面板 */
+
+.np,
+.next,
+.cat-card,
+.about-block,
+.wb-profile,
+.wb-item,
+.wb-skel,
+.live-card,
+.live-wheel-pop .live-card,
+.ob-card,
+.key-list .key-combo,
+.data-bar,
+.multi-side,
+.mf-search,
+.st-row-palette {
+  background-color: var(--fx-face);
+  background-image: var(--fx-sheen), var(--fx-grain);
+  border-color: var(--fx-hair);
+  box-shadow: var(--fx-hi), var(--fx-sh);
+}
+
+/* 工具浮层（画质 / 标注 / 分段）：本来就有深底，压成玻璃面并保留分层 */
+.quality-panel,
+.mark-panel,
+.chapters-panel { background-color: var(--fx-face); background-image: var(--fx-grain); }
+
+/* 装着视频或图片的框体：内部必须不透明，只给「边框 + 投影」让它成为一块玻璃框。
+   ⚠️ `.player-box`（主播放器）**不在这里** —— 见文件头「播放器不在本文件的作用范围内」。
+   监控室每格 `.ms-cell` 只有框体投影，没有磨砂材质，保留。 */
+.ms-cell {
+  border-color: var(--fx-hair);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, .34), inset 0 1px 0 rgba(var(--ink), .07);
+}
+
+/* 头像 / 缩略图这类小方形：只做次级面，别加颗粒（太小，颗粒会变脏点） */
+.status-live-face,
+.status-item-thumb,
+.cell-title img,
+.wb-avatar,
+.ob-face,
+.st-swatch { background-color: var(--fx-face-2); }
+
+/* ---------------------------------------------------------------- 2. 输入与小控件 */
+
+.search input,
+.st-rename-input,
+.wb-paste textarea,
+.ob-row input,
+.ob-name-box input,
+.ob-src select,
+.live-card input,
+.multi-qn select,
+.multi-layout button,
+.btn.ghost,
+.ghost-btn,
+.chip,
+.tag {
+  background-color: var(--fx-face-2);
+  background-image: var(--fx-grain);
+  border-color: var(--fx-hair);
+  box-shadow: var(--fx-hi);
+}
+
+/* ---------------------------------------------------------------- 3. 浮在内容之上的框体
+   这些框体背后是**滚动内容**，所以用真模糊 —— 磨砂效果在这里最读得出来。
+
+   ⚠️ 播放器与监控室的「压画面控件」**故意不在本节**（v1.0.24 起走 style.css 原设计）：
+      `.pv-top` / `.pv-ctrl` / `.pv-btn` / `.pv-ic` / `.pv-sel` / `.ctrl` / `.mute-hint` /
+      `.ms-bar` / `.ms-btn` / `.ms-qn` 都不在此文件里出现。 */
+
+.topbar {
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: var(--fx-blur);
+  -webkit-backdrop-filter: var(--fx-blur);
+  border-bottom: 1px solid var(--fx-hair);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .22);
+}
+
+.status-fab {
+  background-color: color-mix(in srgb, var(--panel) 92%, transparent);
+  background-image: var(--fx-grain);
+  border-color: var(--fx-hair);
+  backdrop-filter: var(--fx-blur-sm);
+  -webkit-backdrop-filter: var(--fx-blur-sm);
+  box-shadow: var(--fx-hi), 0 8px 22px rgba(0, 0, 0, .3);
+}
+.status-panel {
+  background-color: color-mix(in srgb, var(--panel) 94%, transparent);
+  background-image: var(--fx-grain);
+  border-color: var(--fx-hair);
+  backdrop-filter: var(--fx-blur);
+  -webkit-backdrop-filter: var(--fx-blur);
+}
+.login-panel,
+.offline-banner {
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  backdrop-filter: var(--fx-blur);
+  -webkit-backdrop-filter: var(--fx-blur);
+  border: 1px solid var(--fx-hair);
+  box-shadow: var(--fx-sh);
+}
+/* 「正在获取开播状态」这层盖在空格子上 */
+.ms-off {
+  background: radial-gradient(ellipse at center,
+              color-mix(in srgb, #14141c 82%, transparent),
+              color-mix(in srgb, #07070b 94%, transparent) 72%);
+  backdrop-filter: var(--fx-blur-sm);
+  -webkit-backdrop-filter: var(--fx-blur-sm);
+}
+
+/* ---------------------------------------------------------------- 4. 状态
+   原本「悬停 / 选中」会把底色换成 --panel-2 或红色 —— 这里改成玻璃面的加深档，
+   红色语义（播放中 / 激活）一律保留。 */
+
+.cat-card:hover,
+.status-item:hover { background-color: var(--fx-face-2); background-image: var(--fx-sheen), var(--fx-grain); }
+
+.cat-card.active {
+  background-color: color-mix(in srgb, var(--red) 16%, transparent);
+  background-image: var(--fx-grain);
+  border-color: color-mix(in srgb, var(--red) 55%, transparent);
+}
+
+.btn.ghost:hover,
+.ghost-btn:hover { background-color: color-mix(in srgb, var(--ink) 11%, transparent); }
+
+.chip:hover { background-color: var(--fx-face-2); }
+.chip.active { background-image: var(--fx-grain); }
+
+.mf-item { border-radius: 12px; }
+.mf-item:hover { background: var(--fx-face); box-shadow: var(--fx-hi); }
+.mf-item.on {
+  background: color-mix(in srgb, var(--red) 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 52%, transparent);
+}
+
+.search input:focus,
+.st-rename-input:focus,
+.wb-paste textarea:focus,
+.mf-search:focus {
+  border-color: color-mix(in srgb, var(--red) 48%, transparent);
+  box-shadow: var(--fx-hi), 0 0 0 3px color-mix(in srgb, var(--red) 14%, transparent);
+}
+
+/* ⚠️ `.ms-btn.on` 不在这里 —— style.css 原设计就把它做成红色（含 --on-red 字色），
+   本文件再写一遍只会覆盖掉字色。 */
+.multi-layout button.on,
+.multi-src .btn.on {
+  background-color: var(--red);
+  background-image: none;
+  border-color: var(--red);
+}
+
+/* ---------------------------------------------------------------- 5. 降级 */
+
+/* 不支持 backdrop-filter：底子已经是实色了，这里只需把「完全没底」的补齐 */
+@supports not (backdrop-filter: blur(2px)) {
+  .topbar { background: color-mix(in srgb, var(--bg) 96%, transparent); }
+  .status-fab, .status-panel { background-color: var(--panel); }
+}
+
+/* 系统开了「降低透明度」：退回实色，层次改用边框与投影表达 */
+@media (prefers-reduced-transparency: reduce) {
+  :root { --fx-face: var(--panel); --fx-face-2: var(--panel-2); --fx-grain: none; }
+  .topbar { background: var(--bg); }
+}

@@ -12,7 +12,18 @@ android {
         minSdk 24
         targetSdk 35
         versionCode 1
-        versionName '0.1.0'
+        versionName '1.0.0-mobile'
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    sourceSets {
+        getByName("main") {
+            // 网页资源：src/main/assets 下已备好干净的 index/mobile/data 模板
+            assets.srcDirs("src/main/assets")
+        }
     }
 }
 
@@ -20,4 +31,6 @@ chaquopy {
     defaultConfig {
         version = '3.11'
     }
+    // Python 源码只用 src/main/python（serve.py + android_entry.py + 两个移动端 stub）。
+    // 不要 srcDir("../../tools")：那会把整个 tools/tests 纳入静态分析，构建卡死。
 }

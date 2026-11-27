@@ -1,0 +1,2016 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 正式标题由 app.js 的 syncDocTitle() 按「当前主播名 - 板块名称」生成；
+     这里只放品牌占位，名单回来之前用，不写死任何主播名或板块名。 -->
+<title>噼里啪啦</title>
+<!-- 应用图标：ICO 覆盖浏览器标签页/收藏夹与老浏览器，PNG 供高 DPI 标签页、
+     iOS 添加到主屏幕使用。ICO 同时也是打包 EXE 的图标（build_exe.py --icon）。 -->
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="favicon.png">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+/* 切换板块是整页重载（数据源换了，时间轴必须整个重建）。重载会有一小段
+   「骨架态」——页面框架在、内容是空的，和切换前的画面一对比就是一次突变。
+   所以在文档**最早的时机**铺上目标板块的底色把它盖住：旧页面先过渡到这个色，
+   重载期间同色延续，新内容就绪后再淡入。用户看到的是「颜色过渡 + 停留」，不是闪一下。
+   这一小段必须内联：等 style.css / app.js 到位就太晚了。 */
+window.__BOOT_T0 = Date.now();
+/* 主题必须在最早时机定好：浅色用户若等到 app.js 再切，
+   会先看到一帧深色页面再跳过去（开屏闪一下）。这里读一次本地选择直接写在 html 上。
+   默认深色（黑红），只有显式存过 light 才走浅色。 */
+(function () {
+  try {
+    if (localStorage.getItem('xl_theme') === 'light') {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+  } catch (e) { /* 隐私模式读不到 localStorage，就按深色走 */ }
+})();
+(function () {
+  /* 加载动画的硬兜底：万一 app.js 报错、或清单一直不来，也不能让页面永久蒙着。
+     正常路径由 app.js 的 hideBootVeil() 在数据渲染完后撤掉。 */
+  setTimeout(function () {
+    var b = document.getElementById('boot-veil');
+    if (!b || b.classList.contains('gone')) return;
+    b.classList.add('gone');
+    setTimeout(function () { if (b.parentNode) b.parentNode.removeChild(b); }, 420);
+  }, 8000);
+  try {
+    var v = sessionStorage.getItem('xl_veil');
+    if (!v) return;
+    var d = JSON.parse(v) || {};
+    // 过期的标记一律作废：这只该在一次「切板块」里生效。万一上回没走到收尾
+    // （脚本报错之类）留了残留，也不能让下一次打开页面还蒙着遮罩。
+    if (!d.at || Date.now() - d.at > 10000) {
+      sessionStorage.removeItem('xl_veil');
+      return;
+    }
+    document.documentElement.classList.add('switching');
+    if (d.bg) document.documentElement.style.setProperty('--bg', d.bg);
+    /* 硬兜底：正常路径由 app.js 在内容就绪后撤掉遮罩。
+       万一某条路径没走到那儿（脚本报错、数据一直不来），
+       也不能让整个页面永久藏着 —— 到点无条件放出来。 */
+    setTimeout(function () {
+      document.documentElement.classList.remove('switching');
+    }, 6000);
+  } catch (e) { /* 隐私模式下拿不到 sessionStorage，就当没这回事 */ }
+})();
+</script>
+<style>
+  /* 盖住重载空窗：html 铺底色，内容先不显示（用 opacity 以便淡入而不是硬切）。
+     排除 #boot-veil —— 父级 opacity 会把它一起带走，那样切板块时只剩一块纯色。 */
+  html.switching { background: var(--bg, #08080a); }
+  html.switching body > *:not(#boot-veil) { opacity: 0; }
+  body > *:not(#boot-veil) { transition: opacity .18s ease-out; }
+
+  /* 首屏加载动画。必须内联：等 style.css / app.js 到位就太晚了，
+     那时用户已经先看到了空列表，再出现动画等于没有动画。 */
+  #boot-veil {
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 22px;
+    background: var(--bg, #08080a);
+    color: var(--text, #e9e9ee); user-select: none;
+    font: 400 14px/1.7 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    transition: opacity .4s ease-out, visibility .4s;
+  }
+  #boot-veil.gone { opacity: 0; visibility: hidden; pointer-events: none; }
+
+  /* 中间那颗「直播中」的红点 + 两圈错开的扩散波 */
+  .bv-pulse { position: relative; width: 78px; height: 78px; display: grid; place-items: center; }
+  .bv-dot {
+    width: 15px; height: 15px; border-radius: 50%;
+    background: var(--red, #ff3b4e);
+    box-shadow: 0 0 24px color-mix(in srgb, var(--red, #ff3b4e) 55%, transparent);
+    animation: bvBeat 1.5s ease-in-out infinite;
+  }
+  .bv-ring {
+    position: absolute; inset: 0; border-radius: 50%; opacity: 0;
+    border: 1.5px solid var(--red, #ff3b4e);
+    animation: bvRing 2.6s ease-out infinite;
+  }
+  .bv-ring + .bv-ring { animation-delay: 1.3s; }
+  @keyframes bvBeat { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.3); } }
+  @keyframes bvRing { 0% { transform: scale(.34); opacity: .5; } 100% { transform: scale(1.1); opacity: 0; } }
+
+  /* 声波柱：节奏错开，看起来像在收声而不是整体呼吸 */
+  .bv-bars { display: flex; align-items: flex-end; gap: 6px; height: 24px; }
+  .bv-bars i {
+    width: 4px; height: 100%; border-radius: 2px; opacity: .8;
+    background: var(--red, #ff3b4e);
+    transform-origin: 50% 100%;
+    animation: bvBar 1.05s ease-in-out infinite;
+  }
+  .bv-bars i:nth-child(2) { animation-duration: .85s;  animation-delay: -.3s; }
+  .bv-bars i:nth-child(3) { animation-duration: 1.25s; animation-delay: -.6s; }
+  .bv-bars i:nth-child(4) { animation-duration: .95s;  animation-delay: -.15s; }
+  .bv-bars i:nth-child(5) { animation-duration: 1.15s; animation-delay: -.45s; }
+  @keyframes bvBar { 0%, 100% { transform: scaleY(.26); } 50% { transform: scaleY(1); } }
+
+  .bv-text { font-size: 13px; letter-spacing: .18em; opacity: .8; }
+  .bv-brand { margin-top: -10px; font-size: 11px; letter-spacing: .34em; opacity: .36; }
+
+  /* 底部一道来回扫的细线：只表示「还在忙」，不表示具体百分比（首屏没有可信的进度） */
+  .bv-bar {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 2px; overflow: hidden;
+    background: color-mix(in srgb, var(--red, #ff3b4e) 16%, transparent);
+  }
+  .bv-bar::after {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 34%;
+    background: var(--red, #ff3b4e);
+    animation: bvSlide 1.6s ease-in-out infinite;
+  }
+  @keyframes bvSlide { 0% { transform: translateX(-120%); } 100% { transform: translateX(320%); } }
+
+  @media (prefers-reduced-motion: reduce) { #boot-veil * { animation: none !important; } }
+</style>
+</head>
+<body>
+<div id="boot-veil" aria-hidden="true">
+  <div class="bv-pulse">
+    <span class="bv-ring"></span><span class="bv-ring"></span>
+    <span class="bv-dot"></span>
+  </div>
+  <div class="bv-bars"><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="bv-text">正在接通频道</div>
+  <div class="bv-brand">24H RADIO</div>
+  <div class="bv-bar"></div>
+</div>
+
+<!-- 首屏选择页：参考 CRDRAKO PANEL 的「设备卡」布局 ——
+     已添加的主播各自一张卡（点头像进频道），末尾一张加号卡展开添加表单。
+     每次新开页面都先停在这里选人；选完写进本会话标记，刷新不再重复出现。
+     后端此时若是空态，节目类接口一律回空 —— 页面在这里停下等用户操作。 -->
+<div id="onboard" hidden>
+  <div class="ob-head">
+    <div class="ob-brand">24H RADIO</div>
+    <h1 class="ob-title">噼里啪啦</h1>
+    <p class="ob-sub" id="ob-sub">选择要进入的频道，或添加一位新主播。</p>
+  </div>
+
+  <div class="ob-grid" id="ob-grid"></div>
+
+  <div class="ob-card ob-card-form" id="ob-form" hidden>
+    <div class="ob-row">
+      <input id="ob-mid" type="text" inputmode="numeric" autocomplete="off" spellcheck="false"
+             placeholder="B 站 UID（必填）" aria-label="B 站 UID（必填）">
+      <button class="btn primary" id="ob-probe" type="button">检测</button>
+    </div>
+    <p class="ob-hint"><b>必须填 B 站 UID</b> —— 个人主页地址
+      <b>space.bilibili.com/1512246445</b> 里那串数字。<br>
+      不是直播间号，也不是昵称；直接粘贴直播间链接也可以，会自动换算成对应的 UID。</p>
+
+    <div class="ob-result" id="ob-result"></div>
+
+    <div class="ob-name-box" id="ob-name-box" hidden>
+      <label class="ob-label" for="ob-name">显示名</label>
+      <input id="ob-name" type="text" autocomplete="off" spellcheck="false"
+             placeholder="想显示成什么名字">
+      <p class="ob-note">默认是 B 站昵称，可以改成任何你习惯的叫法（只影响界面显示）。</p>
+    </div>
+
+    <div class="ob-color-box" id="ob-color-box" hidden>
+      <label class="ob-label">板块颜色</label>
+      <div class="st-palette" id="ob-palette"></div>
+      <p class="ob-note" id="ob-color-note">这些都是 TA 头像上真实存在的颜色，
+        标的是各自占的面积；点一下就能换成那个。已经帮你默认挑了一个占比够大的，
+        不换也行。</p>
+    </div>
+
+    <div class="ob-src" id="ob-src" hidden>
+      <label class="ob-label" for="ob-series">回放来源</label>
+      <select id="ob-series"></select>
+      <p class="ob-note" id="ob-src-note" hidden></p>
+    </div>
+
+    <button class="btn primary ob-go" id="ob-save" type="button" hidden>就听 TA 的 →</button>
+
+    <div class="ob-bulk" id="ob-bulk">
+      <button class="ob-bulk-open" id="ob-bulk-open" type="button">从关注列表批量添加 →</button>
+      <div class="ob-bulk-box" id="ob-bulk-box" hidden>
+        <div class="ob-bulk-bar">
+          <input class="ob-bulk-filter" id="ob-bulk-filter" type="search"
+                 placeholder="搜索昵称或 UID" autocomplete="off" aria-label="搜索关注">
+          <span class="ob-bulk-stat" id="ob-bulk-stat">正在读取关注列表…</span>
+          <button class="ob-bulk-link" id="ob-bulk-clear" type="button">清空选择</button>
+          <button class="btn small primary" id="ob-bulk-add" type="button" disabled>添加选中的 0 位</button>
+        </div>
+        <p class="ob-bulk-note">点卡片或按住拖动框选；已添加的不会再被选中。只列出有直播间的关注；
+          批量添加只写主播资料，回放来源可以之后在「设置 → 主播管理」里补。</p>
+        <div class="ob-bulk-grid" id="ob-bulk-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <p class="ob-foot">
+    <a href="#" id="ob-continue" hidden></a>
+    <span id="ob-foot-note">加更多人、改配色或删掉，随时去<b>设置 → 主播管理</b>。</span>
+  </p>
+</div>
+
+<div class="glow"></div>
+
+<header class="topbar">
+  <div class="tb-left">
+    <span class="tb-brand" id="tb-brand">噼里啪啦</span>
+    <span class="tb-sep">/</span>
+    <span class="tb-cur" id="tb-cur">噼里啪啦</span>
+  </div>
+  <nav class="tb-tabs">
+    <!-- 激活标签的那颗红色胶囊：不属于任何标签，而是在标签之间滑过去 -->
+    <i class="tb-pill" id="tb-pill" aria-hidden="true"></i>
+    <a class="tab" data-view="live" href="#/live">录播</a>
+    <a class="tab" data-view="broadcast" href="#/broadcast">直播间</a>
+    <a class="tab" data-view="schedule" href="#/schedule">24 小时频道</a>
+    <a class="tab" data-view="playlist" href="#/playlist">歌单</a>
+    <a class="tab" data-view="multi" href="#/multi">监控室</a>
+    <a class="tab" data-view="board" href="#/board">弹幕板</a>
+    <a class="tab" data-view="recorder" href="#/recorder">录播姬</a>
+    <a class="tab" data-view="dynamic" href="#/dynamic">动态</a>
+    <a class="tab" data-view="weibo" href="#/weibo">微博</a>
+    <a class="tab" data-view="dd" href="#/dd">DD</a>
+    <a class="tab" data-view="about" href="#/about">关于</a>
+    <a class="tab" data-view="settings" href="#/settings">设置</a>
+  </nav>
+  <div class="tb-right">
+    <!-- B 站风控限流提示：平时隐藏，撞上 412 后由 /api/ping 的 ban_left 驱动显示 -->
+    <div class="ban-alert" id="ban-alert" data-state="wait" role="status" aria-live="polite">
+      <span class="ban-dot" aria-hidden="true"></span>
+      <span class="ban-txt" id="ban-txt">检测限流状态…</span>
+    </div>
+    <!-- 四色灯：点亮谁就看谁，可以同时点亮多人（混合播放几人的内容）。
+         主站默认点亮，不允许全部熄灭。 -->
+    <div class="lamp-dock" id="lamp-dock">
+      <div class="station-lamps" id="station-lamps" role="group"
+           title="点亮谁就看谁的内容，可同时点亮多位（混合播放）"></div>
+    </div>
+    <!-- B 站账号：未登录显示入口，已登录显示头像 + 名字（点开是账号状态窗口）。
+         播放器内那枚「登录」在录播姬/DD 这类把播放器缩到 1px 的板块点不到，所以这里必须有。 -->
+    <button class="ghost-btn tb-login" id="tb-login" type="button" title="登录 B 站">
+      <span class="tb-login-face" id="tb-login-face" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="5.5" width="18" height="13" rx="3"/>
+          <path d="M7.5 3l2.6 2.5M16.5 3l-2.6 2.5M8.6 10.6v1.6M15.4 10.6v1.6"/>
+        </svg>
+      </span>
+      <span class="tb-login-txt" id="tb-login-name">登录</span>
+    </button>
+    <a class="ghost-btn" id="tb-space" href="#" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16v12H4z"/><path d="M8 3l4 3 4-3"/></svg>
+      <span class="gbtxt" id="gbtxt">主播B站空间</span>
+    </a>
+    <button class="ghost-btn" id="theme-toggle" type="button"
+            title="切换深色 / 浅色" aria-label="切换深色 / 浅色">
+      <svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+      <svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.4v2M12 19.6v2M2.4 12h2M19.6 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg>
+    </button>
+    <label class="ghost-btn lang-wrap">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>
+      <select id="lang" title="界面语言">
+        <option value="zh-Hans">简体中文</option>
+        <option value="zh-Hant">繁體中文</option>
+      </select>
+    </label>
+    <!-- 窄屏折叠菜单：把「B 站空间 / 语言 / 深浅色」收进来，保证核心操作（切页、
+         主播灯、登录）在 700px 级别的窗口里仍然完整可点。宽屏时按钮隐藏。 -->
+    <button class="ghost-btn tb-more" id="tb-more" type="button"
+            aria-haspopup="menu" aria-expanded="false" title="更多">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <circle cx="5.5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/>
+        <circle cx="18.5" cy="12" r="1.6"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<!-- 窄屏折叠菜单：放在 header 外面 + 固定定位。放在 .tb-right 里时，两行布局下
+     标签条（flex order:3）会按绘制顺序把它盖住，elementFromPoint 命中的是标签，
+     菜单点不动（实测）。固定定位只跟着按钮的坐标走，不受任何 flex 排布影响。 -->
+<!-- 顶栏主播选择面板（固定定位，挂在 header 外）：三种形态共用这一个容器。
+     放在顶栏里会被标签条按绘制顺序盖住（同「更多」菜单）。 -->
+<div class="lamp-panel" id="lamp-panel" hidden></div>
+
+<!-- 直播间表情面板：固定定位、贴着输入框弹出，不占卡片宽度 -->
+<div class="emoji-panel" id="emoji-panel" role="dialog" aria-label="表情" hidden></div>
+
+<div class="tb-menu" id="tb-menu" role="menu" aria-label="更多操作" hidden>
+  <button class="tb-menu-i" type="button" role="menuitem" data-act="space">打开主播 B 站空间</button>
+  <button class="tb-menu-i" type="button" role="menuitem" data-act="lang">界面语言：简体中文</button>
+  <button class="tb-menu-i" type="button" role="menuitem" data-act="theme">切换深色 / 浅色</button>
+</div>
+
+  <!-- 全局登录弹窗（v1.9.16）。原来它只在播放器里（绝对定位、覆盖播放器），
+       录播姬 / DD 这类把播放器缩到 1px 的板块根本点不到 —— 改成 fixed 遮罩 + 居中卡片，
+       顶栏、设置页、播放器三处入口共用同一个弹窗与同一套扫码逻辑。 -->
+  <div class="login-panel" id="login-panel" hidden>
+    <div class="login-box" role="dialog" aria-modal="true" aria-label="B 站账号">
+      <div class="lp-head">
+        <b id="lp-title">登录 B 站</b>
+        <button class="lp-x" id="btn-login-close" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div class="lp-anon" id="lp-anon">
+        <div class="login-qr" id="login-qr"></div>
+        <div class="login-status" id="login-status">正在获取二维码…</div>
+        <p class="lp-note">用 B 站手机 App 扫码，全程在本页完成，不会跳转</p>
+      </div>
+      <div class="lp-me" id="lp-me" hidden>
+        <div class="lp-face" id="lp-face"></div>
+        <div class="lp-me-id">
+          <b id="lp-name">—</b>
+          <span id="lp-uid">UID —</span>
+          <em id="lp-vip" hidden>大会员</em>
+        </div>
+        <div class="lp-btns">
+          <button class="btn small ghost" id="btn-logout" type="button">退出登录</button>
+          <button class="btn small ghost" id="btn-login-close-2" type="button">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<main class="wrap">
+  <aside class="strip strip-left" id="strip-left">
+    <div class="strip-h">本场分段<span id="strip-left-sub"></span>
+      <!-- 收起按钮属于这一栏：原来是顶栏里的一枚，v1.9.12 移到标题行右侧。
+           收起后本栏 display:none，按钮随之消失，改由 #handle-side-l 负责展开。 -->
+      <button class="strip-fold" id="btn-side-l" type="button"
+              title="收起左侧边栏" aria-label="收起左侧边栏">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9.5 3.5L5 8l4.5 4.5"/>
+        </svg>
+      </button>
+    </div>
+    <div class="strip-note" id="strip-left-note">第 N 次 = 画面「已唱」第 N 次登记 · 约 N 首 = 按段长估算</div>
+    <div class="strip-body" id="strip-left-body"></div>
+  </aside>
+
+  <div class="views">
+
+    <section class="view active" id="view-live">
+      <h1 class="title" id="live-title">噼里啪啦</h1>
+
+      <div class="actions">
+        <button class="btn primary" data-action="unmute">进入直播</button>
+        <button class="btn ghost" id="btn-random">随机一场</button>
+        <button class="btn ghost" data-action="resync">回到直播</button>
+        <button class="btn ghost" id="btn-clip" type="button"
+                title="在分段列表里多选，保存为 mp4">保存片段</button>
+        <!-- 频道时间轴的铺排顺序（三选一）。⚠️ 与列表头那个「排序」不是一回事：
+             那个只管列表怎么排，这个决定频道按什么顺序往下放。
+             顺序=最早→最新，倒叙=最新→最早，随机=稳定洗牌（刷新不会重排）。 -->
+        <span class="order-pick" role="group" aria-label="播放顺序">
+          <span class="order-label">播放顺序</span>
+          <button class="btn small ghost" type="button" data-order="seq" aria-pressed="false">顺序播放</button>
+          <button class="btn small ghost" type="button" data-order="rev" aria-pressed="false">倒叙播放</button>
+          <button class="btn small ghost" type="button" data-order="shuffle" aria-pressed="true">随机播放</button>
+          <button class="btn small ghost" type="button" data-order="sing" aria-pressed="false"
+                  title="只播放已标记为唱歌的分段，聊天与空白自动跳过；按发布时间顺序">仅播放唱歌</button>
+        </span>
+      </div>
+
+      <!-- 分段数据状态 + 手动更新入口。放在列表上方而不是页脚：
+           分段覆盖率与「上次更新」是判断数据新不新的依据，得一眼看到。 -->
+      <div class="data-bar">
+        <div class="data-row">
+          <div class="data-info">
+            <div class="data-main" id="seg-cov">分段数据载入中…</div>
+            <div class="data-sub" id="seg-when"></div>
+          </div>
+          <button class="btn primary data-btn" id="btn-seg-refresh" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M21 4v5.5h-5.5"/></svg>
+            <span id="seg-btn-text">更新数据</span>
+          </button>
+        </div>
+        <!-- 识别进度：只在真的在跑的时候出现，数据全部来自分析循环的实时上报 -->
+        <div class="data-progress" id="seg-prog" hidden>
+          <div class="dp-track"><div class="dp-fill" id="seg-prog-fill"></div></div>
+          <div class="dp-text" id="seg-prog-text"></div>
+        </div>
+      </div>
+
+      <div class="filters">
+        <div class="chips" id="chips"></div>
+        <label class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input id="q" placeholder="搜索标题 / 日期">
+        </label>
+      </div>
+
+      <div class="net-alert" id="net-alert" hidden></div>
+      <div class="net-alert" id="station-empty" hidden></div>
+      <div class="mixed-note" id="mixed-note" hidden></div>
+
+      <div class="list-head">
+        <div>
+          <span class="stat" id="stat">—</span>
+          <span class="sorts">
+            <!-- 排序收成**一个按钮**（原生 select 撑起来的），点开就能看到全部方式：
+                倒序 / 顺序 / 高能。以前是三个平铺的小字，容易被当成标签而不是可点的。 -->
+            <label class="sort-pick" title="排序方式">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M7 4v15"/><path d="M4 16l3 3 3-3"/>
+                <path d="M17 20V5"/><path d="M14 8l3-3 3 3"/>
+              </svg>
+              <select id="sort-mode" aria-label="排序方式">
+                <option value="date">最新（倒序）</option>
+                <option value="date-asc">最早（顺序）</option>
+                <option value="score">高能</option>
+              </select>
+            </label>
+          </span>
+        </div>
+        <div class="pager">
+          <button id="prev" aria-label="上一页">‹</button>
+          <span id="page-info">1 / 1</span>
+          <button id="next" aria-label="下一页">›</button>
+        </div>
+      </div>
+
+      <table class="list">
+        <thead>
+          <tr>
+            <th class="col-title">节目</th>
+            <th class="col-cat">类型</th>
+            <th class="col-dur">时长</th>
+            <th class="col-dm">弹幕</th>
+            <th class="col-act">播放</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="5" class="empty">正在载入录播…</td></tr>
+        </tbody>
+      </table>
+
+      <div class="stat" id="meta-line" style="margin-top:18px"></div>
+    </section>
+
+    <section class="view" id="view-multi">
+      <div class="multi-bar">
+        <div class="multi-src" id="multi-src">
+          <button class="btn small ghost on" data-msrc="stations" type="button">我的板块</button>
+          <button class="btn small ghost" data-msrc="following" type="button">关注的直播</button>
+          <button class="btn small ghost" data-msrc="recommend" type="button">推荐主播</button>
+          <button class="btn small ghost" data-msrc="guild" type="button">工会主播</button>
+        </div>
+        <button class="btn small ghost" id="multi-chat-toggle" type="button"
+                title="把左侧列表换成当前这一路的实时弹幕">聚焦弹幕</button>
+        <!-- 同步直播：选两路，比对画面指纹算出时差，把慢的一路加速追上 -->
+        <span class="msync-wrap">
+          <button class="btn small ghost" id="multi-sync" type="button"
+                  aria-expanded="false" title="把两路直播对齐到同一时刻">同步直播</button>
+          <div class="msync-pop" id="multi-sync-pop" hidden>
+            <div class="msync-h"><b>同步直播</b><span id="msync-state">选两路，自动算时差</span></div>
+            <label class="msync-row"><span>基准</span><select id="msync-a"></select></label>
+            <label class="msync-row"><span>跟随</span><select id="msync-b"></select></label>
+            <div class="msync-bar"><i id="msync-bar"></i></div>
+            <p class="msync-note" id="msync-note">对两路画面采样比对，估算差了几秒，再把慢的一路临时加速追上去。</p>
+            <div class="msync-btns">
+              <button class="btn small primary" id="msync-run" type="button">开始对齐</button>
+              <button class="btn small ghost" id="msync-stop" type="button" hidden>停止</button>
+              <button class="btn small ghost" id="msync-earlier" type="button"
+                      title="让「跟随」这一路提前 0.5 秒">跟随提前</button>
+              <button class="btn small ghost" id="msync-later" type="button"
+                      title="让「跟随」这一路延后 0.5 秒">跟随延后</button>
+            </div>
+          </div>
+        </span>
+        <!-- 收起左侧主播列表：收起后画面墙吃满整行，能多排几路。
+             只有「关注的直播」有左栏，切到「我的板块」时这个按钮会隐藏。 -->
+        <button class="btn small ghost" id="multi-side-toggle" type="button" hidden>‹ 收起列表</button>
+        <button class="btn small ghost" id="multi-add" type="button">＋ 添加直播间</button>
+        <button class="btn small ghost" id="multi-refresh" type="button">刷新开播状态</button>
+        <!-- 最小化后的恢复入口：藏在工具条里，只有真隐藏了才出现（不占常驻空间） -->
+        <span class="mh-wrap">
+          <button class="btn small ghost" id="multi-hidden-btn" type="button" hidden
+                  aria-expanded="false" title="点开可逐个恢复">已隐藏 0 路</button>
+          <div class="mh-pop" id="multi-hidden-pop" hidden></div>
+        </span>
+        <div class="multi-layout" id="multi-layout">
+          <button class="on" data-ml="auto" type="button" title="按路数自动排，铺满窗口">自适应</button>
+          <button data-ml="g1" type="button" title="单画面">1</button>
+          <button data-ml="g2" type="button" title="两分">2</button>
+          <button data-ml="g4" type="button" title="四分">4</button>
+          <button data-ml="g6" type="button" title="六分">6</button>
+          <button data-ml="g9" type="button" title="九分">9</button>
+          <button data-ml="free" type="button" title="卡片可自由拖动、拖右下角缩放">自由</button>
+        </div>
+        <label class="multi-qn">画质
+          <select id="multi-qn">
+            <option value="min" selected>省流量（最低档）</option>
+            <option value="80">720P</option>
+            <option value="250">超清</option>
+            <option value="10000">原画</option>
+          </select>
+        </label>
+        <span class="multi-note" id="multi-note"></span>
+      </div>
+      <div class="multi-body">
+        <aside class="multi-side" id="multi-side" hidden></aside>
+        <aside class="multi-chat" id="multi-chat" hidden>
+          <div class="mchat-h">
+            <b id="mchat-title">弹幕</b>
+            <span class="mchat-state" id="mchat-state">未连接</span>
+            <button class="mchat-x" id="mchat-close" type="button" title="返回主播列表">×</button>
+          </div>
+          <div class="mchat-list" id="mchat-list"></div>
+          <!-- 发送区与直播间「发弹幕」卡片同一份结构与交互（data-cs-* 由 app.js 绑定） -->
+          <div class="mchat-send" id="mchat-sender">
+            <div class="live-send">
+              <button class="live-emoji-btn" data-cs-emoji type="button"
+                      aria-label="表情" aria-haspopup="dialog" aria-expanded="false"
+                      title="表情">☺</button>
+              <input data-cs-input maxlength="30" placeholder="发条弹幕，30 字内"
+                     title="最多 30 字">
+              <button class="btn small primary" data-cs-send type="button">发送</button>
+              <button class="btn small ghost" data-cs-save type="button"
+                      title="把输入框里的内容存为常用">＋</button>
+            </div>
+            <div class="quick-row" data-cs-quick hidden>
+              <span class="quick-label" data-cs-qlabel>常用</span>
+              <div class="quick-chips" data-cs-chips></div>
+              <button class="quick-edit" data-cs-qedit type="button" hidden>编辑</button>
+            </div>
+            <div class="live-result" data-cs-result></div>
+          </div>
+          <p class="mchat-note" id="mchat-note"></p>
+        </aside>
+        <div class="multi-grid" id="multi-grid"></div>
+        <div class="multi-empty" id="multi-empty" hidden>
+          <b>所有直播间都已最小化</b>
+          <span>点上方「已隐藏 N 路」可以逐个恢复；刷新页面也会全部恢复。</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-board">
+      <div class="bd-top">
+        <div class="bd-room">
+          <button class="bd-room-btn" id="bd-room-btn" type="button" aria-expanded="false">
+            <b id="bd-room-name">未选择直播间</b>
+            <span id="bd-room-meta">点这里选一个直播间</span>
+          </button>
+          <div class="bd-room-pop" id="bd-room-pop" hidden></div>
+        </div>
+        <div class="bd-chips">
+          <span class="bd-chip"><em>在线</em><b id="bd-online">—</b></span>
+          <span class="bd-chip"><em>看过</em><b id="bd-watched">—</b></span>
+          <span class="bd-chip"><em>弹幕</em><b id="bd-dm-n">—</b></span>
+          <span class="bd-chip"><em>SC</em><b id="bd-sc-n">—</b></span>
+          <span class="bd-chip"><em>礼物</em><b id="bd-gift-n">—</b></span>
+        </div>
+        <span class="bd-state" id="board-state">选一个直播间开始</span>
+        <a class="btn small ghost" id="bd-open" target="_blank" rel="noopener" hidden>原直播间 ↗</a>
+      </div>
+
+      <div class="bd-grid" id="bd-grid">
+        <!-- 1. 弹幕 -->
+        <section class="bd-panel bd-dm">
+          <header class="bd-h">
+            <b>弹幕</b><span class="bd-count" id="bd-dm-count">0</span>
+            <select class="bd-sel" id="bd-dm-filter" title="筛选">
+              <option value="all">全部</option>
+              <option value="guard">仅舰长</option>
+              <option value="medal">仅带牌子</option>
+            </select>
+          </header>
+          <div class="bd-list" id="bd-dm-list"></div>
+          <div class="bd-send" id="bd-sender">
+            <div class="live-send">
+              <button class="live-emoji-btn" data-cs-emoji type="button"
+                      aria-label="表情" aria-haspopup="dialog" aria-expanded="false"
+                      title="表情">☺</button>
+              <input data-cs-input maxlength="30" placeholder="发条弹幕，30 字内" title="最多 30 字">
+              <button class="btn small primary" data-cs-send type="button">发送</button>
+              <button class="btn small ghost" data-cs-save type="button"
+                      title="把输入框里的内容存为常用">＋</button>
+            </div>
+            <div class="quick-row" data-cs-quick hidden>
+              <span class="quick-label" data-cs-qlabel>常用</span>
+              <div class="quick-chips" data-cs-chips></div>
+              <button class="quick-edit" data-cs-qedit type="button" hidden>编辑</button>
+            </div>
+            <div class="live-result" data-cs-result></div>
+          </div>
+        </section>
+
+        <!-- 2. SC -->
+        <section class="bd-panel bd-sc">
+          <header class="bd-h">
+            <b>SC</b><span class="bd-count" id="bd-sc-count">0 条</span>
+            <div class="bd-tabs" id="bd-sc-tabs">
+              <button data-t="all" class="on" type="button">全部</button>
+              <button data-t="unread" type="button">未读</button>
+            </div>
+            <button class="bd-act" id="bd-sc-read" type="button" title="把当前所有 SC 标为已读">全部已读</button>
+          </header>
+          <div class="bd-list" id="bd-sc-list"></div>
+        </section>
+
+        <!-- 3. 点歌 -->
+        <section class="bd-panel bd-song">
+          <header class="bd-h">
+            <b>点歌</b><span class="bd-count" id="bd-song-count">0 首待播</span>
+            <div class="bd-tabs" id="bd-song-tabs">
+              <button data-t="wait" class="on" type="button">待播</button>
+              <button data-t="done" type="button">已播</button>
+            </div>
+            <button class="bd-act" id="bd-song-clear" type="button" title="清空待播队列">清空</button>
+            <button class="bd-act" id="bd-song-next" type="button" title="当前这首播完，换下一首">下一首</button>
+          </header>
+          <div class="bd-list" id="bd-song-list"></div>
+        </section>
+
+        <!-- 4. 礼物 -->
+        <section class="bd-panel bd-gift">
+          <header class="bd-h">
+            <b>礼物</b><span class="bd-count" id="bd-gift-total">¥0</span>
+            <div class="bd-tabs" id="bd-gift-tabs">
+              <button data-t="all" class="on" type="button">全部</button>
+              <button data-t="guard" type="button">上舰</button>
+              <button data-t="gift" type="button">送礼</button>
+            </div>
+          </header>
+          <div class="bd-list" id="bd-gift-list"></div>
+        </section>
+
+        <!-- 5. 观众 -->
+        <section class="bd-panel bd-vw">
+          <header class="bd-h">
+            <b>观众</b><span class="bd-count" id="bd-vw-count">—</span>
+            <div class="bd-tabs" id="bd-vw-tabs">
+              <button data-t="online" class="on" type="button">在线</button>
+              <button data-t="enter" type="button">来过</button>
+              <button data-t="guard" type="button">舰长</button>
+            </div>
+          </header>
+          <div class="bd-list" id="bd-vw-list"></div>
+        </section>
+      </div>
+    </section>
+
+    <section class="view" id="view-broadcast">
+      <div class="live-card live-status-card">
+        <div class="live-card-h">直播状态
+          <!-- 在新标签页打开 B 站原直播间。用 <a target=_blank> 而不是 window.open：
+               不会被弹窗拦截，中键/右键「在新标签页打开」也照常可用。room 由
+               /api/live/playinfo 返回（room_id），拿到之前先藏着。 -->
+          <a class="btn small ghost live-wheel-btn" id="live-open" href="#"
+             target="_blank" rel="noopener noreferrer" hidden>原直播间 ↗</a>
+        </div>
+        <div class="live-info" id="live-info">正在获取开播状态…</div>
+      </div>
+
+      <div class="live-card live-chat-card">
+        <div class="live-card-h">实时弹幕<span class="live-wheel-note" id="live-chat-state"></span>
+          <button class="btn small ghost live-chat-btn" id="live-chat-toggle" type="button"
+                  aria-pressed="true" title="开启 / 关闭实时弹幕（关掉后不再占用一条长连接）">关闭弹幕</button>
+        </div>
+        <div class="live-chat" id="live-chat">
+          <div class="chat-line chat-sys">连接弹幕服务器…</div>
+        </div>
+      </div>
+
+      <div class="live-card" id="live-send-card">
+        <div class="live-card-h">发弹幕
+          <button class="btn small ghost live-wheel-btn" id="wheel-toggle" type="button">独轮车</button>
+        </div>
+        <p class="live-note" id="live-cred-state">正在检查登录状态…</p>
+        <div class="live-cred" id="live-cred-box" hidden>
+          <!-- 占位文字在 321px 的卡里放不下（实测需要 209px、可用 202px，末尾被切掉）。
+               缩短到放得下，完整说明挪到 title；上面那行 note 已经讲过扫码会自动带上。 -->
+          <input id="live-jct" type="password" autocomplete="off"
+                 placeholder="粘贴 bili_jct"
+                 title="扫码登录会自动带上；也可以手动粘贴 Cookie 里的 bili_jct">
+          <button class="btn small primary" id="live-jct-save">保存</button>
+        </div>
+        <!-- 发送区：与监控室的弹幕面板共用同一份结构 / 交互（data-cs-* 由 app.js 绑定） -->
+        <div class="live-send">
+          <button class="live-emoji-btn" id="live-emoji" data-cs-emoji type="button"
+                  aria-label="表情" aria-haspopup="dialog" aria-expanded="false"
+                  title="表情">☺</button>
+          <input id="live-msg" data-cs-input maxlength="30" placeholder="发条弹幕，30 字内"
+                 title="最多 30 字">
+          <button class="btn small primary" id="live-send" data-cs-send type="button">发送</button>
+          <button class="btn small ghost" id="live-msg-save" data-cs-save type="button"
+                  title="把输入框里的内容存为常用">＋</button>
+        </div>
+        <!-- 常用弹幕：点一下直接发出去，不用再打字。编辑模式下点标签即删除。 -->
+        <div class="quick-row" id="quick-row" data-cs-quick hidden>
+          <span class="quick-label" id="quick-label" data-cs-qlabel>常用</span>
+          <div class="quick-chips" id="quick-chips" data-cs-chips></div>
+          <button class="quick-edit" id="quick-edit" data-cs-qedit type="button" hidden>编辑</button>
+        </div>
+        <div class="live-result" id="live-result" data-cs-result></div>
+      </div>
+
+      <div class="live-wheel-pop" id="wheel-pop" hidden>
+        <div class="live-card">
+          <div class="live-card-h">独轮车
+            <button class="btn small ghost live-wheel-btn" id="wheel-close" type="button">收起</button>
+          </div>
+          <p class="live-note">循环发送同一条弹幕。刷屏有被 B 站限流或封禁弹幕权限的风险，
+            请节制；连续 3 次发送失败会自动停止。</p>
+          <p class="live-note wheel-motto" id="wheel-motto"></p>
+          <div class="live-send">
+            <input id="wheel-msg" maxlength="30" placeholder="要循环发送的弹幕">
+          </div>
+          <div class="live-wheel-opts">
+            <label>间隔 <input id="wheel-interval" type="number" min="1" max="60" step="0.5" value="3"> 秒</label>
+            <label>条数 <input id="wheel-count" type="number" min="1" max="200" value="20"> 条</label>
+          </div>
+          <div class="qp-btns">
+            <button class="btn small primary" id="wheel-start">开始</button>
+            <button class="btn small ghost" id="wheel-stop" hidden>停止</button>
+          </div>
+          <div class="live-result" id="wheel-state"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-schedule">
+      <h1 class="title sm">接下来播什么</h1>
+
+      <div class="actions">
+        <!-- 时间范围：互斥单选，用 radio 驱动滑动指示器（参考 smooth-option-switcher 的做法）。
+             ⚠️ radio 必须在 label **之前** —— 样式靠 `:checked ~ label` 兄弟选择器选中文字颜色。 -->
+        <div class="seg-switch" id="horizon-switch" role="radiogroup" aria-label="24 小时频道时间范围">
+          <input type="radio" name="horizon" id="hz-24" data-horizon="86400" value="86400" checked>
+          <input type="radio" name="horizon" id="hz-72" data-horizon="259200" value="259200">
+          <input type="radio" name="horizon" id="hz-all" data-horizon="0" value="0">
+          <i class="seg-slider" aria-hidden="true"></i>
+          <label for="hz-24">24 小时</label>
+          <label for="hz-72">72 小时</label>
+          <label for="hz-all">整个循环</label>
+        </div>
+      </div>
+
+      <div class="list-head"><span class="stat" id="sch-stat">—</span></div>
+
+      <table class="list">
+        <thead>
+          <tr>
+            <th class="col-time">开始</th>
+            <th class="col-title">节目</th>
+            <th class="col-cat">类型</th>
+            <th class="col-dur">时长</th>
+            <th class="col-act">播放</th>
+          </tr>
+        </thead>
+        <tbody id="sch-rows"></tbody>
+      </table>
+    </section>
+
+    <section class="view" id="view-dynamic">
+      <h1 class="title sm" id="dyn-title">动态</h1>
+      <p class="sub" id="dyn-sub">这里显示当前板块主播在 B 站发布的最新动态。</p>
+
+      <div class="wb-note" id="dyn-note" hidden></div>
+
+      <div class="wb-list" id="dyn-list"></div>
+
+      <div class="wb-foot" id="dyn-foot" hidden></div>
+    </section>
+
+    <section class="view" id="view-weibo">
+      <h1 class="title sm" id="wb-title">微博</h1>
+      <p class="sub" id="wb-sub">这里显示当前板块主播的微博。</p>
+
+      <div class="wb-note" id="wb-note" hidden></div>
+
+      <div class="wb-profile" id="wb-profile" hidden></div>
+
+      <div class="wb-list" id="wb-list"></div>
+
+      <details class="wb-paste" id="wb-paste">
+        <summary>也可以手动粘贴微博 Cookie</summary>
+        <p class="wb-tip">
+          在浏览器里登录微博后，按 F12 → Network → 随便点一个请求 → 找到
+           <b>粘一次就会保存在本机，之后不用再输</b>；只有它失效（登出、改密、换号）时才需要重新粘。<b>Cookie</b> 那一行，整行复制粘贴到这里即可。Cookie 只存在你本机。
+        </p>
+        <textarea id="wb-cookie" rows="3" placeholder="SUB=…; SUBP=…; SSOLoginState=…"></textarea>
+        <div class="qp-btns">
+          <button class="btn small primary" id="wb-cookie-save" type="button">保存并使用</button>
+          <button class="btn small ghost" id="wb-cookie-clear" type="button">清除</button>
+        </div>
+        <div class="live-result" id="wb-cookie-state"></div>
+      </details>
+
+      <div class="wb-foot" id="wb-foot" hidden></div>
+    </section>
+
+    <section class="view" id="view-dd">
+      <h1 class="title sm" id="dd-title">DD</h1>
+      <p class="sub" id="dd-sub">你自己在 vtb.cat 上的看播档案：常去的主播榜、粉丝 / 互动 / 打赏 / 上舰，以及每一条互动记录。数据读的是<b>你登录的账号</b>，不是当前板块那位主播。</p>
+
+      <div class="dd-subtabs" id="dd-subtabs">
+        <button class="dd-sub on" type="button" data-sub="feed">看播档案</button>
+        <button class="dd-sub" type="button" data-sub="cal">直播数据</button>
+      </div>
+
+      <!-- 未登录 / 取不到档案时的唯一出口。
+           以前同一个原因被写进三处（左栏、筛选条右侧、互动流空态），
+           整页仍是满屏的空壳卡片（"—"、"暂无"），既没告诉你怎么解决也不像成品。 -->
+      <div class="dd-gate" id="dd-gate" hidden>
+        <div class="dd-gate-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3.5" y="5" width="17" height="14" rx="3"/>
+            <circle cx="9" cy="10" r="1.6"/>
+            <path d="M4 17c1.6-2 3.4-2.9 5-2.9s3.4.9 5 2.9"/>
+            <path d="M15.5 9.5h3.5M15.5 13h2.5"/>
+          </svg>
+        </div>
+        <b id="dd-gate-title">还没登录 B 站</b>
+        <p id="dd-gate-text">DD 看播档案读的是<b>你自己账号</b>在 vtb.cat 上的记录，没登录就取不到。</p>
+        <button class="btn primary" id="dd-gate-go" type="button">去设置里登录</button>
+      </div>
+
+      <div class="dd-panel" id="ddp-feed">
+      <div class="ddp-grid">
+        <!-- 左：两张互不相干的主播榜 —— 消费按金额、弹幕按纯弹幕条数，口径不再混排 -->
+        <aside class="ddp-side">
+          <div class="ddp-side-h">
+            <b id="ddp-board-n">— 位主播</b>
+            <span class="ddp-side-ctrl">
+              <button class="ddp-mini on" id="ddp-side-desc" type="button" title="降序 / 升序">直降</button>
+            </span>
+          </div>
+          <div class="ddp-board-wrap">
+            <section class="ddp-board-sec">
+              <h3 class="ddp-board-h"><span>消费榜</span><em>礼物 · SuperChat 金额（¥）</em>
+                <b class="ddp-board-n" id="ddp-money-n"></b></h3>
+              <div class="ddp-board" id="ddp-board-money"><p class="dl-empty">载入中…</p></div>
+            </section>
+            <section class="ddp-board-sec">
+              <h3 class="ddp-board-h"><span>弹幕榜</span><em>纯弹幕条数（不含礼物 / SC / 上舰）</em>
+                <b class="ddp-board-n" id="ddp-msg-n"></b></h3>
+              <div class="ddp-board" id="ddp-board-msg"><p class="dl-empty">载入中…</p></div>
+            </section>
+          </div>
+        </aside>
+
+        <!-- 右：主播卡 + 统计带 + 可视化 + 筛选 + 互动流 -->
+        <section class="ddp-main">
+          <div class="ddp-hero">
+            <img class="ddp-face" id="ddp-face" alt="">
+            <div class="ddp-hero-txt">
+              <b id="ddp-name">—</b>
+              <span class="sub" id="ddp-uid"></span>
+            </div>
+            <div class="ddp-times">
+              <span>首次记录 <b id="ddp-first">—</b></span>
+              <span>最近出没 <b id="ddp-last">—</b></span>
+            </div>
+          </div>
+
+          <div class="ddp-stats">
+            <div class="ddp-stat s-msg" title="最近若干页样本里的纯弹幕条数，不含礼物 / SC / 上舰">
+              <span>弹幕<em>样本内</em></span><b id="ddp-danmu">—</b></div>
+            <div class="ddp-stat s-act" title="账号的全部互动记录条数（弹幕 + 礼物 + SC + 上舰），含未取回的更早记录">
+              <span>互动<em>全部记录</em></span><b id="ddp-actions">—</b></div>
+            <div class="ddp-stat s-spend" title="礼物与 SuperChat 的金额合计（¥），不含上舰">
+              <span>消费<em>¥ 礼物+SC</em></span><b id="ddp-spend">—</b></div>
+            <div class="ddp-stat s-medal" title="在这个主播那里的粉丝牌种类数，不是互动次数">
+              <span>勋章<em>种类</em></span><b id="ddp-medals">—</b></div>
+          </div>
+          <p class="ddp-subline"><span>粉丝 <b id="ddp-follower">—</b></span>
+            <span>上舰 <b id="ddp-guards">—</b></span>
+            <span>常去 <b id="ddp-livers">—</b></span></p>
+
+          <!-- 可视化：互动构成（环形）+ 出没时段（24 根柱） -->
+          <div class="ddp-viz">
+            <div class="ddp-viz-card ddp-ring-card">
+              <div class="ddp-viz-h"><b>互动构成</b><span class="sub" id="ddp-ring-sub"></span></div>
+              <div class="ddp-ring-body">
+                <div class="ddp-ring" id="ddp-ring"></div>
+                <div class="ddp-legend" id="ddp-legend"></div>
+              </div>
+            </div>
+            <div class="ddp-viz-card">
+              <div class="ddp-viz-h"><b>出没时段</b><span class="sub" id="ddp-hours-sub"></span></div>
+              <div class="ddp-hours" id="ddp-hours"></div>
+            </div>
+          </div>
+
+          <div class="ddp-bar">
+            <select id="ddp-kind" title="筛选类型">
+              <option value="">筛选：全部</option>
+              <option value="msg">弹幕</option>
+              <option value="gift">礼物</option>
+              <option value="guard">大航海</option>
+              <option value="sc">SuperChat</option>
+            </select>
+            <select id="ddp-order" title="排序">
+              <option value="time_desc">时间倒序</option>
+              <option value="time_asc">时间正序</option>
+            </select>
+            <input id="ddp-kw" type="text" placeholder="搜内容" style="min-width:130px">
+            <button class="btn small" id="ddp-go" type="button">查询</button>
+            <label class="ddp-view"><input type="radio" name="ddpv" value="list" checked><span>列表视图</span></label>
+            <label class="ddp-view"><input type="radio" name="ddpv" value="card"><span>卡片视图</span></label>
+            <button class="btn small ghost" id="ddp-cloud-btn" type="button"
+                    title="取最近的弹幕统计高频词">词云</button>
+            <button class="btn small ghost" id="ddp-more" type="button" hidden>下一页</button>
+            <span class="sub" id="ddp-stat" style="margin:0 0 0 auto"></span>
+          </div>
+
+          <div class="ddp-cloud" id="ddp-cloud" hidden></div>
+
+          <div class="ddp-feed-list" id="ddp-feed-list"><p class="dl-empty">点「查询」</p></div>
+          <div class="ddp-cards" id="ddp-cards" hidden></div>
+        </section>
+      </div><!-- /ddp-grid -->
+      </div><!-- /ddp-feed -->
+
+      <div class="dd-panel" id="ddp-cal" hidden>
+      <div class="dl-cards">
+        <div class="dl-card">
+          <div class="dl-h">
+            <b>直播日历</b>
+            <span class="sub" id="dl-cal-stat"></span>
+            <span class="dl-nav">
+              <button class="btn small ghost" id="dl-prev" type="button">‹</button>
+              <span id="dl-month">—</span>
+              <button class="btn small ghost" id="dl-next" type="button">›</button>
+            </span>
+          </div>
+          <div class="dl-cal" id="dl-cal"></div>
+          <div class="dl-day" id="dl-day"><p class="dl-empty">点日历上的日期看当天场次</p></div>
+        </div>
+
+        <div class="dl-card">
+          <div class="dl-h">
+            <b>主播粉丝趋势</b>
+            <span class="sub" id="dl-fans-stat"></span>
+          </div>
+          <div class="dl-chart" id="dl-chart"></div>
+          <p class="dl-empty" id="dl-fans-empty" hidden>这个主播还没有历史数据：从今天开始每天记一次，攒几天就能看到曲线。</p>
+        </div>
+      </div>
+    
+      </div>
+
+    </section>
+
+    
+    
+    <section class="view" id="view-playlist">
+      <h1 class="title sm">导入的歌单</h1>
+
+      <div class="actions">
+        <label class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 13.4a3.6 3.6 0 005.1 0l2.6-2.6a3.6 3.6 0 00-5.1-5.1l-1 1"/><path d="M13.4 10.6a3.6 3.6 0 00-5.1 0l-2.6 2.6a3.6 3.6 0 005.1 5.1l1-1"/></svg>
+          <input id="pl-url" placeholder="粘贴 B 站视频 / 合集链接（支持 b23.tv 短链）">
+        </label>
+        <button class="btn small" id="pl-import" type="button">导入</button>
+        <button class="btn small ghost" id="pl-refresh" type="button"
+                title="重新抓一次当前歌单的来源，把新视频补进来（已有的红心与分类不会丢）">更新</button>
+        <span class="sub pl-note" id="pl-note"></span>
+      </div>
+
+      <div class="actions">
+        <select id="pl-select" title="切换歌单"></select>
+        <button class="btn small ghost" id="pl-rename" type="button">重命名</button>
+        <button class="btn small ghost" id="pl-delete" type="button">删除</button>
+        <button class="btn small ghost" id="pl-new" type="button" title="建一张空歌单，往里导入或从别的歌单移歌过来">新建歌单</button>
+        <button class="btn small" id="pl-playall" type="button">从头连播</button>
+        <button class="btn small ghost" id="pl-shuffle" type="button" title="打乱当前筛选的歌，从第一首开始（一轮内不重复）">随机播放</button>
+        <button class="btn small ghost" id="pl-view" type="button" title="整块换成播放器样式（封面 / 歌词 / 红心）">播放器模式</button>
+      </div>
+
+      <div class="pl-filters" id="pl-filters"></div>
+
+      <div class="pl-bulk" id="pl-bulk" hidden>
+        <span class="sub" id="pl-picked">已选 0 首</span>
+        <select id="pl-bulk-lang" title="语言">
+          <option value="">语言不变</option>
+          <option value="中文">中文</option>
+          <option value="日文">日文</option>
+          <option value="英文">英文</option>
+          <option value="韩文">韩文</option>
+          <option value="其他">其他</option>
+        </select>
+        <select id="pl-bulk-style" title="风格">
+          <option value="">风格不变</option>
+          <option value="流行">流行</option>
+          <option value="抒情">抒情</option>
+          <option value="摇滚">摇滚</option>
+          <option value="舞曲">舞曲</option>
+          <option value="民谣">民谣</option>
+          <option value="古风">古风</option>
+          <option value="爵士">爵士</option>
+          <option value="经典">经典</option>
+          <option value="儿歌">儿歌</option>
+          <option value="二次元">二次元</option>
+          <option value="未分类">改回未分类</option>
+        </select>
+        <select id="pl-move-to" title="移动到哪张歌单"></select>
+        <button class="btn small ghost" id="pl-move" type="button">移动</button>
+        <button class="btn small" id="pl-bulk-apply" type="button">应用</button>
+      </div>
+
+      <div class="list-head"><span class="stat" id="pl-stat">—</span></div>
+
+      <table class="list">
+        <thead>
+          <tr>
+            <th class="col-act"><input type="checkbox" id="pl-check-all" title="全选/取消"></th>
+            <th class="col-title">歌曲</th>
+            <th class="pl-artist">演唱者</th>
+            <th class="pl-lang">语言</th>
+            <th class="pl-style">风格</th>
+            <th class="col-dur">时长</th>
+            <th class="col-act">播放</th>
+          </tr>
+        </thead>
+        <tbody id="pl-rows"></tbody>
+      </table>
+    </section>
+
+    <section class="view" id="view-recorder">
+      <div class="rc-head">
+        <div class="rc-head-txt">
+          <h1 class="title sm">录播姬</h1>
+          <p class="sub">给任意 B 站直播间开录制：<b>自动录制</b>开着时，启动就持续检测，
+            开播直接录、下播自动停。文件按 FLV 直存（不转码，CPU 几乎为 0）。</p>
+        </div>
+        <div class="rc-head-side">
+          <span class="rc-pill" id="rc-head-pill"><i></i><span id="rc-head-pill-txt">空闲</span></span>
+          <div class="rc-menu-wrap">
+            <button class="btn small ghost" id="rc-view-btn" type="button"
+                    aria-haspopup="menu" aria-expanded="false">视图 ▾</button>
+            <div class="rc-menu" id="rc-view-menu" role="menu" hidden>
+              <button type="button" role="menuitemradio" data-sort="none" aria-checked="true"><i></i>不排序</button>
+              <button type="button" role="menuitemradio" data-sort="room" aria-checked="false"><i></i>按房间号排序</button>
+              <button type="button" role="menuitemradio" data-sort="state" aria-checked="false"><i></i>按录制状态排序</button>
+              <div class="rc-menu-sep"></div>
+              <button type="button" role="menuitemcheckbox" data-toggle="notify" aria-checked="true"><i></i>开播时弹出系统通知</button>
+              <button type="button" role="menuitemcheckbox" data-toggle="showTitle" aria-checked="true"><i></i>显示直播间标题和分区</button>
+              <button type="button" role="menuitemcheckbox" data-toggle="showLog" aria-checked="true"><i></i>显示日志</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="rc-layout">
+        <!-- 左侧功能区：与录播页左栏同一套观感（小标题 + 12px 条目 + 8px 圆角） -->
+        <aside class="rc-side">
+          <div class="rc-side-h">功能</div>
+          <div class="rc-nav" id="rc-nav">
+            <button type="button" data-tab="rooms" class="on">房间<span class="rc-cnt" id="rc-nav-rooms">0</span></button>
+            <button type="button" data-tab="files">录制文件<span class="rc-cnt" id="rc-nav-files">0</span></button>
+            <button type="button" data-tab="log" id="rc-nav-log">运行日志</button>
+            <button type="button" data-tab="settings">设置</button>
+          </div>
+
+          <div class="rc-side-h">监控中</div>
+          <div class="rc-nav rc-nav-rooms" id="rc-nav-rooms-list"></div>
+
+          <div class="rc-auto">
+            <label class="rc-auto-row">
+              <input type="checkbox" id="rc-auto" data-rc-auto>
+              <span>自动录制</span>
+            </label>
+            <p class="rc-auto-note">启动应用后持续检测，开播即录，不用手动点开始。</p>
+          </div>
+        </aside>
+
+        <div class="rc-main">
+          <div class="rc-bar">
+            <span class="rc-meta" id="rc-meta"></span>
+            <span class="rc-actions">
+              <button class="btn small ghost" id="rc-all-start" type="button">全部开始</button>
+              <button class="btn small ghost" id="rc-all-stop" type="button">全部停止</button>
+              <button class="btn small ghost" id="rc-open-dir" type="button">打开输出目录</button>
+              <button class="btn small ghost" id="rc-refresh" type="button">刷新</button>
+            </span>
+          </div>
+
+          <div class="rc-pane" id="rc-pane-rooms">
+            <div class="rc-grid" id="rc-grid"></div>
+          </div>
+
+          <div class="rc-pane" id="rc-pane-files" hidden>
+            <div class="live-card">
+              <div class="live-card-h">录制文件<em class="rc-hsub" id="rc-files-stat"></em></div>
+              <div class="rc-files" id="rc-files"></div>
+            </div>
+          </div>
+
+          <div class="rc-pane" id="rc-pane-log" hidden>
+            <div class="live-card">
+              <div class="live-card-h">运行日志<em class="rc-hsub">最近 120 条</em></div>
+              <div class="rc-log" id="rc-log"></div>
+            </div>
+          </div>
+
+          <div class="rc-pane rc-set-pane" id="rc-pane-settings" hidden>
+            <div class="live-card">
+              <div class="live-card-h">输出</div>
+              <div class="rc-set-row">
+                <label class="rc-lab" for="rc-dir">录制输出目录</label>
+                <div class="rc-inline">
+                  <input class="rc-input" id="rc-dir" type="text" spellcheck="false" aria-label="录制输出目录">
+                  <button class="btn small ghost" id="rc-pick" type="button">选择…</button>
+                </div>
+              </div>
+              <div class="rc-set-row">
+                <label class="rc-lab" for="rc-qnids">录制画质ID
+                  <em>逗号分割，靠前优先；B 站按登录态决定实际档位</em></label>
+                <input class="rc-input" id="rc-qnids" type="text" spellcheck="false"
+                       placeholder="10000,400,250,150" aria-label="录制画质ID">
+              </div>
+              <p class="live-note">同时最多录 4 路；剩余空间低于 2 GB 时不再开新录制。
+                未登录 B 站通常只能拿到较低档位。</p>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">弹幕录制</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">保存弹幕
+                  <em>与录像同名的 .xml 侧车文件，播放器可直接读；未登录时跳过</em></span>
+                <input type="checkbox" data-rc-set="danmaku">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">录制模式</div>
+              <label class="rc-radio">
+                <input type="radio" name="rc-mode" value="standard" data-rc-set="mode">
+                <i></i><span><b>标准模式</b><em>按标准 FLV 写入，可选下面的修复选项</em></span>
+              </label>
+              <label class="rc-radio">
+                <input type="radio" name="rc-mode" value="raw" data-rc-set="mode">
+                <i></i><span><b>原始数据模式</b><em>不做任何修补，收到什么写什么</em></span>
+              </label>
+              <div class="rc-sub-h">标准模式录制修复设置</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">检测到可能缺少数据时间段
+                  <em>给 ffmpeg 加 genpts / discardcorrupt，尽量修补时间戳断档</em></span>
+                <input type="checkbox" data-rc-set="repairMissing">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+              <label class="rc-opt">
+                <span class="rc-opt-t">使用实验性花屏修复判定逻辑
+                  <em>忽略解码错误继续写，花屏段保留而不是整段中断</em></span>
+                <input type="checkbox" data-rc-set="repairGlitch">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">自动分段</div>
+              <label class="rc-radio">
+                <input type="radio" name="rc-seg" value="none" data-rc-set="segment">
+                <i></i><span><b>不要根据文件大小/视频时间自动分段</b></span>
+              </label>
+              <label class="rc-radio">
+                <input type="radio" name="rc-seg" value="size" data-rc-set="segment">
+                <i></i><span><b>根据文件大小自动分段</b>
+                  <input class="rc-input rc-num" id="rc-seg-size" type="number" min="16" max="10240"
+                         step="64" aria-label="分片大小 MB"> MB</span>
+              </label>
+              <label class="rc-radio">
+                <input type="radio" name="rc-seg" value="time" data-rc-set="segment">
+                <i></i><span><b>根据视频时间自动分段</b>
+                  <input class="rc-input rc-num" id="rc-seg-min" type="number" min="1" max="720"
+                         step="5" aria-label="分片时长 分钟"> 分钟</span>
+              </label>
+              <label class="rc-opt">
+                <span class="rc-opt-t">直播间更改标题后自动分段
+                  <em>检测到标题变化就另起一个文件（每 2 分钟查一次）</em></span>
+                <input type="checkbox" data-rc-set="segmentTitle">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">直播封面</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">录制时同时保存直播封面
+                  <em>与录像同名的 .cover.jpg</em></span>
+                <input type="checkbox" data-rc-set="cover">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">文件名</div>
+              <p class="live-note" style="margin-top:0">可用变量：
+                <code>{{ roomid }}</code> <code>{{ name }}</code> <code>{{ title }}</code>
+                <code>{{ uid }}</code> <code>{{ time }}</code> <code>{{ date }}</code>；
+                用 <code>/</code> 可以分子目录。</p>
+              <div class="rc-inline">
+                <input class="rc-input" id="rc-fname" type="text" spellcheck="false"
+                       aria-label="录制文件名格式">
+                <button class="btn small ghost" id="rc-fname-test" type="button">测试</button>
+              </div>
+              <label class="rc-opt rc-opt-tight">
+                <span class="rc-opt-t">默认<em>用内置格式：主播名/录制-房间号-时间</em></span>
+                <input type="checkbox" data-rc-set="filenameDefault">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+              <p class="live-note" id="rc-fname-prev">　</p>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">开播通知</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">直播间开播时弹出系统通知
+                  <em>需要「后台应用图标」开着才有气泡；否则只记运行日志</em></span>
+                <input type="checkbox" data-rc-set="notify">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">后台应用图标</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">在系统托盘显示应用图标
+                  <em>右键可打开控制台 / 录制目录 / 停止录制并退出</em></span>
+                <input type="checkbox" data-rc-set="tray">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+              <p class="live-note" id="rc-tray-note">关闭图标只是不显示它，<b>不会中断录制</b>。
+                页面关闭且没有录制任务时后台进程会自动退出；正在录制时会留在后台把文件写完再退。</p>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">录制条件</div>
+              <label class="rc-lab" for="rc-skip">跳过录制的直播标题正则匹配表达式
+                <em>每行一个；命中就不录这一场（可留空）</em></label>
+              <textarea class="rc-input rc-textarea" id="rc-skip" rows="3" spellcheck="false"
+                        aria-label="跳过录制的标题正则"></textarea>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">Webhook</div>
+              <div class="rc-set-row">
+                <label class="rc-lab" for="rc-wh2">Webhook v2
+                  <em>POST { Event, EventData }</em></label>
+                <input class="rc-input" id="rc-wh2" type="url" spellcheck="false"
+                       placeholder="https://example.com/hook" aria-label="Webhook v2">
+              </div>
+              <div class="rc-set-row">
+                <label class="rc-lab" for="rc-wh1">Webhook v1
+                  <em>POST { event, data }</em></label>
+                <input class="rc-input" id="rc-wh1" type="url" spellcheck="false"
+                       placeholder="https://example.com/hook" aria-label="Webhook v1">
+              </div>
+            </div>
+
+            <div class="live-card">
+              <div class="live-card-h">自动录制</div>
+              <label class="rc-opt">
+                <span class="rc-opt-t">启动后持续检测，开播即录
+                  <em>关闭后每个房间都要手动点「开始监控」</em></span>
+                <input type="checkbox" id="rc-auto3" data-rc-set="auto">
+                <i class="rc-sw" aria-hidden="true"></i>
+              </label>
+              <p class="live-note">改动会即时保存，不需要额外点保存。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-about">
+      <h1 class="title sm">关于这个频道</h1>
+      <div class="about-grid" id="about-body"></div>
+    </section>
+
+    <section class="view" id="view-settings">
+      <h1 class="title sm">设置</h1>
+
+      <div class="live-card">
+        <div class="live-card-h">B 站账号</div>
+        <p class="live-note" id="set-acc-state">正在检查登录状态…</p>
+        <div class="qp-btns" style="margin-top:2px">
+          <button class="btn small primary" id="btn-acc-login" type="button">扫码登录 B 站</button>
+          <button class="btn small ghost" id="btn-acc-logout" type="button" hidden>退出登录</button>
+        </div>
+        <p class="live-note">登录后：回放最高 1080P、能发弹幕、录制能拿到更高画质。
+          凭据只保存在本机 <code>sessdata.txt</code>，只发给 B 站自己的接口。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">外观</div>
+        <label class="seg-auto">
+          <input type="checkbox" id="theme-light"> 浅色模式（不勾就是默认的黑红配色）
+        </label>
+        <label class="seg-auto" style="margin-top:10px">主播选择方式
+          <select id="set-lamp-mode" title="顶栏那一排主播灯怎么显示">
+            <option value="hover">收起悬浮展开（默认）</option>
+            <option value="select">下拉式选单</option>
+            <option value="popover">悬浮二级窗口</option>
+          </select>
+        </label>
+        <p class="live-note"><b>收起悬浮展开</b>：主播超过 8 位时顶栏只留前三个灯和一个「+N」，
+          鼠标移上去弹出完整灯条；<b>下拉式选单</b>：点开一个纵向名单，按名字选；
+          <b>悬浮二级窗口</b>：悬停弹出带主播名的卡片墙。三种都不会挤压顶栏其它按钮。</p>
+        <p class="live-note">浅色下主色会压深一档，主播各自的板块色也按亮度压深，
+          免得小字在白底上发飘。选择只记在本机浏览器里。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">后台运行</div>
+        <label class="rc-opt rc-opt-tight">
+          <span class="rc-opt-t">后台应用图标
+            <em>在系统托盘显示图标；右键可打开控制台 / 录制目录 / 停止录制并退出</em></span>
+          <input type="checkbox" id="set-tray" data-tray-set>
+          <i class="rc-sw" aria-hidden="true"></i>
+        </label>
+        <p class="live-note" id="set-tray-note">关闭图标不会影响录制。网页全部关闭且没有录制任务时，
+          后台进程会自动退出；如果还有录制在写盘，进程会留在后台，把当前文件完整写完再安全退出。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">启动</div>
+        <label class="seg-auto">打开软件时先进入
+          <select id="set-default-view" title="启动时默认打开的板块"></select>
+        </label>
+        <p class="live-note">每次打开软件默认进入这个板块（也可以继续用带 <code>#/板块</code> 的链接直接打开某页，
+          链接优先）。<b>第一次使用</b>时仍会先请你选主播，选完进入后按这里的设置。
+          选项只记在本机浏览器里。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">播放</div>
+        <label class="seg-auto">默认静音
+          <button class="btn small ghost" id="btn-mutedef" type="button">默认静音：开</button>
+        </label>
+        <p class="live-note">打开软件时不自动出声。想听声音按播放器上的「进入直播」或音量键。</p>
+        <label class="seg-auto" style="margin-top:10px">跳过空白
+          <button class="btn small ghost" id="btn-skip" type="button">跳过空白：关</button>
+        </label>
+        <p class="live-note">排期里遇到主播没有直播的空白段时自动跳过，不显示「暂无回放」。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">分段与标注</div>
+        <label class="seg-auto">本场分段
+          <button class="btn small ghost" id="btn-open-chapters" type="button"
+                  aria-expanded="false">打开分段面板</button>
+        </label>
+        <p class="live-note">列出当前这一场的分段，可跳转、可多选保存成 MP4。</p>
+        <label class="seg-auto" style="margin-top:10px">片段标注
+          <button class="btn small ghost" id="btn-open-mark" type="button">进入标注模式</button>
+        </label>
+        <label class="seg-auto" style="margin-top:10px">自动歌切
+          <button class="btn small ghost" id="btn-open-songcut" type="button">识别本场的歌</button>
+        </label>
+        <p class="live-note">在后台分析画面里的「歌名」行，切出每一首歌的起止（约 1~2 分钟）。
+          结果可以在面板里改时间/填歌名，再写回本机。</p>
+        <p class="live-note">在播放器上直接标出「唱歌 / 聊天 / 视频」的起止点。
+          两个面板都显示在播放器上，点了会先切回录播页再打开。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">更新</div>
+        <p class="live-note" id="update-state" style="margin:0 0 8px">当前版本：—。可手动检查是否有新版。</p>
+        <div class="qp-btns" style="margin-top:2px">
+          <button class="btn small primary" id="btn-update-check" type="button">检查更新</button>
+          <a class="btn small ghost" id="btn-update-manual"
+             href="https://github.com/DcC176/replay-radio/releases/latest"
+             target="_blank" rel="noopener">打开下载页</a>
+        </div>
+        <p class="live-note" id="update-progress" hidden style="margin-top:8px"></p>
+        <p class="live-note" id="update-pref" style="margin-top:8px">更新提示：开启。</p>
+        <div class="qp-btns" id="update-pref-row" style="margin-top:6px">
+          <button class="btn small ghost" id="btn-update-never" type="button">永久不再提示</button>
+          <button class="btn small ghost" id="btn-update-reset" type="button" hidden>恢复更新提示</button>
+        </div>
+        <p class="live-note" style="margin-top:8px">启动时会自动检查，但<b>只提示不下载</b>；
+          只有你点「立即更新」才会下载并替换 EXE。无新版、检查失败或点「稍后」都不会改动任何文件。
+          「稍后」只在本会话内不再自动弹出；「24 小时内不再提示」与这里的「永久不再提示」
+          只作用于启动时的自动提示，手动点「检查更新」照样出结果。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">反馈与错误上报</div>
+        <p class="live-note" style="margin:0 0 8px">写清「怎么复现、什么条件下出现、实际看到什么」，
+          定位问题基本不用再问第二轮。提交后默认自动上传给开发者，同时在本机留一份完整档案。</p>
+
+        <label class="seg-auto">类型
+          <select id="fb-kind" title="反馈类型">
+            <option value="bug">问题 / 错误</option>
+            <option value="idea">功能建议</option>
+            <option value="other">其他</option>
+          </select>
+        </label>
+
+        <label class="fb-lab">一句话概述
+          <input id="fb-text" class="fb-input" maxlength="200"
+                 placeholder="例：监控室 4 路时功能栏按钮点不到">
+        </label>
+        <label class="fb-lab">复现步骤
+          <textarea id="fb-steps" class="fb-text" rows="3" maxlength="2000"
+                    placeholder="1. 打开监控室，选「4 路」&#10;2. 把浏览器缩放到 125%&#10;3. 鼠标移到任意一格"></textarea>
+        </label>
+        <label class="fb-lab">触发条件（可选）
+          <input id="fb-trigger" class="fb-input" maxlength="300"
+                 placeholder="例：只在缩放 125% 且 4 路以上出现；登录后才有">
+        </label>
+        <label class="fb-lab">异常表现
+          <textarea id="fb-actual" class="fb-text" rows="2" maxlength="1000"
+                    placeholder="实际看到了什么：报错文案、界面错位、点了没反应…"></textarea>
+        </label>
+        <label class="fb-lab">期望结果（可选）
+          <input id="fb-expected" class="fb-input" maxlength="500"
+                 placeholder="例：四个按钮始终可见可点">
+        </label>
+
+        <div class="fb-shots-h">
+          <button class="btn small ghost" id="fb-pick" type="button">＋ 添加截图</button>
+          <input type="file" id="fb-file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+          <span class="live-note" id="fb-shots-note" style="margin:0">可直接 Ctrl+V 粘贴截图，最多 3 张</span>
+        </div>
+        <div class="fb-shots" id="fb-shots"></div>
+
+        <label class="seg-auto" style="margin-top:8px">
+          <input type="checkbox" id="fb-ctx" checked> 附带诊断信息（版本、页面、环境、最近报错、日志末尾）
+        </label>
+        <label class="seg-auto" style="margin-top:8px">
+          <input type="checkbox" id="fb-upload" checked> 提交后自动上传
+          <span class="live-note" id="fb-target" style="margin:0"></span>
+        </label>
+
+        <details class="fb-details" style="margin-top:8px">
+          <summary>看看会提交什么</summary>
+          <pre id="fb-preview" class="fb-preview"></pre>
+        </details>
+        <div class="qp-btns" style="margin-top:10px">
+          <button class="btn small primary" id="fb-submit" type="button">提交反馈</button>
+          <button class="btn small ghost" id="fb-reupload" type="button" hidden>一键上传</button>
+          <button class="btn small ghost" id="fb-open" type="button" hidden>打开保存文件夹</button>
+          <button class="btn small ghost" id="fb-copy" type="button">复制内容</button>
+          <a class="btn small ghost" id="fb-gh"
+             href="https://github.com/DcC176/replay-radio/issues/new"
+             target="_blank" rel="noopener">去 GitHub 提 Issue</a>
+        </div>
+        <p class="live-note" id="fb-result" style="margin-top:8px"></p>
+        <p class="live-note">每条反馈只生成一个自包含文档 <code>data/feedback/&lt;编号&gt;.json</code>：
+          五段描述、环境、日志末尾和截图（base64 内嵌）都在同一份文件里，上传时原样发送，
+          不会出现「只带走 md、图丢了」。文档里还含一份 <code>markdown</code> 人读版。
+          不含登录凭据与 Cookie；关掉「自动上传」时提交后会直接弹出这个文件夹。
+          想换收集地址：<code>data/feedback.json</code> 里写 <code>{"upload_url": "https://你的地址"}</code>。</p>
+        <p class="live-note">上传内容不加密，默认走公共推送服务的私有主题（主题名等同口令）；
+          含账号信息、私人截图时请关掉「自动上传」，只保留本机档案。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">关于</div>
+        <p class="live-note" style="margin:0">当前版本构建：<b id="app-build">读取中…</b>
+          ／ 运行中的后端：<b id="app-build-hint">—</b></p>
+        <p class="live-note">如果这里的时间比你刚装的程序还旧，说明**旧的程序还在后台跑**：
+          请完全退出（含托盘）后再打开新版。界面上的网页文件会跟着新版更新，
+          所以「界面是新的、功能却没生效」通常就是这个原因。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">微博</div>
+        <label class="seg-auto">给哪位主播
+          <select id="wb-station" title="选择要绑定微博的主播"></select>
+        </label>
+        <label class="seg-auto" style="margin-top:10px">微博 UID 或主页链接
+          <input id="wb-input" type="text" placeholder="例如 1234567890 或 https://weibo.com/u/1234567890" style="min-width:280px">
+        </label>
+        <div class="actions" style="margin:10px 0 0">
+          <button class="btn small primary" id="wb-bind" type="button">一键绑定</button>
+          <button class="btn small ghost" id="wb-goto-login" type="button" title="打开微博页的登录流程：登一次，cookie 自动读回并存下来">去登录微博</button>
+          <span class="sub" id="wb-state" style="margin:0 0 0 8px"></span>
+        </div>
+        <p class="live-note">填数字 UID，或直接粘贴微博主页地址（<code>weibo.com/u/…</code>）即可，不用再手改 json。
+          <b>昵称解析不了</b>：微博搜索接口对未登录访客直接返回反爬（432），这是对方的限制。</p>
+        <p class="live-note"><b>cookie 不能从网址得到</b> —— 它是登录的产物。点「去登录微博」，
+          程序会开一个独立浏览器窗口让你登录，然后把 cookie 自动读回来存下；只需要登一次，
+          之后正文就能取到。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">快捷键
+          <button class="btn small ghost live-wheel-btn" id="keys-reset" type="button">全部清除</button>
+        </div>
+        <div class="key-list" id="keys-list"></div>
+        <p class="live-note" id="keys-tip">点右侧按键格，然后按下你想用的组合键（Esc 取消）。</p>
+        <p class="live-note">默认组合：<b>←</b> 快退 10 秒 · <b>→</b> 快进 10 秒 ·
+          <b>↑</b> 音量 +10% · <b>↓</b> 音量 −10%。快退 / 快进只在录播与歌单生效
+          （直播间是实时流，按下会在画面上提示）；音量在所有播放状态生效。
+          焦点在输入框 / 下拉框 / 滑杆里时不触发，不会抢掉方向键。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">自动分段
+          <button class="btn small ghost live-wheel-btn" id="seg-run" type="button">给最新一期分段</button>
+        </div>
+        <label class="seg-auto">
+          <input type="checkbox" id="seg-auto"> 出现新回放时自动分段
+        </label>
+        <p class="live-note">分段＝把回放里「在唱」的片段切出来，靠下载音频 + ffmpeg 分析得到，
+          每场几分钟到十几分钟。开启后只对新出现的回放生效，不会回头补历史缺口。</p>
+        <div class="live-result" id="seg-note"></div>
+        <div class="live-result" id="seg-state"></div>
+      </div>
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">回放清单（自动获取）
+          <button class="btn small ghost live-wheel-btn" id="series-refresh" type="button">重新获取</button>
+        </div>
+        <p class="live-note">回放清单按<b>主播主页 → 合集和系列</b>自动获取（<b>系列</b>和<b>合集</b>都行），
+          只需要 UID —— 换成别的主播也一样。拿不到时点「重新获取」，或等它自己重试；
+          也可以在这里<b>手动指定</b>某位主播用哪个来源（见下面「主播管理」）。</p>
+        <div class="live-result" id="series-state"></div>
+      </div>
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">主播管理</div>
+        <p class="live-note"><b>必须填 B 站 UID（空间号）</b>（个人主页网址
+          <code>space.bilibili.com/&lt;数字&gt;</code> 里那串数字，<b>不是直播间号</b>），
+          点「检测」自动查出
+          主播名、直播间号与可选的回放来源。加进来的人会出现在顶栏那排色灯里 ——
+          <b>不用再手工改 data/stations.json</b>。下面列表里<b>点一下主播名就能改显示名</b>，
+          <b>点 ☆ 设为默认板块</b>（主站，顶栏品牌名跟着它走），<b>点 × 删除</b>。</p>
+        <div class="live-send">
+          <input id="st-mid" inputmode="numeric" autocomplete="off"
+                 placeholder="B 站 UID（必填，不是直播间号）">
+          <button class="btn small primary" id="st-probe" type="button">检测</button>
+        </div>
+        <label class="seg-auto" id="st-source-box" hidden>回放来源
+          <select id="st-source"></select>
+        </label>
+        <p class="live-note" id="st-source-note" hidden></p>
+        <label class="seg-auto" id="st-name-box" hidden>显示名
+          <input id="st-name" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="默认用 B 站昵称">
+        </label>
+        <label class="seg-auto" id="st-color-box" hidden>板块颜色
+          <span class="st-color-wrap">
+            <input type="color" id="st-accent" value="#8a8a95" aria-label="板块颜色">
+            <button class="btn small ghost" id="st-accent-auto" type="button">按头像取色</button>
+          </span>
+        </label>
+        <div class="st-palette" id="st-palette" hidden></div>
+        <input type="color" id="st-pal-custom" hidden tabindex="-1" aria-hidden="true">
+        <p class="live-note" id="st-accent-note" hidden></p>
+        <div class="qp-btns">
+          <button class="btn small primary" id="st-save" type="button" hidden>保存</button>
+        </div>
+        <div class="live-result" id="st-state"></div>
+        <div class="key-list" id="st-list"></div>
+      </div>
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">从浏览器一键启动</div>
+        <p class="live-note">把下面那条链接<b>拖到书签栏</b>，以后点书签就能进电台 ——
+          <b>程序没在运行时会自动把它启动起来</b>（所以这块的注册项别取消）。</p>
+        <label class="seg-auto">
+          <input type="checkbox" id="proto-direct">
+          直连模式（点击零提示，<b>但不能启动程序</b>：程序没跑时点它会打不开）
+        </label>
+        <p class="live-note" id="proto-hint"></p>
+        <p class="proto-row">
+          <a class="proto-link" id="proto-link" href="#" draggable="true">▶ 打开噼里啪啦</a>
+        </p>
+        <div class="qp-btns" id="proto-regbtns">
+          <button class="btn small primary" id="proto-reg" type="button">注册 / 修复</button>
+          <button class="btn small ghost" id="proto-unreg" type="button">取消注册</button>
+        </div>
+        <div class="live-result" id="proto-state"></div>
+
+        <p class="live-note" style="margin-top:16px">想要「一点就进、<b>全程没有任何提示</b>」：
+          <b>创建桌面快捷方式</b>最直接 —— 双击它就会启动程序并打开网页（程序已经在跑时
+          就直接把页面打开）。它不经过浏览器，所以不存在任何确认框。</p>
+        <div class="qp-btns">
+          <button class="btn small primary" id="shortcut-create" type="button">创建桌面快捷方式</button>
+        </div>
+        <div class="live-result" id="shortcut-state"></div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- 新版本提示：只由检查结果触发，绝不自动下载/安装 -->
+  <div class="upd-mask" id="upd-mask" hidden>
+    <div class="upd-card" role="dialog" aria-modal="true" aria-label="发现新版本">
+      <div class="upd-h" id="upd-title">发现新版本 <b id="upd-ver">—</b></div>
+      <p class="upd-meta"><span id="upd-cur"></span><span id="upd-pub"></span></p>
+      <div class="upd-ann">
+        <div class="upd-ann-h">更新内容</div>
+        <div class="upd-notes" id="upd-notes"></div>
+      </div>
+      <p class="upd-state" id="upd-state"></p>
+      <div class="upd-btns">
+        <button class="btn small primary" id="upd-go" type="button">立即更新</button>
+        <button class="btn small ghost" id="upd-later" type="button">稍后</button>
+        <button class="btn small ghost" id="upd-24h" type="button">24 小时内不再提示</button>
+      </div>
+    </div>
+  </div>
+
+  <aside class="col-right">
+    <div class="player-box" id="player-box">
+      <video id="player" playsinline preload="metadata"></video>
+
+      <!-- 缓冲区/加载提示：waiting·stalled·首次加载时出现，playing·canplay 后淡出 -->
+      <div class="pv-wait" id="pv-wait" hidden aria-hidden="true">
+        <span class="pv-wait-bubble"><i></i><i></i><i></i></span>
+        <span class="pv-wait-txt">缓冲中…</span>
+      </div>
+
+      <!-- 播放器内的一次性提示（快捷键在直播流上无效 / 停在段末 …） -->
+      <div class="pv-toast" id="pv-toast" hidden></div>
+
+      <div class="pv-top">
+        <div class="pv-title" id="pv-title">—</div>
+        <!-- v1.9.12：顶栏只留用户 ID。
+             收起侧栏 → 移到各自侧栏的标题行里（收起后在播放器边缘留把手，见 #handle-side-*）；
+             自动连播 / 循环 → 设置面板里已有同源开关；
+             画质 → 控制条已有画质按钮，限流降级提示也并进了那个面板；
+             分段 / 标注 → 移到「设置」板块。 -->
+        <div class="pv-topbtns">
+          <button class="pv-btn" id="btn-login"><span id="login-label">登录</span></button>
+        </div>
+      </div>
+
+      <div class="pv-ctrl" id="pv-ctrl">
+        <div class="pv-progress" id="ctrl-progress" title="点击或拖动跳转">
+          <div class="pv-buffer" id="ctrl-buffer"></div>
+          <div class="pv-filled" id="ctrl-filled"></div>
+          <div class="pv-dot" id="ctrl-dot"></div>
+          <div class="pv-tip" id="ctrl-tip" hidden>0:00</div>
+        </div>
+        <div class="pv-bar">
+          <button class="pv-ic" id="ctrl-play" title="播放 / 暂停">
+            <svg class="i-play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4l13 8-13 8z"/></svg>
+            <svg class="i-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4h3.5v16H7zM13.5 4H17v16h-3.5z"/></svg>
+          </button>
+          <!-- 音量：按 B 站直播页的位置放在**左侧**（播放键右边、时长左边），
+               收成一个喇叭图标，悬停向上弹出竖向滑杆。
+               注意它**不是静音键**（静音键已按你的要求删掉）：点一下只展开/收起滑杆。 -->
+          <div class="pv-volwrap" id="vol-wrap">
+            <button class="pv-ic" id="ctrl-vol-btn" type="button"
+                    aria-label="音量" aria-expanded="false" title="音量">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 9v6h4l5 3.5v-13L8 9H4z"/>
+                <path d="M16 9.5a3.5 3.5 0 010 5M18.5 7a7 7 0 010 10"/>
+              </svg>
+            </button>
+            <div class="pv-volpop" id="vol-pop" hidden>
+              <input type="range" id="ctrl-vol" class="pv-vol" min="0" max="1" step="0.05" value="1"
+                     title="音量" aria-label="音量">
+            </div>
+          </div>
+          <span class="pv-time"><span id="ctrl-cur">0:00</span><em>/</em><span id="ctrl-dur">0:00</span></span>
+          <div class="pv-grow"></div>
+          <!-- 画质：原生 select **保留但隐藏**，它是清晰度数据与状态的唯一来源
+               （setQualityList 写 option、change 事件切流、xl_qn 记忆、降级提示全走它）。
+               用户看到的是下面这套按 B 站复刻的面板。 -->
+          <select class="pv-sel" id="quality" title="清晰度" hidden aria-hidden="true" tabindex="-1">
+            <option value="">清晰度</option>
+          </select>
+          <span class="pv-popwrap" id="qn-wrap">
+            <button class="pv-ic pv-txt pv-qnbtn" id="btn-qn" type="button"
+                    aria-haspopup="menu" aria-expanded="false" aria-controls="quality-panel"
+                    title="清晰度"><span id="qn-label">清晰度…</span></button>
+            <div class="pv-pop pv-qnpop" id="quality-panel" role="menu"
+                 aria-label="清晰度" hidden><ul class="qn-list" id="qn-list"></ul></div>
+          </span>
+          <!-- 倍速：与 B 站点播页一样放在清晰度右侧；直播流没有倍速，按视图隐藏 -->
+          <span class="pv-ratewrap" id="rate-wrap">
+            <button class="pv-ic pv-txt" id="ctrl-rate" type="button" title="播放速度">1.0x</button>
+            <div class="pv-menu" id="rate-menu" hidden></div>
+          </span>
+          <!-- 设置（齿轮）：按 B 站点播页放在「倍速」右边、「网页全屏」左边 -->
+          <span class="pv-popwrap" id="set-wrap">
+            <button class="pv-ic" id="btn-settings" type="button"
+                    aria-haspopup="menu" aria-expanded="false" aria-controls="settings-panel"
+                    title="设置">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3.2"/>
+                <path d="M19.5 14.3a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V20a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1.08-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H4a2 2 0 110-4h.09a1.65 1.65 0 001.51-1.08 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H10a1.65 1.65 0 001-1.51V4a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V10a1.65 1.65 0 001.51 1H20a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+              </svg>
+            </button>
+            <div class="pv-pop pv-setpop" id="settings-panel" role="menu"
+                 aria-label="播放设置" hidden>
+              <div class="set-row" data-act="mirror" role="menuitemcheckbox"
+                   aria-checked="false" tabindex="0">
+                <span class="set-label">镜像画面</span>
+                <span class="set-sw" aria-hidden="true"><i></i></span>
+              </div>
+              <div class="set-row" data-act="loop" role="menuitemcheckbox"
+                   aria-checked="false" tabindex="0">
+                <span class="set-label">单集循环</span>
+                <span class="set-sw" aria-hidden="true"><i></i></span>
+              </div>
+              <div class="set-row" data-act="autonext" role="menuitemcheckbox"
+                   aria-checked="true" tabindex="0">
+                <span class="set-label">自动连播</span>
+                <span class="set-sw" aria-hidden="true"><i></i></span>
+              </div>
+              <div class="set-row set-sub" data-act="rate" role="menuitem"
+                   aria-haspopup="true" aria-expanded="false" tabindex="0">
+                <span class="set-label">播放速度</span>
+                <span class="set-val" id="set-rate-val">1.0x</span>
+                <i class="set-arrow" aria-hidden="true"></i>
+              </div>
+              <div class="set-sublist" id="set-rate-list" hidden></div>
+              <div class="set-row set-sub" data-act="fit" role="menuitem"
+                   aria-haspopup="true" aria-expanded="false" tabindex="0">
+                <span class="set-label">画面比例</span>
+                <span class="set-val" id="set-fit-val">适应</span>
+                <i class="set-arrow" aria-hidden="true"></i>
+              </div>
+              <div class="set-sublist" id="set-fit-list" hidden></div>
+              <div class="set-row set-volrow">
+                <span class="set-label">音量</span>
+                <input type="range" id="set-vol" min="0" max="1" step="0.01" value="1"
+                       aria-label="音量">
+              </div>
+              <div class="set-row set-more" id="set-more" role="menuitem" tabindex="0">
+                <span class="set-label">更多播放设置</span>
+                <i class="set-arrow" aria-hidden="true"></i>
+              </div>
+            </div>
+          </span>
+          <button class="pv-ic pv-txt" id="btn-theater" title="网页全屏">宽屏</button>
+          <button class="pv-ic" id="ctrl-pip" type="button" title="画中画" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="14" rx="2"/>
+              <rect x="12" y="12" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/>
+            </svg>
+          </button>
+          <button class="pv-ic" id="ctrl-fs" title="全屏">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 011-1h4M15 4h4a1 1 0 011 1v4M20 15v4a1 1 0 01-1 1h-4M9 20H5a1 1 0 01-1-1v-4"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="offline-banner" id="offline-banner" hidden></div>
+
+      <!-- 音乐播放器视图：切到「播放器模式」时盖住视频区（视频仍在后台放声音） -->
+      <div class="mv" id="pl-player">
+        <div class="mv-head">
+          <button class="mv-collapse" id="mv-back" type="button" title="回到视频画面">⌄</button>
+          <span class="mv-head-label">播放器模式</span>
+        </div>
+        <div class="mv-main">
+          <div class="mv-disc-wrap">
+            <div class="mv-disc" id="mv-disc">
+              <div class="mv-art" id="pp-cover"></div>
+            </div>
+            <div class="mv-arm"><i></i></div>
+          </div>
+          <div class="mv-side">
+            <h1 class="mv-title" id="pp-title">—</h1>
+            <div class="mv-sub" id="pp-sub"></div>
+            <div class="mv-tags" id="pp-tags"></div>
+            <div class="mv-lyrics" id="pp-lyrics"><p class="pp-empty">载入歌词…</p></div>
+          </div>
+        </div>
+        <div class="mv-bar">
+          <div class="mv-seek" id="mv-seek" title="拖动调节进度">
+            <div class="mv-seek-fill" id="mv-seek-fill"></div>
+            <i class="mv-seek-dot" id="mv-seek-dot"></i>
+          </div>
+          <div class="mv-bar-row">
+            <div class="mv-bar-art" id="pp-bar-art"></div>
+            <div class="mv-bar-txt">
+              <b id="pp-bar-title">—</b>
+              <span id="pp-bar-sub"></span>
+            </div>
+            <button class="mv-like" id="pp-like" type="button" aria-pressed="false" title="喜欢这首歌">
+              <span class="pp-heart">♡</span>
+            </button>
+            <div class="mv-ctrl">
+              <button class="mv-btn" id="mv-loop" type="button" title="顺序播放">⟳</button>
+              <button class="mv-btn" id="pp-prev" type="button" title="上一首">⏮</button>
+              <button class="mv-btn mv-play" id="pp-toggle" type="button" title="播放 / 暂停">▶</button>
+              <button class="mv-btn" id="pp-next" type="button" title="下一首">⏭</button>
+              <button class="mv-btn" id="mv-queue-btn" type="button" title="播放列表">☰</button>
+            </div>
+            <div class="mv-right">
+              <div class="mv-volwrap">
+                <button class="mv-btn" id="mv-mute" type="button" title="静音">♪</button>
+                <input type="range" id="mv-vol" class="mv-vol" min="0" max="1" step="0.05" value="1" title="音量">
+              </div>
+              <button class="mv-btn" id="mv-more" type="button" title="更多">⋯</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 播放列表（参考图那个右侧抽屉）：列当前歌单，点一首直接播 -->
+        <div class="mv-queue" id="mv-queue" hidden>
+          <div class="mv-queue-h">
+            <b>播放列表</b>
+            <span id="mv-queue-n">0 首</span>
+            <button class="mv-btn" id="mv-queue-close" type="button" title="关闭">✕</button>
+          </div>
+          <div class="mv-queue-body" id="mv-queue-body"></div>
+        </div>
+
+        <!-- 更多：把原来下方栏位里的按钮收进来（回直播 / 跳过空白 / 默认静音） -->
+        <div class="mv-menu" id="mv-more-menu" hidden>
+          <button type="button" data-mv="live">回到直播</button>
+          <button type="button" data-mv="skip">跳过空白：<span id="mv-skip-state">关</span></button>
+          <button type="button" data-mv="mutedef">默认静音：<span id="mv-mutedef-state">开</span></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="quality-panel" id="quality-panel" hidden>
+      <div class="qp-h">画质与 1080P</div>
+      <p>回放台用的是<b>自己的播放器</b>，清晰度由播放器右上角的<b>清晰度下拉框</b>直接切换，
+        不会跳去 B 站页面。视频流由本机服务代取，所以能在页面内直接播放。</p>
+      <p><b>未登录最高 480P</b>（接口虽列出 1080P 档位，但未登录时只实际下发 360P/480P）。
+        要 1080P 需要登录：点播放器右上角「<b>登录</b>」，
+        用 B 站 App 扫码即可，<b>整个过程都在本页完成</b>，不会离开回放台。</p>
+      <p>登录信息只保存在本机 <code>tools/sessdata.txt</code>，只发给 B 站自己的接口，
+        不经任何第三方。<b>本站不收集、不上传你的账号信息。</b></p>
+      <div class="qp-btns">
+        <button class="btn small primary" id="btn-login-2">扫码登录 B 站</button>
+        <button class="btn small ghost" id="btn-reload-player">重新加载当前片段</button>
+        <button class="btn small ghost" id="btn-qp-close">收起</button>
+      </div>
+    </div>
+
+    <div class="mark-panel" id="mark-panel" hidden>
+      <div class="qp-h">标注片段
+        <button class="panel-x" id="mark-close" type="button" aria-label="关闭标注片段" title="关闭">✕</button>
+      </div>
+      <p>分段由 <code>tools/auto_segments.py</code> 自动检测。这里<b>直接改</b>不准的地方：
+        列表就是当前分P 的每一段 —— <b>起 / 止</b> 把边界设成当前播放位置，
+        <b>拆</b> 在当前位置切成两段，<b>并</b> 与下一段合并，<b>删</b> 去掉多余段。
+        要新增一段：播到开头按 <code>M</code>，到结尾再按 <code>M</code>。
+        改完点「保存到服务端」即可写入 <code>segments.js</code>（不用再手工搬运 JSON）。</p>
+      <div class="mp-cur" id="mark-cur">—</div>
+      <ol class="mp-list" id="mark-list"><li class="mp-empty">还没有分段</li></ol>
+      <div class="qp-btns">
+        <button class="btn small ghost" id="btn-mark-undo">撤销上一个点</button>
+        <button class="btn small ghost" id="btn-mark-clear">清空本分P</button>
+        <button class="btn small primary" id="btn-mark-save">已保存</button>
+      </div>
+      <div class="mp-hint" id="mark-hint"></div>
+      <textarea class="mp-json" id="mark-json" readonly rows="4" spellcheck="false"></textarea>
+    </div>
+
+    <div class="chapters-panel" id="chapters-panel" hidden>
+      <div class="qp-h">本场分段<span id="chapters-sub"></span>
+        <button class="panel-x" id="chapters-close" type="button" aria-label="关闭本场分段" title="关闭">✕</button>
+      </div>
+      <div class="chap-legend">第 N 次 = 画面「已唱」第 N 次登记（不等于全场歌曲总数，
+        漏读时会偏小）；约 N 首 = 按段长估算；悬停可看起止时间与来源。</div>
+      <div class="chap-note" id="chap-note"></div>
+      <div class="clip-bar" id="clip-bar">
+        <button class="btn small ghost" id="clip-mode" type="button" aria-pressed="false">选择片段</button>
+        <span class="clip-count" id="clip-count">已选 0 段</span>
+        <input class="clip-dir" id="clip-dir" type="text" spellcheck="false"
+               placeholder="保存文件夹（默认 视频/噼里啪啦）" aria-label="保存文件夹">
+        <button class="btn small ghost" id="clip-pick" type="button">选择文件夹</button>
+        <button class="btn small primary" id="clip-save" type="button" disabled>保存为 MP4</button>
+      </div>
+      <div class="clip-names" id="clip-names" hidden></div>
+      <div class="clip-note" id="clip-note"></div>
+      <div class="clip-covers" id="clip-covers" hidden></div>
+      <div class="chap-list" id="chap-list"></div>
+    </div>
+
+    <div class="chapters-panel" id="songcut-panel" hidden>
+      <div class="qp-h">自动歌切<span id="songcut-sub"></span>
+        <button class="btn small ghost sc-close" id="songcut-close" type="button">关闭</button>
+      </div>
+      <div class="chap-note" id="songcut-note">按画面左上角的「歌名」行自动切出每首歌的起止。
+        识别在本机后台跑，前端只负责显示进度；结果可以改。</div>
+      <div class="sc-bar">
+        <button class="btn small primary" id="songcut-run" type="button">开始识别</button>
+        <button class="btn small ghost" id="songcut-apply" type="button" disabled>应用到本场</button>
+        <span class="clip-count" id="songcut-count"></span>
+      </div>
+      <div class="sc-progress" id="songcut-progress" hidden><i id="songcut-bar"></i></div>
+      <div class="sc-list" id="songcut-list"></div>
+    </div>
+
+    <div class="np">
+      <div class="np-top">
+        <span class="badge" id="np-live">直播中</span>
+        <span class="np-cat" id="np-cat">—</span>
+      </div>
+      <div class="np-title" id="np-title">正在载入…</div>
+      <div class="np-meta" id="np-meta">—</div>
+      <div class="bar"><i id="np-bar"></i></div>
+      <div class="np-times"><span id="np-pos">--:--</span><span id="np-dur">--:--</span></div>
+      <div class="np-btns">
+        <button class="btn small primary" data-action="unmute">进入直播</button>
+        <button class="btn small ghost" data-action="resync">回到直播</button>
+      </div>
+    </div>
+
+    <div class="next">
+      <div class="next-h">接下来</div>
+      <ol id="next-list"><li>—</li></ol>
+    </div>
+
+    <div class="credits">
+      非官方粉丝站，内容版权归 UP 主
+      <a id="cr-name" href="#" target="_blank" rel="noopener">尚未添加主播</a>
+      所有，视频流由本站播放器经 B 站接口代理播放（页内不含弹幕轨道）。<br>
+      数据来源：<a id="cr-src" href="#" target="_blank" rel="noopener">直播回放系列</a>
+      <br><button id="btn-quit" type="button" style="margin-top:10px;background:none;border:0;padding:0;color:inherit;opacity:.5;font:inherit;text-decoration:underline;cursor:pointer">停止本地服务</button>
+    </div>
+  </aside>
+
+  <aside class="strip strip-right" id="strip-right">
+    <div class="strip-h">接下来
+      <button class="strip-fold strip-fold-r" id="btn-side-r" type="button"
+              title="收起右侧边栏" aria-label="收起右侧边栏">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6.5 3.5L11 8l-4.5 4.5"/>
+        </svg>
+      </button>
+    </div>
+    <div class="strip-body" id="strip-right-body"></div>
+  </aside>
+
+  <!-- 收起态的展开入口：贴在被收掉那一侧的边缘，只在 body.side-*-off 时出现、
+       鼠标移到三栏区域才显形。绝对定位，不占网格列，播放器照样铺满。 -->
+  <button class="side-handle side-handle-l" id="handle-side-l" type="button"
+          title="展开左侧边栏" aria-label="展开左侧边栏">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6.5 3.5L11 8l-4.5 4.5"/>
+    </svg>
+  </button>
+  <button class="side-handle side-handle-r" id="handle-side-r" type="button"
+          title="展开右侧边栏" aria-label="展开右侧边栏">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M9.5 3.5L5 8l4.5 4.5"/>
+    </svg>
+  </button>
+</main>
+
+<!-- 主播状态：右下角悬浮按钮，点击展开面板。
+     默认收起，避免遮挡视频；有新内容时按钮显示红点提示。 -->
+<div class="status-dock" id="status-dock">
+  <button class="status-fab" id="status-fab" type="button"
+          aria-expanded="false" aria-controls="status-panel" title="主播状态">
+    <span class="status-fab-dot" id="status-fab-dot" hidden></span>
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path d="M12 3a4 4 0 0 1 4 4v4.2l1.6 2.4a1 1 0 0 1-.83 1.55H7.23a1 1 0 0 1-.83-1.55L8 11.2V7a4 4 0 0 1 4-4Z"
+            fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+      <path d="M10 18.2a2.2 2.2 0 0 0 4 0" fill="none" stroke="currentColor"
+            stroke-width="1.7" stroke-linecap="round"/>
+    </svg>
+    <span class="status-fab-text" id="status-fab-text">主播状态</span>
+  </button>
+
+  <div class="status-panel" id="status-panel" hidden>
+    <div class="status-panel-h">
+      <span id="status-panel-title">主播状态</span>
+      <div class="status-panel-tools">
+        <button class="status-mini" id="status-refresh" type="button" title="刷新">刷新</button>
+        <button class="status-mini" id="status-close" type="button" title="收起">收起</button>
+      </div>
+    </div>
+
+    <div class="status-panel-body" id="status-body">
+      <div class="status-loading" id="status-loading">正在获取最新状态…</div>
+    </div>
+
+    <div class="status-panel-f" id="status-foot"></div>
+  </div>
+</div>
+
+<script src="data/segments.js"></script>
+<script src="data/sung.js"></script>
+<script src="data/setlists.js"></script>
+<script src="data/labels.js"></script>
+<script src="assets/qrcode.min.js"></script>
+<script src="assets/dash.all.min.js"></script>
+<script src="assets/mpegts.js"></script>
+<script src="assets/echarts.min.js"></script>
+  <script src="assets/app.js"></script>
+<script>
+// 单文件分发后没有「停止.bat」了，停止入口放在页面上。
+// 服务只绑 127.0.0.1，这个请求只会打到本机服务。
+document.getElementById("btn-quit").addEventListener("click", function () {
+  if (!window.confirm("停止本机服务？\n\n停止后本页将无法继续播放，需要重新双击 EXE 才能再用。")) return;
+  var done = function () {
+    document.body.innerHTML =
+      '<div style="padding:80px 24px;text-align:center;font:16px/2 system-ui,sans-serif">' +
+      '服务已停止，可以关闭此页面了。</div>';
+  };
+  fetch("api/quit").then(done, done);   // 服务一关 fetch 本身就会断，成功失败都当已停止
+});
+</script>
+</body>
+</html>

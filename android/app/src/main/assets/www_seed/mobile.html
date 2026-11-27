@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#08080a">
+<title>噼里啪啦 · 手机版</title>
+<link rel="stylesheet" href="mobile.css">
+</head>
+<body class="m-dark">
+
+<!-- 启动页 -->
+<section class="m-scene m-splash" id="m-splash">
+  <div class="m-splash-logo"><span class="m-spark">噼</span><span class="m-spark">里</span><span class="m-spark">啪</span><span class="m-spark">啦</span></div>
+  <p class="m-splash-sub">随时听听喜欢的直播</p>
+  <button class="m-btn m-btn-primary m-splash-go" id="m-go" type="button">开始收听</button>
+  <button class="m-link" id="m-sound-toggle" type="button">音效：开</button>
+</section>
+
+<!-- 主播选择页 -->
+<section class="m-scene m-pick" id="m-pick" hidden>
+  <header class="m-head">
+    <div>
+      <h1 class="m-head-title">选择主播</h1>
+      <p class="m-head-sub" id="m-pick-sub">挑一位，开始回放</p>
+    </div>
+  </header>
+  <div class="m-pick-list" id="m-station-list"></div>
+  <div class="m-pick-empty" id="m-pick-empty" hidden>
+    <p>还没有添加主播</p>
+    <p class="m-dim">请用电脑版添加主播后，数据会同步到这里</p>
+  </div>
+</section>
+
+<!-- 电台主界面 -->
+<section class="m-scene m-player" id="m-player" hidden>
+  <header class="m-head m-player-head">
+    <button class="m-icon-btn" id="m-back" type="button" aria-label="返回">‹</button>
+    <div class="m-now-id">
+      <div class="m-now-name" id="m-now-name">—</div>
+      <div class="m-now-series" id="m-now-series">回放电台</div>
+    </div>
+    <button class="m-icon-btn" id="m-end-btn" type="button" aria-label="结束">□</button>
+  </header>
+
+  <div class="m-cover" id="m-cover">
+    <div class="m-cover-face" id="m-cover-face"></div>
+    <div class="m-cover-ring"></div>
+    <div class="m-cover-emoji" id="m-cover-emoji">♪</div>
+  </div>
+
+  <div class="m-now-title" id="m-track-title">正在连接…</div>
+  <div class="m-now-artist" id="m-track-artist">—</div>
+
+  <div class="m-progress-wrap">
+    <div class="m-progress" id="m-progress"><div class="m-progress-fill" id="m-progress-fill"></div><div class="m-progress-knob" id="m-progress-knob"></div></div>
+    <div class="m-progress-time"><span id="m-time-cur">0:00</span><span id="m-time-total">0:00</span></div>
+  </div>
+
+  <div class="m-controls">
+    <button class="m-ctrl m-ctrl-side" id="m-prev" type="button" aria-label="上一首">⏮</button>
+    <button class="m-ctrl m-ctrl-play" id="m-play" type="button" aria-label="播放/暂停">▶</button>
+    <button class="m-ctrl m-ctrl-side" id="m-next" type="button" aria-label="下一首">⏭</button>
+  </div>
+
+  <div class="m-stats">
+    <div class="m-stat"><span class="m-stat-num" id="m-stat-taps">0</span><span class="m-stat-label">点击</span></div>
+    <div class="m-stat"><span class="m-stat-num" id="m-stat-tracks">0</span><span class="m-stat-label">首已听</span></div>
+    <div class="m-stat"><span class="m-stat-num" id="m-stat-min">0</span><span class="m-stat-label">分钟</span></div>
+  </div>
+
+  <div class="m-live-strip">
+    <span class="m-live-dot"></span>
+    <span class="m-live-text" id="m-live-text">弹幕准备中…</span>
+  </div>
+</section>
+
+<!-- 结束页 -->
+<section class="m-scene m-end" id="m-end" hidden>
+  <div class="m-end-emoji">♪</div>
+  <h1 class="m-end-title">本次收听</h1>
+  <div class="m-end-score"><span id="m-end-score">0</span><small>分</small></div>
+  <p class="m-end-note" id="m-end-note">谢谢收听，下次见</p>
+  <div class="m-end-detail">
+    <div><span id="m-end-tracks">0</span> 首</div>
+    <div><span id="m-end-min">0</span> 分钟</div>
+    <div><span id="m-end-taps">0</span> 次互动</div>
+  </div>
+  <button class="m-btn m-btn-primary" id="m-again" type="button">再听一会</button>
+  <button class="m-link" id="m-home" type="button">回到开始</button>
+</section>
+
+<div class="m-toast" id="m-toast" hidden></div>
+<script src="mobile.js"></script>
+</body>
+</html>

@@ -1,0 +1,274 @@
+/* 噼里啪啦 · 手机版
+   独立样式，不碰桌面版 style.css。深色底 + 主播强调色，风格与桌面版一致。 */
+
+:root {
+  --mbg: #08080a;
+  --mpanel: #141418;
+  --mpanel2: #1d1d23;
+  --mtext: #f2f2f4;
+  --mdim: #9a9aa4;
+  --mred: #ff3b4e;
+  --monred: #fff;
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--mbg); color: var(--mtext);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  overflow: hidden; overscroll-behavior: none;
+  user-select: none; -webkit-user-select: none;
+}
+
+.m-scene {
+  position: fixed; inset: 0;
+  display: flex; flex-direction: column;
+  padding: calc(16px + var(--safe-t)) 20px calc(16px + var(--safe-b));
+  max-width: 520px; margin: 0 auto;
+}
+.m-scene[hidden] { display: none !important; }
+
+/* ---------- 通用控件 ---------- */
+.m-btn {
+  min-height: 50px; border: 0; border-radius: 26px;
+  padding: 0 28px; font-size: 17px; font-weight: 700;
+  font-family: inherit; cursor: pointer;
+  transition: transform .12s ease, opacity .12s ease, box-shadow .2s ease;
+}
+.m-btn:active { transform: scale(.95); }
+.m-btn-primary {
+  background: var(--mred); color: var(--monred);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--mred) 40%, transparent);
+}
+.m-link {
+  background: none; border: 0; color: var(--mdim);
+  font-size: 14px; font-family: inherit; padding: 12px; margin-top: 8px;
+  cursor: pointer;
+}
+.m-link:active { color: var(--mtext); }
+.m-dim { color: var(--mdim); font-size: 14px; }
+
+/* 点击涟漪反馈 */
+.m-ripple { position: relative; overflow: hidden; }
+.m-ripple::after {
+  content: ""; position: absolute; border-radius: 50%;
+  background: rgba(255,255,255,.35); width: 20px; height: 20px;
+  top: 50%; left: 50%; transform: translate(-50%,-50%) scale(0);
+  opacity: 0; pointer-events: none;
+}
+.m-ripple.m-hit::after { animation: m-rip .45s ease-out; }
+@keyframes m-rip {
+  0% { transform: translate(-50%,-50%) scale(0); opacity: .7; }
+  100% { transform: translate(-50%,-50%) scale(11); opacity: 0; }
+}
+
+/* ---------- 启动页 ---------- */
+.m-splash { align-items: center; justify-content: center; text-align: center; }
+.m-splash-logo {
+  display: flex; gap: 6px; font-size: clamp(38px, 12vw, 58px); font-weight: 900;
+  letter-spacing: -2px;
+}
+.m-spark {
+  display: inline-block; color: var(--mred);
+  animation: m-pop 1.4s ease-in-out infinite;
+  text-shadow: 0 0 24px color-mix(in srgb, var(--mred) 55%, transparent);
+}
+.m-spark:nth-child(2) { animation-delay: .12s; }
+.m-spark:nth-child(3) { animation-delay: .24s; }
+.m-spark:nth-child(4) { animation-delay: .36s; }
+@keyframes m-pop {
+  0%, 100% { transform: translateY(0) rotate(-4deg) scale(1); }
+  50% { transform: translateY(-14px) rotate(5deg) scale(1.12); }
+}
+.m-splash-sub { color: var(--mdim); font-size: 15px; margin: 18px 0 48px; }
+.m-splash-go { width: min(300px, 82vw); }
+
+/* ---------- 头部 ---------- */
+.m-head { display: flex; align-items: center; gap: 12px; min-height: 52px; }
+.m-head-title { font-size: 26px; margin: 0; font-weight: 800; }
+.m-head-sub { color: var(--mdim); font-size: 14px; margin: 4px 0 0; }
+
+/* ---------- 主播选择 ---------- */
+.m-pick-list {
+  margin-top: 18px; display: flex; flex-direction: column; gap: 12px;
+  overflow-y: auto; flex: 1; padding: 2px 4px 24px;
+}
+.m-station {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--mpanel); border-radius: 18px; padding: 14px;
+  min-height: 76px; cursor: pointer;
+  transition: transform .12s ease, background .2s ease;
+}
+.m-station:active { transform: scale(.97); background: var(--mpanel2); }
+.m-station-face {
+  width: 52px; height: 52px; border-radius: 50%; flex: none;
+  background: var(--mpanel2); object-fit: cover;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; font-weight: 800; color: var(--mtext);
+  overflow: hidden;
+}
+.m-station-face img { width: 100%; height: 100%; object-fit: cover; }
+.m-station-info { min-width: 0; flex: 1; }
+.m-station-name {
+  font-size: 17px; font-weight: 700; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.m-station-meta { color: var(--mdim); font-size: 13px; margin-top: 4px; }
+.m-station-arrow { color: var(--mdim); font-size: 22px; }
+.m-pick-empty { text-align: center; margin: auto 0; color: var(--mdim); }
+
+/* ---------- 播放器 ---------- */
+.m-player-head { justify-content: space-between; }
+.m-icon-btn {
+  width: 44px; height: 44px; flex: none;
+  border: 0; border-radius: 50%; background: var(--mpanel);
+  color: var(--mtext); font-size: 26px; line-height: 1;
+  font-family: inherit; cursor: pointer;
+  transition: transform .12s ease;
+}
+.m-icon-btn:active { transform: scale(.9); }
+.m-now-id { text-align: center; min-width: 0; flex: 1; }
+.m-now-name {
+  font-size: 17px; font-weight: 700; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.m-now-series { color: var(--mdim); font-size: 12px; margin-top: 2px; }
+
+.m-cover {
+  position: relative; width: min(62vw, 260px); aspect-ratio: 1;
+  margin: clamp(14px, 4vh, 40px) auto 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.m-cover-face {
+  width: 74%; height: 74%; border-radius: 50%; overflow: hidden;
+  background: var(--mpanel2); z-index: 1;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 72px; font-weight: 900; color: var(--mred);
+}
+.m-cover-face img { width: 100%; height: 100%; object-fit: cover; }
+.m-cover-ring {
+  position: absolute; inset: 4%; border-radius: 50%;
+  border: 3px solid var(--mred); opacity: .75;
+}
+.m-cover.m-playing .m-cover-ring { animation: m-spin 9s linear infinite; }
+@keyframes m-spin { to { transform: rotate(360deg); } }
+.m-cover-emoji {
+  position: absolute; right: 6%; bottom: 10%; z-index: 2;
+  width: 46px; height: 46px; border-radius: 50%;
+  background: var(--mred); color: var(--monred);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; box-shadow: 0 6px 18px rgba(0,0,0,.4);
+}
+.m-now-title {
+  text-align: center; font-size: 19px; font-weight: 700; margin-top: 18px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding: 0 12px;
+}
+.m-now-artist { text-align: center; color: var(--mdim); font-size: 14px; margin-top: 5px; }
+
+.m-progress-wrap { margin-top: 18px; padding: 0 4px; }
+.m-progress {
+  position: relative; height: 6px; border-radius: 3px;
+  background: var(--mpanel2); touch-action: none;
+}
+.m-progress-fill {
+  height: 100%; width: 0%; border-radius: 3px;
+  background: var(--mred); transition: width .25s linear;
+}
+.m-progress-knob {
+  position: absolute; top: 50%; left: 0%;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--mtext); transform: translate(-50%, -50%);
+  box-shadow: 0 2px 8px rgba(0,0,0,.5);
+  transition: left .25s linear;
+}
+.m-progress-time {
+  display: flex; justify-content: space-between;
+  color: var(--mdim); font-size: 12px; margin-top: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.m-controls {
+  display: flex; align-items: center; justify-content: center; gap: 34px;
+  margin-top: 18px;
+}
+.m-ctrl {
+  border: 0; background: none; color: var(--mtext);
+  font-family: inherit; cursor: pointer;
+  transition: transform .12s ease;
+}
+.m-ctrl:active { transform: scale(.88); }
+.m-ctrl-side { width: 52px; height: 52px; font-size: 26px; color: var(--mdim); }
+.m-ctrl-play {
+  width: 76px; height: 76px; border-radius: 50%;
+  background: var(--mred); color: var(--monred); font-size: 32px;
+  box-shadow: 0 10px 30px color-mix(in srgb, var(--mred) 45%, transparent);
+}
+
+.m-stats {
+  display: flex; justify-content: space-around; margin-top: auto;
+  padding: 14px 0; border-top: 1px solid var(--mpanel2);
+}
+.m-stat { display: flex; flex-direction: column; align-items: center; }
+.m-stat-num { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.m-stat-label { color: var(--mdim); font-size: 12px; margin-top: 2px; }
+
+.m-live-strip {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 34px; color: var(--mdim); font-size: 13px;
+  overflow: hidden;
+}
+.m-live-text {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.m-live-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--mred); flex: none;
+  animation: m-blink 1.8s ease-in-out infinite;
+}
+@keyframes m-blink { 50% { opacity: .35; } }
+
+/* ---------- 结束页 ---------- */
+.m-end { align-items: center; justify-content: center; text-align: center; }
+.m-end-emoji { font-size: 66px; color: var(--mred); margin-bottom: 8px; }
+.m-end-title { font-size: 24px; margin: 0; }
+.m-end-score {
+  font-size: 84px; font-weight: 900; color: var(--mred); line-height: 1.1;
+  margin: 18px 0 4px; font-variant-numeric: tabular-nums;
+  animation: m-score-in .5s cubic-bezier(.2,1.6,.4,1);
+}
+@keyframes m-score-in { from { transform: scale(.4); opacity: 0; } }
+.m-end-score small { font-size: 20px; margin-left: 6px; }
+.m-end-note { color: var(--mdim); font-size: 15px; margin: 0 0 28px; }
+.m-end-detail {
+  display: flex; gap: 28px; color: var(--mtext); font-size: 15px; margin-bottom: 40px;
+}
+.m-end-detail span { color: var(--mred); font-weight: 800; font-size: 19px; }
+.m-end .m-btn { width: min(300px, 82vw); }
+
+/* ---------- 提示 ---------- */
+.m-toast {
+  position: fixed; left: 50%; bottom: 8%; transform: translateX(-50%);
+  background: var(--mpanel2); color: var(--mtext);
+  padding: 12px 20px; border-radius: 22px; font-size: 14px;
+  z-index: 50; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+  max-width: 80vw; text-align: center;
+}
+.m-toast[hidden] { display: none; }
+
+/* ---------- 小屏适配 ---------- */
+@media (max-height: 680px) {
+  .m-cover { width: min(48vw, 190px); margin-top: 8px; }
+  .m-cover-emoji { width: 38px; height: 38px; font-size: 18px; }
+  .m-controls { margin-top: 10px; gap: 26px; }
+  .m-ctrl-play { width: 64px; height: 64px; }
+  .m-progress-wrap { margin-top: 10px; }
+  .m-now-title { margin-top: 10px; }
+  .m-stats { padding: 8px 0; }
+}
+@media (max-height: 560px) {
+  .m-stats { display: none; }
+  .m-cover { width: min(38vw, 150px); }
+}

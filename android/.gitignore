@@ -1,0 +1,7 @@
+# Gradle 构建缓存与产物（可重新生成，不入库）
+.gradle/
+local.properties
+app/build/
+build/
+*.iml
+.idea/
