@@ -16,6 +16,11 @@
 前五节写在 CHANGELOG 的版本块里；「开发者说明」由本脚本按 git 实际提交生成，
 「下载 / 校验 / 通用说明 / 第三方组件」作为公共尾部追加。
 
+**用户公告**（v1.9.38 起）：CHANGELOG 版本块里的 `### 用户看到的更新` 小节用大白话写
+「这次对用户意味着什么」，本脚本把它放到正文最前面并用 `USER_NOTES_BEGIN/END`
+标记包住。软件内更新弹窗只取标记之间的内容，技术细节与下载说明仍留在 Release 页面。
+没有该小节的版本正文不加标记，弹窗退回显示全文（老版本的兼容行为）。
+
 每个描述 = 该版本的公告章节 + 该版本自己的下载文件名与 SHA-256。
 校验值优先取 GitHub 上已发布 Release 的数据；**新版本还没有 Release 时**
 回退到本地产物（上传的就是它）。
@@ -117,6 +122,26 @@ def local_asset(tag):
             "size": os.path.getsize(p), "sha": h.hexdigest()}
 
 
+USER_NOTE_HEAD = "### 用户看到的更新"
+MARK_BEGIN = "<!-- USER_NOTES_BEGIN -->"
+MARK_END = "<!-- USER_NOTES_END -->"
+
+
+def split_user_notes(body):
+    """把 CHANGELOG 版本块里的用户公告与技术正文分开。
+
+    返回 (用户公告, 去掉该小节的技术正文)。没有该小节时用户公告为 ''，
+    调用方据此决定不加标记 —— 老版本的 Release 正文保持原样。
+    """
+    m = re.search(r'^###\s*用户看到的更新\s*$(.*?)(?=^###\s|\Z)',
+                  body, re.S | re.M)
+    if not m:
+        return "", body
+    user = m.group(1).strip()
+    rest = (body[:m.start()] + body[m.end():]).strip()
+    return user, rest
+
+
 written = []
 for tag in reversed(ordered):
     body = blocks[tag]
@@ -147,7 +172,12 @@ for tag in reversed(ordered):
     if tag != "v1.0.0" and "第三方组件" in common:
         tail += ["", "**第三方组件**", "", common["第三方组件"]]
 
-    out = "\n".join([body] + dev + tail) + "\n"
+    parts = []
+    user, body = split_user_notes(body)
+    if user:
+        parts += [MARK_BEGIN, "", user, "", MARK_END, ""]
+    parts += [body] + dev + tail
+    out = "\n".join(parts) + "\n"
     p = os.path.join(OUT, tag + ".md")
     with open(p, "w", encoding="utf-8") as f:
         f.write(out)

@@ -1175,7 +1175,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.37"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.38"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_LIST_API = "https://api.github.com/repos/%s/releases?per_page=20" % UPDATE_REPO
@@ -1205,6 +1205,24 @@ def _update_fetch_json(url, timeout=UPDATE_TIMEOUT):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+USER_NOTES_BEGIN = "<!-- USER_NOTES_BEGIN -->"
+USER_NOTES_END = "<!-- USER_NOTES_END -->"
+
+
+def _popup_notes(body):
+    """只取 Release 正文里给用户看的公告段。
+
+    v1.9.38 起生成的公告用标记包住用户语言段落；弹窗显示这一段，
+    技术细节留在 Release 页面。旧版本正文没有标记 → 退回全文，行为不变。
+    """
+    s = str(body or "").replace("\r\n", "\n")
+    if USER_NOTES_BEGIN in s and USER_NOTES_END in s:
+        inner = s.split(USER_NOTES_BEGIN, 1)[1].split(USER_NOTES_END, 1)[0]
+        if inner.strip():
+            return inner.strip()
+    return re.sub(r"<!--\s*USER_NOTES_(?:BEGIN|END)\s*-->", "", s).strip()
+
+
 def api_update_check():
     """GET /api/update/check —— 有新版才返回 available=true；不下载任何东西。"""
     cur = APP_VERSION
@@ -1222,8 +1240,8 @@ def api_update_check():
                     "name": exe.get("name") or "",
                     "size": int(exe.get("size") or 0),
                     "sha256": str((exe.get("digest") or "").replace("sha256:", "")),
-                    # 弹窗要展示完整公告：600 字经常正好截在关键条目上，放宽到 6000
-                    "notes": body[:6000],
+                    # 弹窗只显示标记里的用户公告（无标记时退回全文）
+                    "notes": _popup_notes(body)[:6000],
                     "notes_ok": bool(body),
                     "title": d.get("name") or rel,
                     "page": d.get("html_url") or
@@ -1245,6 +1263,7 @@ def api_update_check():
                     # 公告正文自己带「## v1.9.35 · 日期」时去掉这一行，避免与下面拼的标题重复
                     body = re.sub(r"^\s*#{1,4}\s*v?%s[^\n]*\n+" % re.escape(tag),
                                   "", body, count=1, flags=re.I).strip()
+                    body = _popup_notes(body)
                     if not body:
                         continue
                     blocks.append("## v%s\n\n%s" % (tag, body))
