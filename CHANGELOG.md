@@ -12,6 +12,35 @@ v1.6.3 的平行版本：去掉了全部内置主播与品牌元素，首次打�
 
 ---
 
+## v1.9.37 · 2026-11-28
+
+### Firefox：监控室每一格都是黑的（WS 握手用了 HTTP/1.0）
+
+- 根因：`Handler` 继承 `BaseHTTPRequestHandler` 的默认 `protocol_version = "HTTP/1.0"`，
+  WebSocket 握手的状态行因此是 `HTTP/1.0 101 Switching Protocols`。
+  Chrome 对这种 1.0 的升级照单全收，**Firefox 直接判定握手失败**，控制台报
+  `Firefox can't establish a connection to the server at ws://…/api/live/ws`，
+  监控室每一格都停在黑屏（HTTP-FLV 通道本身没问题，所以之前用补丁切 HTTP 能看）。
+- 修法：`ws_accept()` 在发状态行前把这一条连接的 `protocol_version` 临时设为
+  `HTTP/1.1`，只影响 WS 升级那一次响应；普通请求仍是原来的行为（1.0 + 关闭连接），
+  不引入 keep-alive 的成帧风险。
+**附带修正：关注列表里「没有名字、头像是个 ?」的行**
+
+- B 站批量查开播状态时，偶尔会给「在播、但 `uname`/`face` 为空」的条目
+  （实测一次 72 条里有 17 条）。`_follow_store` 原来直接整份覆盖，
+  于是刷新一次就变成一排空白名字。
+- 现在：① 存缓存时缺字段沿用上一份；② `_vtbs_attach` 用 vtbs 资料补名字/头像；
+  ③ 前端仍为空时用「主播 <mid>」兜底，不再渲染空白行。
+
+### 验证
+
+- 原始 socket 握手返回 `HTTP/1.1 101`；Playwright 自带 Firefox 132 打开监控室，
+  7 格里 5 格有画面（1280×720、readyState 3~4），控制台 0 错误；
+  关注列表 67 行、0 个空名字、0 张坏头像。
+- Chrome 同样两格：1280×720、readyState 4，页面无滚动、无 JS 错误 —— 握手改动不影响 Chrome。
+
+---
+
 ## v1.9.36 · 2026-11-27
 
 ### 关注列表 / 表情发送 / 更新公告 / 弹幕板

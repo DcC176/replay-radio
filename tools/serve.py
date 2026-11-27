@@ -1175,7 +1175,7 @@ def urlopen(req, timeout):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.36"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.37"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_LIST_API = "https://api.github.com/repos/%s/releases?per_page=20" % UPDATE_REPO
@@ -6077,6 +6077,13 @@ def _vtbs_attach(items):
             continue
         x["follower"] = p.get("follower") or 0
         x["vtbs"] = True
+        # B 站批量查开播状态时，偶尔会给「在播但 uname/face 为空」的条目
+        # （房间刚开播 / 风控降级）。vtbs 的资料表正好补这两个字段，
+        # 否则列表里会出现没有名字、头像是个「?」的行。
+        if not x.get("uname") and p.get("uname"):
+            x["uname"] = p["uname"]
+        if not x.get("face") and p.get("face"):
+            x["face"] = p["face"]
         if p.get("sign"):
             x["sign"] = p["sign"]
         if p.get("guard"):
@@ -6257,6 +6264,17 @@ def _follow_store(live):
        写着「未开播」）。完整性现在由 `_follow_live_fetch` 的「任一批失败即抛错」
        保证，这里只负责落盘。
     """
+    # 上游偶尔会给「在播、但 uname/face 为空」的条目：不能拿它覆盖上一份好数据，
+    # 否则刷新一次列表就变成一排没名字的行（实测 72 条里有 17 条）。
+    prev = {str(x.get("mid")): x for x in (FOLLOW_CACHE.get("list") or [])}
+    for x in live:
+        o = prev.get(str(x.get("mid")))
+        if not o:
+            continue
+        if not x.get("uname"):
+            x["uname"] = o.get("uname") or ""
+        if not x.get("face"):
+            x["face"] = o.get("face") or ""
     with FOLLOW_LOCK:
         FOLLOW_CACHE["at"] = time.time()
         FOLLOW_CACHE["list"] = live
@@ -8174,6 +8192,12 @@ def ws_accept(handler):
         return False
     accept = base64.b64encode(
         hashlib.sha1((key + WS_GUID).encode("ascii")).digest()).decode("ascii")
+    # ⚠️ 握手必须回 HTTP/1.1：Handler 继承 BaseHTTPRequestHandler 的默认值 HTTP/1.0，
+    #    状态行就成了 "HTTP/1.0 101 Switching Protocols"。Chrome 容忍这种 1.0 的升级，
+    #    **Firefox 直接判握手失败**（控制台 "can't establish a connection to the server"），
+    #    表现就是监控室每一格都黑着、但同一个接口用 curl/Chrome 都正常。
+    #    只在这一条连接上改，不影响普通请求（它们仍走 1.0 + 关闭连接）。
+    handler.protocol_version = "HTTP/1.1"
     handler.send_response(101, "Switching Protocols")
     handler.send_header("Upgrade", "websocket")
     handler.send_header("Connection", "Upgrade")

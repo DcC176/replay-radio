@@ -13619,11 +13619,13 @@
     var on = multiFollowOn[s.mid] ? ' on' : '';
     /* 头像统一走 faceHtml：取不到图时由 bindFaceFallback 换成首字母占位。
        （原来是裸 <img>，/api/img 一失败就只剩一个灰圆圈，也不报错。） */
+    /* 上游偶尔只给标题不给昵称：用标题兜底，别渲染出一行空白名字。 */
+    var showName = s.uname || s.name || ('主播 ' + s.mid);
     var img = s.face
-      ? faceHtml(s.face, 'mf-face', s.uname)
-      : '<span class="mf-face mf-noface">' + esc(String(s.uname || '?').charAt(0)) + '</span>';
+      ? faceHtml(s.face, 'mf-face', showName)
+      : '<span class="mf-face mf-noface">' + esc(String(showName).charAt(0)) + '</span>';
     return '<div class="mf-item' + on + '" data-mid="' + esc(s.mid) + '">' + img
-      + '<div class="mf-meta"><div class="mf-name"><span class="mf-nm">' + esc(s.uname) + '</span>'
+      + '<div class="mf-meta"><div class="mf-name"><span class="mf-nm">' + esc(showName) + '</span>'
       + '<span class="mf-live">LIVE</span></div>'
       + '<div class="mf-title" title="' + esc(s.title) + '">' + esc(s.title || '直播中') + '</div></div>'
       + '<div class="mf-pop">' + fmtNum(s.online || 0)
