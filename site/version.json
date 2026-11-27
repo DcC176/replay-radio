@@ -1,10 +1,10 @@
 {
-  "version": "1.9.34",
-  "name": "ReplayRadio-v1.9.34.exe",
-  "size": 56304124,
-  "sha256": "8fca2f81897dbcfe61fcd20efc417aa6fed77ba01ed1ff8820b91d3151c98479",
-  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.34/ReplayRadio-v1.9.34.exe",
-  "published": "2026-11-26T06:09:27Z",
-  "notes": "弹幕板五面板与监控室同步直播；主播资料接入静态资料源；修正按钮/胶囊/面板对齐",
+  "version": "1.9.35",
+  "name": "ReplayRadio-v1.9.35.exe",
+  "size": 56310729,
+  "sha256": "c25bf8a668c3aa32e0f2b7888dfee31566c5d450fde862b49f8f1b72be418ec6",
+  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.35/ReplayRadio-v1.9.35.exe",
+  "published": "2026-11-27T08:04:15Z",
+  "notes": "弹幕板 SC / 礼物 / 来过 / 舰长 全部打通",
   "_note": "软件内更新检查的兜底数据源。发版时随 site/index.html 的 VERSION 一起改，发布到 gh-pages 后生效。"
 }
