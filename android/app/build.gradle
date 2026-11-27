@@ -30,7 +30,12 @@ android {
 chaquopy {
     defaultConfig {
         version = '3.11'
+        // 完整后端依赖：歌切识别/分段精修需要 numpy 与 Pillow（Chaquopy 有预编译 wheel）
+        pip {
+            install "numpy"
+            install "Pillow"
+        }
     }
-    // Python 源码只用 src/main/python（serve.py + android_entry.py + 两个移动端 stub）。
+    // Python 源码只用 src/main/python（serve.py 及 auto_segments/seg_refine/songcut 完整模块）。
     // 不要 srcDir("../../tools")：那会把整个 tools/tests 纳入静态分析，构建卡死。
 }

@@ -1,0 +1,96 @@
+/* 手机版适配层（噼里啪啦）
+   原则：一比一还原电脑版界面与逻辑，只补「手机环境」需要的部分：
+   1) 刘海/挖孔/手势条安全区域  2) 触控点击区域 ≥40px
+   3) 板块标签可横向滚动         4) 横屏与矮屏压缩
+   5) 禁用双击缩放/文本选中误触   6) 浅色/深色跟原版变量，不改配色
+   本文件只在 APK 内被引用，不改动仓库原版 style.css。 */
+
+/* ---- 视口与安全区基线 ---- */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;          /* 禁双击缩放，保留滑动 */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+/* 顶栏与底部浮标避开安全区 */
+.topbar { padding-top: env(safe-area-inset-top); }
+.status-dock { bottom: calc(env(safe-area-inset-bottom, 0px) + 10px); }
+
+/* ---- 板块标签：12 个在手机上改为可横滑，标签加大到可点 ---- */
+@media (max-width: 900px), (pointer: coarse) {
+  .tb-tabs {
+    overflow-x: auto; overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    white-space: nowrap;
+    scroll-behavior: smooth;
+  }
+  .tb-tabs::-webkit-scrollbar { display: none; }
+  .tb-tabs .tab {
+    flex: 0 0 auto;
+    min-height: 40px; line-height: 40px;
+    padding: 0 14px;
+    font-size: 14px;
+  }
+  /* 滑动胶囊跟随滚动，避免只 translateX 导致错位 */
+  .tb-pill { will-change: transform; }
+}
+
+/* ---- 触控点击区域：原版小按钮在手机上放大命中区（视觉不变） ---- */
+@media (pointer: coarse) {
+  .ghost-btn, .strip-fold, .m-icon-btn,
+  button.btn, .btn, .tab, a.tab {
+    min-height: 40px;
+  }
+  /* 用伪元素扩大命中，不改变视觉尺寸/位置 */
+  .tb-more, .ghost-btn.tb-login, #tb-space,
+  .strip-fold, .recorder-fold, #handle-side-l, #handle-side-r {
+    position: relative;
+  }
+  .tb-more::after, .ghost-btn.tb-login::after,
+  .strip-fold::after, #handle-side-l::after, #handle-side-r::after {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: 44px; height: 44px; transform: translate(-50%, -50%);
+  }
+  /* 播放器控件触控间距 */
+  .ctrl-btn, .pb-btn, .player-box button { min-width: 34px; min-height: 34px; }
+}
+
+/* ---- 字体：手机上不让原版字号低于可读下限 ---- */
+@media (max-width: 560px) {
+  .tab { font-size: 14px; }
+  /* 正文最小 12px，说明性文字不要糊成一团 */
+  .muted, .dim, .hint, .sub, .note { font-size: max(12px, 1em); }
+}
+
+/* ---- 横屏矮屏：压缩纵向占位，保证播放器与内容同屏 ---- */
+@media (orientation: landscape) and (max-height: 500px) {
+  .topbar { height: 52px; min-height: 52px; }
+  .tb-tabs .tab { min-height: 34px; line-height: 34px; }
+  .wrap { padding-top: 6px; padding-bottom: 6px; }
+  /* 引导页横屏卡片收紧，避免底部贴边 */
+  #onboard .ob-card { max-height: 80vh; }
+}
+
+/* ---- 竖屏：给内容留出安全区与滑动空间 ---- */
+@media (orientation: portrait) {
+  .wrap { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+  /* 竖屏下播放器占满列宽，沿用原版规则，这里只兜底 possible 溢出 */
+  .player-box, .pv-wrap { max-width: 100%; }
+}
+
+/* ---- 触摸反馈：轻点缩放，统一给可交互元素 ---- */
+@media (pointer: coarse) {
+  .tab:active, .btn:active, button:active, .ob-card:active, .m-station:active {
+    opacity: .72;
+    transition: opacity .08s ease-out;
+  }
+}
+
+/* ---- 性能：仅对装饰性动画降负载，不影响功能动画 ---- */
+@media (prefers-reduced-motion: no-preference) {
+  .glow { will-change: transform; }
+}

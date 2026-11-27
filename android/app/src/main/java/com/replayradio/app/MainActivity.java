@@ -48,9 +48,12 @@ public class MainActivity extends Activity {
         s.setLoadWithOverviewMode(true);
         s.setUseWideViewPort(true);
         s.setMediaPlaybackRequiresUserGesture(false);
+        // 让 WebView 的服务端资源走 HTTP，混排适配层也同源，避免跨源/混合内容问题
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         web.setWebViewClient(new WebViewClient());
         setContentView(web);
-        web.loadUrl("http://127.0.0.1:8765/?mobile=1");
+        // 一比一还原电脑版：直接加载原版 index.html（不设 mobile 参数、不改 UA 路由）
+        web.loadUrl("http://127.0.0.1:8765/");
     }
 
     /** 把 APK assets 下的 www_seed/ 目录整棵复制到目标目录（已存在则跳过）。 */

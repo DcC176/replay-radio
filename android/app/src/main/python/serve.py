@@ -11265,13 +11265,6 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             return self._json(code, obj)
 
-        # Android APK 的 WebView 固定加 /?mobile=1，直接给移动页；
-        # 手机浏览器访问根路径时也按 UA 自动切到移动页（桌面版不受影响）。
-        ua = (self.headers.get("User-Agent") or "").lower()
-        mobile_ua = any(k in ua for k in ("android", "iphone", "ipad", "mobile"))
-        if parsed.path == "/" and ("mobile=1" in (parsed.query or "") or mobile_ua):
-            if os.path.exists(os.path.join(ROOT, "mobile.html")):
-                self.path = "/mobile.html"
         return super().do_GET()
 
     def do_POST(self):

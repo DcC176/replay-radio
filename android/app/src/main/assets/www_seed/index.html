@@ -2012,5 +2012,8 @@ document.getElementById("btn-quit").addEventListener("click", function () {
   fetch("api/quit").then(done, done);   // 服务一关 fetch 本身就会断，成功失败都当已停止
 });
 </script>
+<!-- 手机版适配层：一比一还原电脑版界面与逻辑，仅追加触控/安全区/横竖屏增强；原版文件零改动 -->
+<link rel="stylesheet" href="assets/mobile-adapt.css">
+<script src="assets/mobile-adapt.js"></script>
 </body>
 </html>
