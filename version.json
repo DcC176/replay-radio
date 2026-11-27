@@ -1,10 +1,10 @@
 {
-  "version": "1.9.36",
-  "name": "ReplayRadio-v1.9.36.exe",
-  "size": 56312210,
-  "sha256": "98e85097522dfb0dee4399d3c6d43b70604af5a8998375a5d244f09234e94628",
-  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.36/ReplayRadio-v1.9.36.exe",
-  "published": "2026-11-27T10:19:28Z",
-  "notes": "「关注的直播」只列你关注的人；表情包跟着当前主播换；更新公告改成大白话、按版本分开看",
+  "version": "1.9.37",
+  "name": "ReplayRadio-v1.9.37.exe",
+  "size": 56313730,
+  "sha256": "ead0ffa0021549b77e9b43b0a0a57bf985aeeffcccb9b3dd60f3406e1373cfb5",
+  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.37/ReplayRadio-v1.9.37.exe",
+  "published": "2026-11-27T16:19:09Z",
+  "notes": "修复 Firefox 里监控室画面全黑；关注列表里空昵称/头像的主播也能正常显示",
   "_note": "软件内更新检查的兜底数据源。发版时随 site/index.html 的 VERSION 一起改，发布到 gh-pages 后生效。"
 }
