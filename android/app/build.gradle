@@ -1,0 +1,23 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+android {
+    namespace 'com.replayradio.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.replayradio.app'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version = '3.11'
+    }
+}
