@@ -1,10 +1,10 @@
 {
-  "version": "1.9.37",
-  "name": "ReplayRadio-v1.9.37.exe",
-  "size": 56313730,
-  "sha256": "ead0ffa0021549b77e9b43b0a0a57bf985aeeffcccb9b3dd60f3406e1373cfb5",
-  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.37/ReplayRadio-v1.9.37.exe",
-  "published": "2026-11-27T16:19:09Z",
-  "notes": "修复 Firefox 里监控室画面全黑；关注列表里空昵称/头像的主播也能正常显示",
+  "version": "1.9.38",
+  "name": "ReplayRadio-v1.9.38.exe",
+  "size": 56314814,
+  "sha256": "ae860c1897db3b825522827c894848dd9c63fbd2d78f8b782f8faa7030b4cb7e",
+  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.38/ReplayRadio-v1.9.38.exe",
+  "published": "2026-11-27T16:33:13Z",
+  "notes": "检查更新时，弹窗只显示「这次对你有什么影响」，技术细节不再混在里面；隔了好几版没升级，会按版本一条条列清楚",
   "_note": "软件内更新检查的兜底数据源。发版时随 site/index.html 的 VERSION 一起改，发布到 gh-pages 后生效。"
 }
