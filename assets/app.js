@@ -11468,6 +11468,47 @@
     }).join('');
   }
 
+  /* 每一路的音量存档：`xl_msvol` → {格子 data-id: 0~100}。
+
+     ⚠️ 为什么必须落盘 + 建格子时回填（用户 2026-11-28 反馈「调好音量，点刷新开播状态
+     或刷新网页就归零」）：`msBarHtml()` 给滑杆写死 `value="0"`、`<video muted>`，
+     而「刷新开播状态 / 刷新网页」都会 multiTeardown() 把整墙格子销毁重建 ——
+     新格子的音量天然是 0，之前调的那一档没有任何地方记得。
+     键用格子的 data-id（板块 = 主播 id、关注 = mid），与画质/流的路由键一致。 */
+  var KEY_MSVOL = 'xl_msvol';
+
+  function msVolMap() {
+    var d = store.get(KEY_MSVOL, null);
+    return (d && typeof d === 'object' && !Array.isArray(d)) ? d : {};
+  }
+
+  function msVolGet(id) {
+    var n = Number(msVolMap()[id]);
+    /* 读不懂 / 越界 → 一律当「没设过」= 静音。
+       这里**不**像播放器那样截到边界：监控墙的基线是静音，一个坏值若被截成 100
+       就是刷新后突然满音量放出来，比没声音更糟。 */
+    if (!isFinite(n) || n < 0 || n > 100) return 0;
+    return Math.round(n);
+  }
+
+  function msVolSave(id, pct) {
+    if (!id) return;
+    var m = msVolMap();
+    m[id] = Math.min(100, Math.max(0, Math.round(Number(pct) || 0)));
+    store.set(KEY_MSVOL, m);
+  }
+
+  /* 把存档回填到这一格：滑杆位置 + <video>.volume/.muted。
+     建格子、单路重连、看门狗重连都会走到 startMultiCell，在那里调一次即可。 */
+  function msVolApply(cell) {
+    if (!cell) return;
+    var pct = msVolGet(cell.getAttribute('data-id') || '');
+    var s = cell.querySelector('.ms-vol');
+    var v = cell.querySelector('video');
+    if (s) s.value = String(pct);
+    if (v) { v.volume = pct / 100; v.muted = pct === 0; }
+  }
+
   /* 格子底栏（两个来源共用）：名字 + 状态 + 单路画质 + 音量 + 独奏/全屏/聚焦。
      参照 DD_Monitor：每一路都能独立调音量与画质，而不是只有全局档。
      末尾的 .ms-h* 是「自由」布局下的拖动/缩放手柄，别的布局里由 CSS 藏起来。 */
@@ -11540,6 +11581,9 @@
     cell._s = s;                         // 单路画质/音量控件要按格重启，把数据挂在格子上
     cell._src = src;
     applyCellChat(cell);
+    /* 音量回填必须在这里：新建的格子是 `muted` + 滑杆 0，不读存档就等于把用户调好的
+       音量清零（刷新开播状态 / 刷新网页都会重建格子）；单路重连也走这条路。 */
+    msVolApply(cell);
     /* 代次：同一个格子可能被重启多次（换画质、点卡片重连、看门狗重连），
        每次重启都挂一只看门狗 —— 旧的那只必须能认出自己过期了，
        否则几只狗同时咬同一格，会各自销毁对方刚建好的 player。 */
@@ -11613,7 +11657,15 @@
       p.load();
       try {
         var pr = p.play();
-        if (pr && typeof pr.catch === 'function') pr.catch(function () { /* 等用户手势 */ });
+        if (pr && typeof pr.catch === 'function') pr.catch(function () {
+          /* 刷新后没有用户手势：浏览器会拦下「带声音的自动播放」（存档里音量 > 0 时）。
+             先静音把画面放出来，滑杆与存档都保持原样 —— 用户碰一下滑杆就恢复声音；
+             不这么做的话，整格会停在「还没开始」并被看门狗判成卡死。 */
+          if (!video.muted) {
+            video.muted = true;
+            try { p.play(); } catch (e2) { /* 还是不行就等用户点 */ }
+          }
+        });
       } catch (e) { /* 浏览器可能要求手势 */ }
       p.on(mpegts.Events.ERROR, function () {
         try { p.destroy(); } catch (e) { /* 已销毁 */ }
@@ -11930,6 +11982,8 @@
         v.volume = e.target.value / 100;
         v.muted = e.target.value === '0';
       }
+      // 立刻落盘：刷新开播状态 / 刷新网页都会重建格子，不记下来就归零
+      if (cell) msVolSave(cell.getAttribute('data-id'), e.target.value);
     });
     grid.addEventListener('change', function (e) {
       if (!e.target.classList || !e.target.classList.contains('ms-qn')) return;
