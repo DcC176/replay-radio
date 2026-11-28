@@ -1,10 +1,10 @@
 {
-  "version": "1.9.38",
-  "name": "ReplayRadio-v1.9.38.exe",
-  "size": 56314814,
-  "sha256": "ae860c1897db3b825522827c894848dd9c63fbd2d78f8b782f8faa7030b4cb7e",
-  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.38/ReplayRadio-v1.9.38.exe",
-  "published": "2026-11-27T16:33:13Z",
-  "notes": "检查更新时，弹窗只显示「这次对你有什么影响」，技术细节不再混在里面；隔了好几版没升级，会按版本一条条列清楚",
+  "version": "1.9.41",
+  "name": "ReplayRadio-v1.9.41.exe",
+  "size": 56477537,
+  "sha256": "848c5444ce68588aa8100b8bdf065bddb2066e24c35adc8d9beb481f1a175c2c",
+  "url": "https://github.com/DcC176/replay-radio/releases/download/v1.9.41/ReplayRadio-v1.9.41.exe",
+  "published": "2026-11-28T16:26:32Z",
+  "notes": "调好的音量现在能记住了：刷新页面或刷新开播状态后，直播间和监控室各路的音量都不会归零；发弹幕更顺手",
   "_note": "软件内更新检查的兜底数据源。发版时随 site/index.html 的 VERSION 一起改，发布到 gh-pages 后生效。"
 }
