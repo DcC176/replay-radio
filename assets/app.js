@@ -1744,6 +1744,9 @@
      盖到存档上 —— 刷新几次之后音量就「自己变回去了」。 */
   var KEY_VOL = 'xl_vol_';
   var volReady = false;
+  /* 临时静音：浏览器拦下「带声音的自动播放」时，先静音把画面放出来，
+     这一次静音**不写存档**（否则用户重启软件后声音又没了）。 */
+  var volQuiet = false;
 
   var store = {
     get: function (k, d) {
@@ -1762,15 +1765,43 @@
     return KEY_VOL + (progressSid || ST);
   }
 
+  function volDefaults() {
+    return { v: 1, muted: !!state.mutedDefault };
+  }
+
+  /* 读存档。任何异常数据都要能兜底：不是对象 / v 不是数字 / 越界 / muted 缺失。 */
   function volSaved() {
     var d = store.get(volKeyNow(), null);
     if (!d || typeof d !== 'object') return null;
     var v = Number(d.v);
-    return { v: isFinite(v) ? Math.min(1, Math.max(0, v)) : 1, muted: !!d.muted };
+    // v 根本读不懂 = 这份存档不可信（写坏了 / 别的版本写的）：整份丢弃，回默认值，
+    // 别只修一半（只修 v 会留下一个「满音量但不静音」的怪状态）。
+    if (!isFinite(v)) return null;
+    v = Math.min(1, Math.max(0, v));
+    // 老数据可能只有 v：0 音量本来就是静音，别读成「音量为 0 但没静音」这种矛盾态
+    var m = (typeof d.muted === 'boolean') ? d.muted : (v === 0);
+    return { v: v, muted: m };
+  }
+
+  /* 音量状态的**唯一落点**：存档（没有就用默认值）→ <video> + state + 三处滑杆。
+     ⚠️ 必须同时回写 `state.muted`，不能只改元素：`startLive()`/`applyPlayer()` 都按
+     state.muted 重新贴一次静音，state 落后一步的结果就是「拖过音量、切回直播间又没声」。
+     ⚠️ 这里是「元素 → state」同步，`volPersist()` 是「元素 → 存档」，两者都不能省。 */
+  function volRestore() {
+    var s = volSaved() || volDefaults();
+    if (!el.player) return s;
+    if (el.player.volume !== s.v) el.player.volume = s.v;
+    if (el.player.muted !== s.muted) el.player.muted = s.muted;
+    state.muted = s.muted;
+    if (el.ctrlVol) el.ctrlVol.value = s.muted ? 0 : s.v;
+    if (el.setVol) el.setVol.value = s.muted ? 0 : s.v;
+    return s;
   }
 
   function volPersist() {
-    if (!el.player || !volReady) return;
+    if (!el.player) return;
+    state.muted = !!el.player.muted;      // 元素是事实来源：拖控制条也要让 state 跟上
+    if (!volReady || volQuiet) return;    // 存档未读 / 自动播放被拦时的临时静音，都不写
     store.set(volKeyNow(), {
       v: Math.round((el.player.volume || 0) * 100) / 100,
       muted: !!el.player.muted
@@ -3071,12 +3102,24 @@
         if (state.view === 'broadcast') loadLiveInfo();
       }, 8000);
     });
-    el.player.muted = state.muted;
+    /* 音量/静音按存档恢复，不要直接用 state.muted：
+       拖过控制条之后 state 可能还没跟上（见 volPersist 注释），
+       一重开流就把声音又关掉 —— 用户看到的就是「刷新开播状态后音量被重置」。 */
+    volRestore();
     // play() 返回的是 promise：浏览器要求用户手势、或在解析完成前又被 pause 打断时，
     // 拒绝是异步发生的，try/catch 抓不到，会变成控制台里的未处理拒绝。
     try {
       var p = livePlayer.play();
-      if (p && typeof p.catch === 'function') p.catch(function () { /* 等用户手势 */ });
+      if (p && typeof p.catch === 'function') p.catch(function () {
+        /* 刷新后没有用户手势，浏览器会拦「带声音的自动播放」。
+           这时先静音把画面放出来（这次静音不写存档），点了播放/「进入直播」就有声音；
+           否则整个直播间会停在第一帧上，看起来像打不开。 */
+        if (!el.player.muted) {
+          volQuiet = true;
+          try { el.player.muted = true; } finally { volQuiet = false; }
+          try { livePlayer.play(); } catch (e2) { /* 还是不行就等用户点 */ }
+        }
+      });
     } catch (e) { /* 浏览器可能要求用户手势 */ }
   }
 
@@ -7744,7 +7787,9 @@
       else el.player.pause();
     });
     el.ctrlVol.addEventListener('input', function () {
-      if (!el.player || !el.player.src) return;
+      /* 不再要求已经有 src：直播间未开播 / 换流的那几秒里拖音量也该生效并记住，
+         以前这里直接 return，用户会以为「调了没用」。 */
+      if (!el.player) return;
       el.player.volume = parseFloat(this.value);
       el.player.muted = el.player.volume === 0;
     });
@@ -7978,6 +8023,9 @@
     el.player.addEventListener('volumechange', function () {
       el.ctrlVol.value = el.player.muted ? 0 : el.player.volume;
       volPersist();          // 存档按板块走，刷新后接着上次的音量
+      /* 元素变了，state 与「进入直播 / 声音已开启」的文案都要跟上。
+         走 volPersist 已经把 state 同步了，这里补 UI。 */
+      if (el.btnMutedef) syncSound();
     });
     el.player.addEventListener('loadedmetadata', function () {
       if (isFinite(el.player.duration)) el.ctrlDur.textContent = fmtClock(el.player.duration);
@@ -8548,11 +8596,7 @@
     state.muted = state.mutedDefault;
     /* 这个板块上次的音量/静音优先于「默认静音」：刷新页面（或切走再切回来）不该
        把用户拖好的音量打回默认。没有存档才用默认值 —— 首次进入的行为不变。 */
-    var sv = volSaved();
-    if (sv) {
-      state.muted = sv.muted;
-      if (el.player && el.player.volume !== sv.v) el.player.volume = sv.v;
-    }
+    volRestore();
     volReady = true;
     // 调试出口：排节目的坑（换段漂移、豁免失效……）全在这些状态里，光看界面看不出来。
     // 只读地看一眼（不要从外部改），省得每次都靠猜。

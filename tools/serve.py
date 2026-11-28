@@ -1223,7 +1223,7 @@ def urlopen(req, timeout, ctx=None):
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.39"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.40"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_LIST_API = "https://api.github.com/repos/%s/releases?per_page=20" % UPDATE_REPO
