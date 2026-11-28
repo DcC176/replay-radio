@@ -1737,6 +1737,13 @@
   /* 本次**页面加载**对应的板块。⚠️ 不能用 ST：切板块时 applyStationSet 会先把 ST 改掉，
      220ms 后才 reload —— 中间的 pagehide 存进度就会把旧板块的位置写到新板块的键上。 */
   var progressSid = null;
+  /* 每板块音量/静音：`xl_vol_<板块 id>` → {v: 0~1, muted: bool}。
+     刷新页面（切板块也是整页重载）要接着上次的音量，而不是回到「默认静音 / 100%」。
+     ⚠️ 回写开关 volReady 是必须的：applyPlayer 会按 state.muted（默认静音）写一次
+     player.muted，那次 volumechange 若在 boot 读存档**之前**落盘，就会把默认值
+     盖到存档上 —— 刷新几次之后音量就「自己变回去了」。 */
+  var KEY_VOL = 'xl_vol_';
+  var volReady = false;
 
   var store = {
     get: function (k, d) {
@@ -1749,6 +1756,26 @@
       try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 隐私模式等，忽略 */ }
     }
   };
+
+  /* 音量存档：键随板块走（与播放进度同一口径，`progressSid` 优先于 ST）。 */
+  function volKeyNow() {
+    return KEY_VOL + (progressSid || ST);
+  }
+
+  function volSaved() {
+    var d = store.get(volKeyNow(), null);
+    if (!d || typeof d !== 'object') return null;
+    var v = Number(d.v);
+    return { v: isFinite(v) ? Math.min(1, Math.max(0, v)) : 1, muted: !!d.muted };
+  }
+
+  function volPersist() {
+    if (!el.player || !volReady) return;
+    store.set(volKeyNow(), {
+      v: Math.round((el.player.volume || 0) * 100) / 100,
+      muted: !!el.player.muted
+    });
+  }
 
   var state = {
     all: [],
@@ -3406,7 +3433,8 @@
     function send(msg) {
       if (busy) return Promise.resolve();
       // 传参时用参数（常用弹幕一键发送走这条路，不经过输入框），不传时取输入框
-      if (msg === undefined) msg = input ? input.value : '';
+      var fromInput = (msg === undefined);
+      if (fromInput) msg = input ? input.value : '';
       msg = String(msg).trim();
       if (!msg) { setResult('先输入弹幕内容'); return Promise.resolve(); }
       busy = true;
@@ -3418,6 +3446,14 @@
         .then(function (d) {
           setResult(d.error ? d.error
             : (d.code === 0 ? '已发送 ✓' : 'B 站返回：' + (d.message || d.code)));
+          /* 发送成功才清空输入框（用户 2026-11-28 要求）：
+             · 只在内容取自输入框时清 —— 常用弹幕/表情是另一条路，别把用户正在写的字冲掉；
+             · 失败时保留原文，用户可以直接重试，不用重打一遍；
+             · 清空后把焦点留在输入框，方便连着发。 */
+          if (d && d.code === 0 && fromInput && input) {
+            input.value = '';
+            try { input.focus(); } catch (e) { /* 忽略 */ }
+          }
           return d;
         })
         .catch(function () { setResult('发送失败，请重试'); })
@@ -7941,6 +7977,7 @@
     });
     el.player.addEventListener('volumechange', function () {
       el.ctrlVol.value = el.player.muted ? 0 : el.player.volume;
+      volPersist();          // 存档按板块走，刷新后接着上次的音量
     });
     el.player.addEventListener('loadedmetadata', function () {
       if (isFinite(el.player.duration)) el.ctrlDur.textContent = fmtClock(el.player.duration);
@@ -8509,6 +8546,14 @@
     state.all = data.programs || [];
     state.meta = data.meta || {};
     state.muted = state.mutedDefault;
+    /* 这个板块上次的音量/静音优先于「默认静音」：刷新页面（或切走再切回来）不该
+       把用户拖好的音量打回默认。没有存档才用默认值 —— 首次进入的行为不变。 */
+    var sv = volSaved();
+    if (sv) {
+      state.muted = sv.muted;
+      if (el.player && el.player.volume !== sv.v) el.player.volume = sv.v;
+    }
+    volReady = true;
     // 调试出口：排节目的坑（换段漂移、豁免失效……）全在这些状态里，光看界面看不出来。
     // 只读地看一眼（不要从外部改），省得每次都靠猜。
     window.__STATE = state;
@@ -9606,6 +9651,7 @@
   var UPD_KEY = 'xl_update_snooze';
   var updInfo = null;
   var updBusy = false;
+  var updBusyAt = 0;         // 「立即更新」卡住的时间戳，见 updDownload 的超时自愈
 
   function updSnooze(v) {
     try {
@@ -9759,7 +9805,10 @@
     /* force=true 只用于用户主动点「检查更新 / 更新」：
        「稍后」「24 小时内」「永久」抑制的是启动时的**自动弹出**，不拦手动请求。 */
     if (!d || !d.available) return;
-    if (updBusy) return;
+    /* 忙碌中不重复弹（会打断正在下载的进度）；但忙碌超过 2 分钟就当它已经失效 ——
+       否则一次下载异常会把「更新」这条路永久堵死（按钮点了没反应）。 */
+    if (updBusy && Date.now() - updBusyAt < 120000) return;
+    if (updBusy) updBusy = false;
     if (!force && (updSuppressed() || updDismissedInSession(d.latest))) return;
     var m = document.getElementById('upd-mask');
     if (!m) return;
@@ -9773,12 +9822,15 @@
     updRenderAnnounce(d);
     var st = document.getElementById('upd-state');
     if (st) st.textContent = '';
+    var pg = document.getElementById('upd-page');
+    if (pg) pg.hidden = true;         // 新一轮提示：先把上一轮的「打开下载页」收起来
     m.hidden = false;
   }
 
   function updCheck(manual) {
-    if (updBusy) return Promise.resolve(null);
+    if (updBusy && Date.now() - updBusyAt < 120000) return Promise.resolve(null);
     updBusy = true;
+    updBusyAt = Date.now();
     if (manual) updSetState('正在检查更新…');
     return fetch('/api/update/check').then(function (r) { return r.json(); }).then(function (d) {
       updBusy = false;
@@ -9809,8 +9861,16 @@
   }
 
   function updDownload() {
-    if (!updInfo || updBusy) return;
+    /* ⚠️ 两个「按钮点了没反应」的成因（用户 2026-11-28 反馈「更新按钮无法点击」）：
+       ① 上一次下载失败后 updBusy 卡在 true（例如状态轮询那个 fetch 挂了），
+          后续点击全部走这里的第一行直接 return —— 看起来就是按钮坏了；
+       ② 下载本身挂了（证书校验失败等），失败文案里写着「可打开下载页手动更新」，
+          而弹窗里根本没有那个入口，用户只能自己去翻 Release 页。
+       所以：忙碌超 2 分钟视为失效可重试，失败时把「打开下载页」按钮亮出来。 */
+    if (!updInfo) return;
+    if (updBusy && Date.now() - updBusyAt < 120000) return;
     updBusy = true;
+    updBusyAt = Date.now();
     var s = document.getElementById('upd-state');
     if (s) s.textContent = '正在下载 v' + updInfo.latest + '…';
     fetch('/api/update/download', {
@@ -9819,9 +9879,7 @@
                             size: updInfo.size, sha256: updInfo.sha256})
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (!d.ok) {
-        updBusy = false;
-        if (s) s.textContent = '下载失败：' + (d.error || '未知错误')
-          + '。可打开下载页手动更新。';
+        updFail('下载失败：' + (d.error || '未知错误'));
         return;
       }
       var t0 = Date.now();
@@ -9834,33 +9892,38 @@
             if (s) s.textContent = '下载完成，正在替换并重启…';
             fetch('/api/update/apply', {method: 'POST'}).then(function (r) { return r.json(); })
               .then(function (a) {
-                if (!a.ok) {
-                  updBusy = false;
-                  if (s) s.textContent = '无法自动替换：' + (a.error || '未知错误')
-                    + '。请打开下载页手动更新。';
-                }
+                if (!a.ok) updFail('无法自动替换：' + (a.error || '未知错误'));
               }).catch(function () {
-                updBusy = false;
-                if (s) s.textContent = '替换失败，请打开下载页手动更新。';
+                updFail('替换失败');
               });
           } else if (st.stage === 'error' || st.stage === 'applying') {
             clearInterval(timer);
-            updBusy = false;
-            if (s) s.textContent = st.stage === 'error'
-              ? ('下载失败：' + (st.error || '未知错误') + '。请打开下载页手动更新。')
-              : '正在替换并重启…';
+            if (st.stage === 'error') {
+              updFail('下载失败：' + (st.error || '未知错误'));
+            } else {
+              updBusy = false;
+              if (s) s.textContent = '正在替换并重启…';
+            }
           }
           if (Date.now() - t0 > 600000) {
             clearInterval(timer);
-            updBusy = false;
-            if (s) s.textContent = '下载超时，请打开下载页手动更新。';
+            updFail('下载超时');
           }
         }).catch(function () { /* 服务可能在替换时退出，忽略 */ });
       }, 1000);
     }).catch(function () {
-      updBusy = false;
-      if (s) s.textContent = '下载失败：网络不可达。可打开下载页手动更新。';
+      updFail('下载失败：网络不可达');
     });
+  }
+
+  /* 自动更新走不通（证书校验失败 / 替换失败 / 网络不通）：把「打开下载页」摆到手边。
+     用户点它就用浏览器打开 Release 页，不再需要自己去搜链接。 */
+  function updFail(msg) {
+    updBusy = false;
+    var s = document.getElementById('upd-state');
+    if (s) s.textContent = msg + '。可以点「打开下载页」自己下载，替换掉现在的 EXE 即可。';
+    var pg = document.getElementById('upd-page');
+    if (pg) pg.hidden = false;
   }
 
   /* ---------------- 反馈与错误上报 ----------------
@@ -10187,6 +10250,12 @@
     updFillVersion();
     var go = document.getElementById('upd-go');
     if (go) go.addEventListener('click', updDownload);
+    /* 自动更新失败时的出口：直接开 Release 页，省得用户自己去翻链接 */
+    var pg = document.getElementById('upd-page');
+    if (pg) pg.addEventListener('click', function () {
+      var u = (updInfo && updInfo.page) || 'https://github.com/DcC176/replay-radio/releases/latest';
+      try { window.open(u, '_blank', 'noopener'); } catch (e) { location.href = u; }
+    });
     [[('upd-later'), 0], [('upd-24h'), 24 * 3600 * 1000]]
       .forEach(function (pair) {
         var b = document.getElementById(pair[0]);
@@ -12680,9 +12749,12 @@
 
   function mfExtraItem(s) {
     var on = multiFollowOn[s.mid] ? ' on' : '';
+    /* 上游偶尔只给 mid（房间刚开播 / 风控降级），昵称和头像可能一起空着。
+       名字与头像占位都走同一个 showName，别再出现「有名字的行、头像是问号」的错位。 */
+    var showName = s.uname || s.name || s.mid || '';
     var img = s.face
-      ? faceHtml(s.face, 'mf-face', s.uname || s.name)
-      : '<span class="mf-face mf-noface">' + esc(String(s.uname || s.name || '?').charAt(0)) + '</span>';
+      ? faceHtml(s.face, 'mf-face', showName)
+      : '<span class="mf-face mf-noface">' + esc(String(showName || '?').charAt(0)) + '</span>';
     return '<div class="mf-item' + on + '" data-mid="' + esc(s.mid) + '">' + img
       + '<div class="mf-meta"><div class="mf-name"><span class="mf-nm">'
       + esc(s.uname || s.name || s.mid) + '</span>'
@@ -14755,17 +14827,44 @@
       + ' data-ph="' + esc(ch) + '" data-phcls="' + esc(ph) + '">';
   }
 
-  /* 给 root 里所有由 faceHtml 生成的 <img> 绑失败兜底（换成首字母占位，不留破图图标）。 */
+  /* 给 root 里所有由 faceHtml 生成的 <img> 绑失败兜底（换成首字母占位，不留破图图标）。
+
+     ⚠️ 两类失效都会让头像「偶尔凭空消失」（用户 2026-11-28 反馈），这里一并处理：
+     ① **事件竞态**：图片可能在 bindFaceFallback 之前就已经失败（从缓存直接失败、
+        /api/img 返回 502），error 事件早结束了，再挂监听永远等不到 → 先查
+        `complete && naturalWidth === 0`，已经失败的也走同一条重试链路。
+     ② **一次失败就定死**：上游图床偶发抽风（CDN 抖动 / 本机代理掉了）不该直接
+        降级成字母块。先带 `_r=` 重新请求两次（1.2s / 3s），仍失败才换占位。
+     重试用的 `_r` 只是给浏览器换一个缓存键：/api/img 只认 `u` 参数。 */
   function bindFaceFallback(root) {
     if (!root) return;
-    Array.prototype.forEach.call(root.querySelectorAll('img[data-phcls]'), function (im) {
-      im.addEventListener('error', function () {
-        var sp = document.createElement('span');
-        sp.className = im.getAttribute('data-phcls');
-        sp.textContent = im.getAttribute('data-ph') || '?';
-        if (im.parentNode) im.parentNode.replaceChild(sp, im);
-      });
-    });
+    function fallback(im) {
+      var sp = document.createElement('span');
+      sp.className = im.getAttribute('data-phcls');
+      sp.textContent = im.getAttribute('data-ph') || '?';
+      if (im.parentNode) im.parentNode.replaceChild(sp, im);
+    }
+    function watch(im) {
+      if (!im || im.getAttribute('data-phwatch')) return;   // 同一张图只挂一次
+      im.setAttribute('data-phwatch', '1');
+      var left = 2;
+      function onErr() {
+        if (!im.parentNode) return;
+        if (left <= 0) { fallback(im); return; }
+        var wait = left === 2 ? 1200 : 3000;
+        setTimeout(function () {
+          if (!im.parentNode) return;
+          var u = im.getAttribute('src') || '';
+          if (!u) { fallback(im); return; }
+          left -= 1;
+          im.setAttribute('src', u + (u.indexOf('?') >= 0 ? '&' : '?') + '_r=' + left);
+        }, wait);
+      }
+      im.addEventListener('error', onErr);
+      // 挂监听时已经失败过（没有 error 可等了）：直接进入重试，别停在破图/空圈上
+      if (im.complete && im.naturalWidth === 0) onErr();
+    }
+    Array.prototype.forEach.call(root.querySelectorAll('img[data-phcls]'), watch);
   }
 
   function renderDynamic() {

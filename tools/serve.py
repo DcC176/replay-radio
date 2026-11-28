@@ -1163,26 +1163,67 @@ def sessdata():
 DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def urlopen(req, timeout):
+def _ssl_ctx():
+    """带 CA 的 TLS 上下文：系统证书库 + certifi。
+
+    打包版里如果 `SSL_CERT_FILE` 之类被指到一个不存在的路径，系统库可能一个 CA 都
+    加载不到，于是所有 HTTPS 都报 `unable to get local issuer certificate`。
+    补一层 certifi 作为兜底（有系统证书时是叠加，不会变弱）。
+    """
+    try:
+        ctx = ssl.create_default_context()
+    except Exception:
+        return None
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception:
+        pass
+    return ctx
+
+
+def _opener(ctx):
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                       urllib.request.HTTPSHandler(context=ctx))
+
+
+def _ssl_failed(e):
+    """异常是不是证书链校验失败（而不是连不上/超时）。"""
+    if isinstance(e, ssl.SSLCertVerificationError):
+        return True
+    s = str(e).upper()
+    return "CERTIFICATE_VERIFY_FAILED" in s or "CERTIFICATE VERIFY FAILED" in s
+
+
+def urlopen(req, timeout, ctx=None):
     """发请求：先直连，直连失败再退回默认 opener（走系统 / 环境代理）。
 
     顺序不能反：真正的故障场景正是「代理配置还在，但代理进程没运行」——
     2026-09-27 实测本机注册表代理 127.0.0.1:7897 没监听时，图片与播放接口
     连续 4.5 小时全部 502。只信任 urllib 的代理回落是不够的。
     HTTPError 是上游真的回了响应（如 412 风控），不是通道问题，不重试。
+
+    `ctx` 传 TLS 上下文时按它校验（更新下载用，能带上 certifi 的 CA）。
     """
+    if ctx is None:
+        try:
+            return DIRECT_OPENER.open(req, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise
+        except Exception:
+            return urllib.request.urlopen(req, timeout=timeout)
     try:
-        return DIRECT_OPENER.open(req, timeout=timeout)
+        return _opener(ctx).open(req, timeout=timeout)
     except urllib.error.HTTPError:
         raise
     except Exception:
-        return urllib.request.urlopen(req, timeout=timeout)
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
 
 
 # ---------------------------------------------------------------- 版本更新
 # 检查只请求 GitHub Releases API（失败再退官网 version.json）；下载与替换 EXE
 # 全部由用户点了「立即更新」之后才发生 —— 启动时绝不自动下载、安装或重启。
-APP_VERSION = "1.9.38"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
+APP_VERSION = "1.9.39"     # 与 build_exe.py:APP_VERSION / site/index.html:VERSION 同步
 UPDATE_REPO = "DcC176/replay-radio"
 UPDATE_API = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
 UPDATE_LIST_API = "https://api.github.com/repos/%s/releases?per_page=20" % UPDATE_REPO
@@ -1208,7 +1249,7 @@ def _ver_tuple(s):
 def _update_fetch_json(url, timeout=UPDATE_TIMEOUT):
     req = urllib.request.Request(url, headers={
         "User-Agent": UA, "Accept": "application/vnd.github+json"})
-    with urlopen(req, timeout=timeout) as r:
+    with urlopen(req, timeout=timeout, ctx=_ssl_ctx()) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
@@ -1323,7 +1364,27 @@ def _update_download(info):
         req = urllib.request.Request(url, headers={"User-Agent": UA})
         total = int(info.get("size") or 0)
         got = 0
-        with urlopen(req, timeout=120) as r, open(target + ".part", "wb") as f:
+
+        def open_stream():
+            """先按证书校验；校验失败且这次有 sha256 可核对时，才放宽重试一次。
+
+            ⚠️ 2026-11-28 用户截图：`CERTIFICATE VERIFY FAILED / unable to get local
+               issuer certificate` —— 证书链校验不过（打包版 CA 缺失、或本机代理
+               中间人证书未被信任），结果更新永远下载失败，只能手动去 Release 页。
+               这里退到不校验通道 **只保证「能下到字节」**：完整性与真伪仍由后面的
+               sha256 比对把关，篡改过的包会在那一步被拒。
+               没有 sha256 就不放宽 —— 无法核对的包宁可不装。
+            """
+            try:
+                return urlopen(req, timeout=120, ctx=_ssl_ctx())
+            except Exception as e:
+                if not info.get("sha256") or not _ssl_failed(e):
+                    raise
+                print("[update] 证书校验失败，改用不校验通道重试（有 sha256 兜底）：%s"
+                      % str(e)[:120])
+                return urlopen(req, timeout=120, ctx=ssl._create_unverified_context())
+
+        with open_stream() as r, open(target + ".part", "wb") as f:
             while True:
                 chunk = r.read(65536)
                 if not chunk:
@@ -4668,13 +4729,24 @@ def api_img(raw):
 
     # 微博图床（sinaimg.cn）不认 B 站 Referer，按域名换一个
     ref = "https://weibo.com/" if "sinaimg.cn" in target else REFERER
-    try:
-        # 没读完（超长响应）时上下文管理器自己会把连接丢掉，不用额外处理
-        with cached_get(target, {"User-Agent": UA, "Referer": ref,
-                                 "Accept": "image/*,*/*"}, 20) as r:
-            ct = r.headers.get("Content-Type") or "image/jpeg"
-            body = r.read(MAX_PROXY_BYTES)
-    except Exception:
+    # 上游偶发抖动（CDN 边缘节点 5xx / 连接被掐）不该让页面直接把头像降级成字母块，
+    # 这里重试一次；仍失败才 502，由前端再做两次带缓存键的重取（见 app.js:bindFaceFallback）。
+    ct, body = "", b""
+    last = None
+    for attempt in range(2):
+        try:
+            # 没读完（超长响应）时上下文管理器自己会把连接丢掉，不用额外处理
+            with cached_get(target, {"User-Agent": UA, "Referer": ref,
+                                     "Accept": "image/*,*/*"}, 20) as r:
+                ct = r.headers.get("Content-Type") or "image/jpeg"
+                body = r.read(MAX_PROXY_BYTES)
+            last = None
+            break
+        except Exception as e:
+            last = e
+            if attempt == 0:
+                time.sleep(0.35)
+    if last is not None:
         return 502, None, None
 
     # 上游给什么类型就回什么类型的话，一个返回 text/html 的目标会在**本机源**上
